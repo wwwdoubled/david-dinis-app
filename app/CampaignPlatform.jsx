@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.3';
-const APP_BUILD_DATE = '2026-05-05T19:30';
+const APP_VERSION = '2.9.4';
+const APP_BUILD_DATE = '2026-05-05T19:50';
 const APP_CHANGELOG = [
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
@@ -2396,46 +2396,6 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaignsLoaded, periodsLoaded, memoryLoaded]);
 
-  // ─── De-duplicate "Importadas" periods and link orphan campaigns.
-  // Runs after cloud sync so we don't create more duplicates.
-  useEffect(() => {
-    if (!cloudDataLoaded) return;
-
-    // De-duplicate "Importadas": keep the most recent, delete the rest
-    const importadas = periodsRef.current.filter(p => p.name === 'Importadas');
-    if (importadas.length > 1) {
-      importadas.sort((a, b) => {
-        const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
-        const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
-        return tb - ta; // most recent first
-      });
-      const [keep, ...duplicates] = importadas;
-      const dupIds = new Set(duplicates.map(p => p.id));
-      // Remove from state and IDB/cloud
-      setPeriods(ps => ps.filter(p => !dupIds.has(p.id)));
-      duplicates.forEach(p => {
-        idbDeletePeriod(p.id).catch(() => {});
-        if (supabase) supabase.from('periods').delete().eq('id', p.id).then(() => {});
-        // Re-assign any campaigns that pointed to duplicates → point to keeper
-        setCampaigns(cs => cs.map(c => dupIds.has(c.periodId) ? { ...c, periodId: keep.id } : c));
-      });
-    }
-
-    // Link any remaining orphan campaigns to an "Importadas" period
-    const orphans = campaignsRef.current.filter(c => !c.periodId);
-    if (orphans.length > 0) {
-      let importPeriod = periodsRef.current.find(p => p.name === 'Importadas');
-      if (!importPeriod) {
-        importPeriod = newPeriod({ name: 'Importadas', notes: 'Campanhas migradas da versão anterior. Move-as para campanhas novas conforme precisares.' });
-        idbPutPeriod(importPeriod).catch(err => console.warn('Period save failed:', err));
-        if (user && supabase) cloudUpsertPeriod({ ...importPeriod, user_id: user.id }, user.id).catch(() => {});
-        setPeriods(ps => [importPeriod, ...ps]);
-      }
-      const targetId = importPeriod.id;
-      setCampaigns(cs => cs.map(c => c.periodId ? c : { ...c, periodId: targetId }));
-    }
-  }, [cloudDataLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // ─── Cloud sync: load shared periods/campaigns from cloud, merge with local
   // and migrate any local-only items to the cloud once.
   const [cloudDataLoaded, setCloudDataLoaded] = useState(false);
@@ -2601,6 +2561,44 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     const interval = setInterval(refresh, 30000);
     return () => clearInterval(interval);
   }, [user, cloudDataLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ─── De-duplicate "Importadas" periods and link orphan campaigns.
+  // Declared AFTER cloudDataLoaded to avoid TDZ error.
+  useEffect(() => {
+    if (!cloudDataLoaded) return;
+
+    // De-duplicate "Importadas": keep the most recent, delete the rest
+    const importadas = periodsRef.current.filter(p => p.name === 'Importadas');
+    if (importadas.length > 1) {
+      importadas.sort((a, b) => {
+        const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        return tb - ta;
+      });
+      const [keep, ...duplicates] = importadas;
+      const dupIds = new Set(duplicates.map(p => p.id));
+      setPeriods(ps => ps.filter(p => !dupIds.has(p.id)));
+      duplicates.forEach(p => {
+        idbDeletePeriod(p.id).catch(() => {});
+        if (supabase) supabase.from('periods').delete().eq('id', p.id).then(() => {});
+      });
+      setCampaigns(cs => cs.map(c => dupIds.has(c.periodId) ? { ...c, periodId: keep.id } : c));
+    }
+
+    // Link any remaining orphan campaigns to an "Importadas" period
+    const orphans = campaignsRef.current.filter(c => !c.periodId);
+    if (orphans.length > 0) {
+      let importPeriod = periodsRef.current.find(p => p.name === 'Importadas');
+      if (!importPeriod) {
+        importPeriod = newPeriod({ name: 'Importadas', notes: 'Campanhas migradas da versão anterior. Move-as para campanhas novas conforme precisares.' });
+        idbPutPeriod(importPeriod).catch(() => {});
+        if (user && supabase) cloudUpsertPeriod({ ...importPeriod, user_id: user.id }, user.id).catch(() => {});
+        setPeriods(ps => [importPeriod, ...ps]);
+      }
+      const targetId = importPeriod.id;
+      setCampaigns(cs => cs.map(c => c.periodId ? c : { ...c, periodId: targetId }));
+    }
+  }, [cloudDataLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // defaultLayout: zones structure used as starting point for new campaigns. Persisted globally.
   const [defaultLayout, setDefaultLayout] = useState(() => {
