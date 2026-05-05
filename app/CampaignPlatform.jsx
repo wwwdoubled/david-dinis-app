@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.7.0';
-const APP_BUILD_DATE = '2026-05-04';
+const APP_VERSION = '2.8.0';
+const APP_BUILD_DATE = '2026-05-05T17:30';
 const APP_CHANGELOG = [
+  { version: '2.8.0', date: '2026-05-05', summary: 'Alterações de preços: comparação dupla entre períodos/campanhas do sistema, sem necessidade de upload de Excel' },
   { version: '2.7.0', date: '2026-05-04', summary: 'Cartazes, notificações de fim de campanha, email queue, indicador de versão' },
   { version: '2.6.0', date: '2026-05-04', summary: 'Painel de admin completo: utilizadores, atividade, configuração de menus' },
   { version: '2.5.0', date: '2026-05-04', summary: 'Campanhas planeadas (períodos), múltiplos Excels, memória de zonas' },
@@ -3503,7 +3504,9 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
 // ─────────────────────────────────────────────────────────────────────────
 function VersionFooter() {
   const [showChangelog, setShowChangelog] = useState(false);
-  const buildDate = new Date(APP_BUILD_DATE).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short' });
+  const buildDt = new Date(APP_BUILD_DATE);
+  const buildDate = buildDt.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: '2-digit' });
+  const buildTime = buildDt.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
 
   return (
     <>
@@ -3522,7 +3525,7 @@ function VersionFooter() {
         onMouseEnter={e => e.currentTarget.style.color = T.inkSoft}
         onMouseLeave={e => e.currentTarget.style.color = T.inkMute}
       >
-        v{APP_VERSION} · {buildDate}
+        v{APP_VERSION} · {buildDate} {buildTime}
       </button>
       {showChangelog && <ChangelogDialog onClose={() => setShowChangelog(false)} />}
     </>
