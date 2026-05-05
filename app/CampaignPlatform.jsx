@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.0';
-const APP_BUILD_DATE = '2026-05-05T18:15';
+const APP_VERSION = '2.9.1';
+const APP_BUILD_DATE = '2026-05-05T18:45';
 const APP_CHANGELOG = [
+  { version: '2.9.1', date: '2026-05-05', summary: 'Fix crítico: datas de campanha já não revertem — sincronização inicial usa estado atual em vez de closure stale' },
   { version: '2.9.0', date: '2026-05-05', summary: 'Correções: crash ZonePicker, notificações navegam para o período correto, reordenar campanhas persiste, aceitar/rejeitar sugestões em massa, sem confirm() nativos' },
   { version: '2.8.0', date: '2026-05-05', summary: 'Alterações de preços: comparação dupla entre períodos/campanhas do sistema, sem necessidade de upload de Excel' },
   { version: '2.7.0', date: '2026-05-04', summary: 'Cartazes, notificações de fim de campanha, email queue, indicador de versão' },
@@ -2512,9 +2513,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
       // 7. MERGE strategy (not replace): take union of local + cloud,
       // preferring the more recently updated version of each item.
-      // This guarantees we never lose local data even if cloud sync fails.
-      const mergedPeriods = mergePeriods(periods, finalCloudPeriods);
-      const mergedCampaigns = mergeCampaigns(campaigns, finalCloudCampaigns);
+      // Use refs (not closure values) so edits made while the async sync was running are not lost.
+      const mergedPeriods = mergePeriods(periodsRef.current, finalCloudPeriods);
+      const mergedCampaigns = mergeCampaigns(campaignsRef.current, finalCloudCampaigns);
 
       console.log(`[cloud-sync] merged result: ${mergedPeriods.length} periods, ${mergedCampaigns.length} campaigns`);
 
