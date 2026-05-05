@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.8.0';
-const APP_BUILD_DATE = '2026-05-05T17:30';
+const APP_VERSION = '2.9.0';
+const APP_BUILD_DATE = '2026-05-05T18:15';
 const APP_CHANGELOG = [
+  { version: '2.9.0', date: '2026-05-05', summary: 'Correções: crash ZonePicker, notificações navegam para o período correto, reordenar campanhas persiste, aceitar/rejeitar sugestões em massa, sem confirm() nativos' },
   { version: '2.8.0', date: '2026-05-05', summary: 'Alterações de preços: comparação dupla entre períodos/campanhas do sistema, sem necessidade de upload de Excel' },
   { version: '2.7.0', date: '2026-05-04', summary: 'Cartazes, notificações de fim de campanha, email queue, indicador de versão' },
   { version: '2.6.0', date: '2026-05-04', summary: 'Painel de admin completo: utilizadores, atividade, configuração de menus' },
@@ -1236,7 +1237,29 @@ function mergeCampaigns(localList, cloudList) {
       }
     }
   }
-  return Array.from(map.values());
+  const merged = Array.from(map.values());
+  // Sort within each period by sortOrder if available, preserving relative order otherwise
+  const byPeriod = new Map();
+  const noPeriod = [];
+  for (const c of merged) {
+    if (c.periodId) {
+      if (!byPeriod.has(c.periodId)) byPeriod.set(c.periodId, []);
+      byPeriod.get(c.periodId).push(c);
+    } else {
+      noPeriod.push(c);
+    }
+  }
+  const sorted = [];
+  for (const [, list] of byPeriod) {
+    list.sort((a, b) => {
+      const sa = a.sortOrder ?? 9999;
+      const sb = b.sortOrder ?? 9999;
+      return sa !== sb ? sa - sb : (a.uploaded || 0) - (b.uploaded || 0);
+    });
+    sorted.push(...list);
+  }
+  sorted.push(...noPeriod);
+  return sorted;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2984,35 +3007,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     const conflicts = incomingCampaigns.filter(c => existingKeys.has(c.key));
 
     if (conflicts.length > 0) {
-      const confirmed = confirm(
-        `${conflicts.length} ${conflicts.length === 1 ? 'campanha já existe' : 'campanhas já existem'} na sessão atual:\n\n` +
-        conflicts.map(c => `• ${c.name}`).join('\n') +
-        `\n\nQueres SUBSTITUIR pelas versões importadas?\n(Cancelar = manter as atuais e adicionar só as novas)`
-      );
-      if (confirmed) {
-        // Replace existing campaigns with same key
-        setCampaigns(prev => {
-          const filtered = prev.filter(c => !incomingCampaigns.some(ic => ic.key === c.key));
-          return [...incomingCampaigns, ...filtered];
-        });
-      } else {
-        // Add only non-conflicting
-        const newOnly = incomingCampaigns.filter(c => !existingKeys.has(c.key));
-        setCampaigns(prev => [...newOnly, ...prev]);
-      }
+      // Replace: keep incoming (newer) version for conflicts
+      setCampaigns(prev => {
+        const filtered = prev.filter(c => !incomingCampaigns.some(ic => ic.key === c.key));
+        return [...incomingCampaigns, ...filtered];
+      });
+      const names = conflicts.map(c => c.name).join(', ');
+      setMigrationStatus({ migrated: conflicts.length, note: `Campanhas substituídas: ${names}` });
+      setTimeout(() => setMigrationStatus(null), 6000);
     } else {
       setCampaigns(prev => [...incomingCampaigns, ...prev]);
     }
 
     // Optionally restore default layout (zones structure)
     if (payload.defaultLayout && Array.isArray(payload.defaultLayout) && payload.defaultLayout.length) {
-      const restoreLayout = confirm(
-        'O ficheiro também contém a estrutura de zonas/móveis. Queres substituir a tua configuração atual de zonas por essa?\n\n' +
-        '(Cancelar = manter a estrutura de zonas atual; campanhas são importadas na mesma)'
-      );
-      if (restoreLayout) {
-        setDefaultLayout(layoutOnly(payload.defaultLayout));
-      }
+      setDefaultLayout(layoutOnly(payload.defaultLayout));
     }
 
     // Optionally restore notes
@@ -3128,7 +3137,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               {migrationStatus.error ? (
                 <span><strong>Aviso de sincronização.</strong> {migrationStatus.error}</span>
               ) : (
-                <span><strong>Migração concluída.</strong> {migrationStatus.migrated} {migrationStatus.migrated === 1 ? 'item enviado' : 'itens enviados'} para a cloud. Os teus colegas já vão ver tudo.</span>
+                <span>{migrationStatus.note
+                  ? migrationStatus.note
+                  : <><strong>Migração concluída.</strong> {migrationStatus.migrated} {migrationStatus.migrated === 1 ? 'item enviado' : 'itens enviados'} para a cloud. Os teus colegas já vão ver tudo.</>
+                }</span>
               )}
               <button onClick={() => setMigrationStatus(null)} style={{
                 marginLeft: 'auto', padding: 4, background: 'transparent',
@@ -3144,8 +3156,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               onOpenPanel={() => setNotificationPanelOpen(true)}
               onDismiss={handleDismissNotification}
               onJumpToPeriod={(id) => {
+                storeSet('campaigns.selectedPeriodId', id);
                 setView('campaigns');
-                // The CampaignsView will pick up the period via storage in the next render cycle if needed
               }}
             />
           )}
@@ -3288,6 +3300,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           onClose={() => setNotificationPanelOpen(false)}
           onDismiss={handleDismissNotification}
           onJumpToPeriod={(id) => {
+            storeSet('campaigns.selectedPeriodId', id);
             setNotificationPanelOpen(false);
             setView('campaigns');
           }}
@@ -4194,9 +4207,22 @@ function CampaignsView({
       const idxA = scopedIdxs[posInScoped];
       const idxB = scopedIdxs[targetPos];
       [result[idxA], result[idxB]] = [result[idxB], result[idxA]];
+      // Stamp sortOrder on all campaigns in this period so cloud sync preserves order
+      scopedIdxs.forEach((globalIdx, pos) => {
+        result[globalIdx] = { ...result[globalIdx], sortOrder: pos, updatedAt: new Date().toISOString() };
+      });
+      // Persist immediately (don't wait for 30s poll)
+      if (user && supabase) {
+        setTimeout(() => {
+          scopedIdxs.forEach((_, pos) => {
+            const c = result[scopedIdxs[pos]];
+            cloudUpsertCampaign({ ...c, user_id: c.user_id || user.id }, user.id).catch(() => {});
+          });
+        }, 0);
+      }
       return result;
     });
-  }, [selectedPeriodId]);
+  }, [selectedPeriodId, user]);
 
   // Rename a campaign
   const renameCampaign = useCallback((campaignId, newName) => {
@@ -6401,16 +6427,16 @@ const ZonePicker = React.memo(function ZonePicker({ product, floors, primaryZone
             flex: 1, padding: '4px 8px', fontSize: 11, textAlign: 'left',
             background: p.assigned ? '#fff' : T.bgEl,
             color: p.assigned ? T.ink : T.inkMute,
-            border: `1px solid ${p.assigned ? primaryZone.color : T.line}`,
-            borderLeft: p.assigned ? `3px solid ${primaryZone.color}` : `1px solid ${T.line}`,
+            border: `1px solid ${(p.assigned && primaryZone) ? primaryZone.color : T.line}`,
+            borderLeft: (p.assigned && primaryZone) ? `3px solid ${primaryZone.color}` : `1px solid ${T.line}`,
             borderRadius: 3, cursor: 'pointer',
-            fontWeight: p.assigned ? 500 : 400,
+            fontWeight: (p.assigned && primaryZone) ? 500 : 400,
             maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             fontFamily: 'inherit',
           }}
-          title={p.assigned ? `${primaryZone.floorName} › ${primaryZone.zoneName} — clica para alterar` : 'Clica para atribuir'}
+          title={(p.assigned && primaryZone) ? `${primaryZone.floorName} › ${primaryZone.zoneName} — clica para alterar` : 'Clica para atribuir'}
         >
-          {p.assigned ? primaryZone.zoneName : '— Atribuir móvel'}
+          {(p.assigned && primaryZone) ? primaryZone.zoneName : '— Atribuir móvel'}
         </button>
         {p.zones.length > 1 && (
           <span title={p.zones.slice(1).map(z => `${z.floorName} › ${z.zoneName}`).join('\n')} style={{
@@ -11935,6 +11961,18 @@ function PreviewStep({ state, floors, campaign, stockRowsPO2, stockRowsPO3, stoc
     });
   };
 
+  const rejectZone = (zoneKey) => {
+    const list = suggestions.get(zoneKey) || [];
+    setRejected(m => { const next = new Map(m); next.set(zoneKey, new Set(list.map(s => s.ean))); return next; });
+  };
+  const acceptZone = (zoneKey) => {
+    setRejected(m => { const next = new Map(m); next.set(zoneKey, new Set()); return next; });
+  };
+  const rejectAll = () => {
+    setRejected(new Map(Array.from(suggestions.entries()).map(([k, list]) => [k, new Set(list.map(s => s.ean))])));
+  };
+  const acceptAll = () => setRejected(new Map());
+
   const acceptedMap = useMemo(() => {
     const map = new Map();
     for (const [zoneKey, list] of suggestions) {
@@ -11969,8 +12007,16 @@ function PreviewStep({ state, floors, campaign, stockRowsPO2, stockRowsPO3, stoc
 
   return (
     <div>
-      <div style={{ fontSize: 13, color: T.inkSoft, lineHeight: 1.5, marginBottom: 16 }}>
-        <strong style={{ color: T.ink }}>{totalAccepted} de {totalSuggested}</strong> sugestões a aplicar em {suggestions.size} {suggestions.size === 1 ? 'móvel' : 'móveis'}. Clica numa linha para a rejeitar — clica de novo para reaceitar.
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, color: T.inkSoft, lineHeight: 1.5, flex: 1 }}>
+          <strong style={{ color: T.ink }}>{totalAccepted} de {totalSuggested}</strong> sugestões em {suggestions.size} {suggestions.size === 1 ? 'móvel' : 'móveis'}.
+        </div>
+        <button onClick={acceptAll} style={{ padding: '4px 10px', fontSize: 11, fontWeight: 500, borderRadius: 4, border: `1px solid ${T.green}`, background: 'transparent', color: T.green, cursor: 'pointer' }}>
+          ✓ Aceitar todas
+        </button>
+        <button onClick={rejectAll} style={{ padding: '4px 10px', fontSize: 11, fontWeight: 500, borderRadius: 4, border: `1px solid ${T.red}`, background: 'transparent', color: T.red, cursor: 'pointer' }}>
+          ✕ Rejeitar todas
+        </button>
       </div>
 
       {Array.from(suggestions.entries()).map(([zoneKey, list]) => {
@@ -11989,6 +12035,8 @@ function PreviewStep({ state, floors, campaign, stockRowsPO2, stockRowsPO3, stoc
               <span style={{ marginLeft: 'auto', fontSize: 11, color: T.inkSoft }}>
                 {acceptedCount} / {list.length}
               </span>
+              <button onClick={() => acceptZone(zoneKey)} title="Aceitar todas neste móvel" style={{ padding: '2px 7px', fontSize: 10, borderRadius: 3, border: `1px solid ${T.green}`, background: 'transparent', color: T.green, cursor: 'pointer' }}>✓</button>
+              <button onClick={() => rejectZone(zoneKey)} title="Rejeitar todas neste móvel" style={{ padding: '2px 7px', fontSize: 10, borderRadius: 3, border: `1px solid ${T.red}`, background: 'transparent', color: T.red, cursor: 'pointer' }}>✕</button>
             </div>
 
             {/* Header row */}
