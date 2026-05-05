@@ -425,10 +425,11 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.1';
-const APP_BUILD_DATE = '2026-05-05T18:45';
+const APP_VERSION = '2.9.2';
+const APP_BUILD_DATE = '2026-05-05T19:15';
 const APP_CHANGELOG = [
-  { version: '2.9.1', date: '2026-05-05', summary: 'Fix crítico: datas de campanha já não revertem — sincronização inicial usa estado atual em vez de closure stale' },
+  { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
+  { version: '2.9.1', date: '2026-05-05', summary: 'Fix: datas de campanha já não revertem — sincronização inicial usa estado atual em vez de closure stale' },
   { version: '2.9.0', date: '2026-05-05', summary: 'Correções: crash ZonePicker, notificações navegam para o período correto, reordenar campanhas persiste, aceitar/rejeitar sugestões em massa, sem confirm() nativos' },
   { version: '2.8.0', date: '2026-05-05', summary: 'Alterações de preços: comparação dupla entre períodos/campanhas do sistema, sem necessidade de upload de Excel' },
   { version: '2.7.0', date: '2026-05-04', summary: 'Cartazes, notificações de fim de campanha, email queue, indicador de versão' },
@@ -977,7 +978,10 @@ async function cloudFetchAllPeriods() {
     startDate: p.start_date,
     endDate: p.end_date,
     notes: p.notes || '',
-    statusOverride: p.status,
+    // Only set statusOverride for explicit user choices ('active'/'finished').
+    // 'planned' from the DB was written as a default fallback (bug), not an intentional override.
+    // Leaving it as null lets periodStatus() compute the correct status from the dates.
+    statusOverride: (p.status && p.status !== 'planned') ? p.status : null,
     has_posters: p.has_posters || false,
     hidden: p.hidden || false,
     user_id: p.user_id,
@@ -1001,7 +1005,7 @@ async function cloudUpsertPeriod(period, userId) {
     start_date: period.startDate || null,
     end_date: period.endDate || null,
     notes: period.notes || '',
-    status: period.statusOverride || 'planned',
+    status: period.statusOverride || null,
     has_posters: period.has_posters || false,
     hidden: period.hidden || false,
     updated_at: new Date().toISOString(),
