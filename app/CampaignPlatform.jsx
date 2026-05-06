@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.7';
-const APP_BUILD_DATE = '2026-05-06T01:10';
+const APP_VERSION = '2.9.8';
+const APP_BUILD_DATE = '2026-05-06T02:10';
 const APP_CHANGELOG = [
+  { version: '2.9.8', date: '2026-05-06', summary: 'Alterações: filtro por família, botão "Sem alterações" na barra de filtros, artigos sem alterações na tabela e no CSV' },
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
   { version: '2.9.1', date: '2026-05-05', summary: 'Fix: datas de campanha já não revertem — sincronização inicial usa estado atual em vez de closure stale' },
@@ -7055,6 +7056,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [filter, setFilter] = useStoredState('changes.filter', 'all');
   const [search, setSearch] = useStoredState('changes.search', '');
   const [filterAveiro, setFilterAveiro] = useStoredState('changes.filterAveiro', false);
+  const [filterFamily, setFilterFamily] = useStoredState('changes.filterFamily', '');
 
   // Load last uploaded snapshot from cloud (only relevant when source='upload')
   useEffect(() => {
@@ -7214,21 +7216,25 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     return { added, removed, changed, unchanged };
   }, [snapshot, compareWith, stockIndexPO2, stockIndexPO3]);
 
+  // All unique families across all diff categories
+  const allFamilies = useMemo(() => {
+    if (!diff) return [];
+    const fams = new Set();
+    [...diff.added, ...diff.changed, ...diff.removed, ...diff.unchanged].forEach(p => {
+      if (p.family) fams.add(p.family);
+    });
+    return Array.from(fams).sort();
+  }, [diff]);
+
   const filteredItems = useMemo(() => {
     if (!diff) return [];
     let items = [];
-    if (filter === 'all' || filter === 'added') {
-      items = items.concat(diff.added.map(p => ({ ...p, kind: 'added' })));
-    }
-    if (filter === 'all' || filter === 'changed') {
-      items = items.concat(diff.changed.map(p => ({ ...p, kind: 'changed' })));
-    }
-    if (filter === 'all' || filter === 'removed') {
-      items = items.concat(diff.removed.map(p => ({ ...p, kind: 'removed' })));
-    }
-    if (filterAveiro) {
-      items = items.filter(p => (p.stockPO3 || 0) > 0);
-    }
+    if (filter === 'all' || filter === 'added') items = items.concat(diff.added.map(p => ({ ...p, kind: 'added' })));
+    if (filter === 'all' || filter === 'changed') items = items.concat(diff.changed.map(p => ({ ...p, kind: 'changed' })));
+    if (filter === 'all' || filter === 'removed') items = items.concat(diff.removed.map(p => ({ ...p, kind: 'removed' })));
+    if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged.map(p => ({ ...p, kind: 'unchanged' })));
+    if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
+    if (filterFamily) items = items.filter(p => p.family === filterFamily);
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -7238,7 +7244,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
       );
     }
     return items;
-  }, [diff, filter, filterAveiro, search]);
+  }, [diff, filter, filterAveiro, filterFamily, search]);
 
   const exportDiff = () => {
     if (!diff) return;
@@ -7252,6 +7258,10 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     diff.added.forEach(p => lines.push(fmt(p, 'NOVO').join(';')));
     diff.changed.forEach(p => lines.push(fmt(p, 'ALTERADO').join(';')));
     diff.removed.forEach(p => lines.push(fmt(p, 'REMOVIDO').join(';')));
+    diff.unchanged.forEach(p => {
+      const total = (p.stockPO2 || 0) + (p.stockPO3 || 0);
+      lines.push(['SEM ALTERAÇÃO', p.ean, p.family, p.description, p.basePrice?.toFixed(2) ?? '', p.basePrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.stockPO2 || 0, p.stockPO3 || 0, total].join(';'));
+    });
     const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -7429,6 +7439,9 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               setFilter={setFilter}
               filterAveiro={filterAveiro}
               setFilterAveiro={setFilterAveiro}
+              filterFamily={filterFamily}
+              setFilterFamily={setFilterFamily}
+              allFamilies={allFamilies}
               search={search}
               setSearch={setSearch}
               filteredItems={filteredItems}
@@ -7443,18 +7456,18 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, search, setSearch, filteredItems, onClear, onExport, stockRowsPO3 }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, search, setSearch, filteredItems, onClear, onExport, stockRowsPO3 }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
   return (
     <div>
-      {/* Summary cards */}
+      {/* Summary cards — clickable to filter */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
         <SummaryCard label="Novos" value={diff.added.length} color={T.green} active={filter === 'added'} onClick={() => setFilter(filter === 'added' ? 'all' : 'added')} />
         <SummaryCard label="Alterados" value={diff.changed.length} color={T.orange} active={filter === 'changed'} onClick={() => setFilter(filter === 'changed' ? 'all' : 'changed')} />
         <SummaryCard label="Removidos" value={diff.removed.length} color={T.red} active={filter === 'removed'} onClick={() => setFilter(filter === 'removed' ? 'all' : 'removed')} />
-        <SummaryCard label="Sem alterações" value={diff.unchanged.length} color={T.inkMute} dimmed />
+        <SummaryCard label="Sem alterações" value={diff.unchanged.length} color={T.inkMute} active={filter === 'unchanged'} onClick={() => setFilter(filter === 'unchanged' ? 'all' : 'unchanged')} />
       </div>
 
       {/* Comparison summary bar */}
@@ -7512,6 +7525,7 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             { id: 'added', l: 'Novos' },
             { id: 'changed', l: 'Alterados' },
             { id: 'removed', l: 'Removidos' },
+            { id: 'unchanged', l: 'Sem alterações' },
           ].map(f => (
             <button key={f.id} onClick={() => setFilter(f.id)} style={{
               padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
@@ -7538,6 +7552,22 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             Aveiro
             {filterAveiro && <X size={10} />}
           </button>
+        )}
+        {allFamilies.length > 0 && (
+          <select
+            value={filterFamily}
+            onChange={e => setFilterFamily(e.target.value)}
+            style={{
+              padding: '6px 10px', fontSize: 11, borderRadius: 6,
+              border: `1px solid ${filterFamily ? T.accent : T.line}`,
+              background: filterFamily ? T.accentSoft : T.bgEl,
+              color: filterFamily ? T.accent : T.inkSoft,
+              cursor: 'pointer',
+            }}
+          >
+            <option value=''>Todas as famílias</option>
+            {allFamilies.map(f => <option key={f} value={f}>{f}</option>)}
+          </select>
         )}
         <div className="mono" style={{ marginLeft: 'auto', fontSize: 11, color: T.inkMute }}>
           {filteredItems.length} resultados
@@ -7617,11 +7647,13 @@ function ChangeRow({ item }) {
     added: { bg: T.green, label: 'NOVO', icon: Plus },
     removed: { bg: T.red, label: 'REMOVIDO', icon: Minus },
     changed: { bg: T.orange, label: 'ALTERADO', icon: ArrowRight },
+    unchanged: { bg: T.inkMute, label: 'SEM ALTER.', icon: null },
   };
-  const k = kindStyles[item.kind];
+  const k = kindStyles[item.kind] || kindStyles.unchanged;
+  const isUnchanged = item.kind === 'unchanged';
 
   return (
-    <tr style={{ borderBottom: `1px solid ${T.lineSoft}` }}>
+    <tr style={{ borderBottom: `1px solid ${T.lineSoft}`, opacity: isUnchanged ? 0.6 : 1 }}>
       <td style={ltdStyle}>
         <span style={{
           display: 'inline-flex', alignItems: 'center', gap: 4,
