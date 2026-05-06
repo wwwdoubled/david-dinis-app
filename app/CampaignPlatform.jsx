@@ -434,8 +434,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.7';
-const APP_BUILD_DATE = '2026-05-06T16:30';
+const APP_VERSION = '3.1.8';
+const APP_BUILD_DATE = '2026-05-06T17:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4433,9 +4433,15 @@ function CampaignsView({
       id: `s-${Date.now()}`,
       ref: String(product.ean || ''),
       name: String(product.description || ''),
+      family: String(product.family || ''),
+      subfamily: String(product.subfamily || ''),
+      basePrice: product.basePrice || '',
+      campaignPrice: product.campaignPrice || '',
+      discount: product.discount || 0,
       cartaz: 'A3 HORIZONTAL',
       state: 'pending',
       date: String(product.startDate || ''),
+      endDate: String(product.endDate || ''),
       campaign: '',
       observations: '',
       stockPO2: String(product.stockPO2 ?? ''),
@@ -5107,6 +5113,7 @@ function CampaignsView({
       ) : (
         <OutputPreview
           floors={combinedFloors}
+          activeCampaign={primaryCampaign ? { ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) } : null}
           stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
           stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
         />
@@ -7310,10 +7317,41 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
 // ─────────────────────────────────────────────────────────────────────────
 // Output Preview — print-friendly structured view (matches spreadsheet)
 // ─────────────────────────────────────────────────────────────────────────
-function OutputPreview({ floors, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
+function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
   // Build stock indexes once for EAN lookup
   const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
   const { index: idxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+
+  // Build EAN → product info index from the active campaign
+  const productIdx = useMemo(() => {
+    const map = new Map();
+    if (!activeCampaign) return map;
+    const cols = detectColumns(activeCampaign.headers || []);
+    if (!cols.ean) return map;
+    for (const r of (activeCampaign.rows || [])) {
+      const key = normalizeEAN(r[cols.ean]);
+      if (!key || map.has(key)) continue;
+      map.set(key, {
+        name: cols.description ? String(r[cols.description] ?? '').trim() : '',
+        family: cols.family ? String(r[cols.family] ?? '').trim() : '',
+        subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '').trim() : '',
+        basePrice: cols.basePrice ? parseNum(r[cols.basePrice]) : 0,
+        campaignPrice: cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0,
+        discount: cols.discount ? parseNum(r[cols.discount]) : 0,
+        startDate: cols.startDate ? r[cols.startDate] : '',
+        endDate: cols.endDate ? r[cols.endDate] : '',
+      });
+    }
+    return map;
+  }, [activeCampaign]);
+
+  const resolveField = (s, field) => {
+    if (s[field] !== '' && s[field] !== undefined && s[field] !== null) return s[field];
+    const key = normalizeEAN(s.ref);
+    if (!key) return '';
+    const info = productIdx.get(key);
+    return info ? (info[field] ?? '') : '';
+  };
 
   // Resolve PO2/PO3 for a slot: prefer stored value, fall back to live stock lookup by EAN
   const resolvePO2 = (s) => {
@@ -7325,6 +7363,13 @@ function OutputPreview({ floors, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsP
     if (s.stockPO3 !== '' && s.stockPO3 !== undefined && s.stockPO3 !== null) return s.stockPO3;
     const key = normalizeEAN(s.ref);
     return key ? (idxPO3.get(key) ?? '') : '';
+  };
+  const fmtPrice = (v) => (v && Number(v) > 0) ? `${Number(v).toFixed(2)}€` : '—';
+  const fmtDate = (v) => {
+    if (!v) return '—';
+    const d = v instanceof Date ? v : new Date(v);
+    if (isNaN(d)) return String(v);
+    return d.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: '2-digit' });
   };
 
   return (
@@ -7369,16 +7414,20 @@ function OutputPreview({ floors, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsP
                 <div style={{ background: floor.color, color: '#fff', padding: '6px 12px', fontSize: 11, fontWeight: 600, letterSpacing: '0.05em' }}>
                   {zone.name.toUpperCase()}
                 </div>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
                   <thead>
                     <tr style={{ background: T.lineSoft }}>
-                      <th style={ohStyle}>REF</th>
-                      <th style={ohStyle}>PRODUTO</th>
+                      <th style={ohStyle}>EAN</th>
+                      <th style={ohStyle}>DESCRIÇÃO</th>
+                      <th style={ohStyle}>FAMÍLIA</th>
+                      <th style={{ ...ohStyle, textAlign: 'right' }}>PVP BASE</th>
+                      <th style={{ ...ohStyle, textAlign: 'right' }}>PVP CAMP</th>
+                      <th style={{ ...ohStyle, textAlign: 'right' }}>DESC%</th>
+                      <th style={{ ...ohStyle, textAlign: 'center' }}>INÍCIO</th>
+                      <th style={{ ...ohStyle, textAlign: 'center' }}>FIM</th>
                       <th style={ohStyle}>CARTAZ</th>
                       <th style={ohStyle}>ESTADO</th>
-                      <th style={ohStyle}>DATA</th>
-                      <th style={ohStyle}>CAMPANHA</th>
-                      <th style={ohStyle}>OBSERVAÇÕES</th>
+                      <th style={ohStyle}>OBS</th>
                       <th style={{ ...ohStyle, background: T.cyan, textAlign: 'center' }}>PO2</th>
                       <th style={{ ...ohStyle, background: T.cyan, textAlign: 'center' }}>PO3</th>
                       <th style={{ ...ohStyle, background: T.yellow, textAlign: 'center' }}>GU</th>
@@ -7387,14 +7436,25 @@ function OutputPreview({ floors, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsP
                   <tbody>
                     {zone.slots.map(s => {
                       const stateOpt = STATES.find(o => o.id === s.state) || STATES[0];
+                      const name = resolveField(s, 'name') || '—';
+                      const family = [resolveField(s, 'family'), resolveField(s, 'subfamily')].filter(Boolean).join(' › ') || '—';
+                      const basePrice = resolveField(s, 'basePrice');
+                      const campPrice = resolveField(s, 'campaignPrice');
+                      const discount = resolveField(s, 'discount');
+                      const startDate = resolveField(s, 'startDate') || s.date;
+                      const endDate = resolveField(s, 'endDate');
                       return (
                         <tr key={s.id}>
                           <td style={{ ...otdStyle, background: T.cyan, fontFamily: 'Geist Mono' }}>{s.ref || '—'}</td>
-                          <td style={{ ...otdStyle, fontWeight: 500 }}>{s.name || '—'}</td>
+                          <td style={{ ...otdStyle, fontWeight: 500 }}>{name}</td>
+                          <td style={{ ...otdStyle, fontSize: 9, color: T.inkSoft }}>{family}</td>
+                          <td style={{ ...otdStyle, textAlign: 'right' }} className="mono">{fmtPrice(basePrice)}</td>
+                          <td style={{ ...otdStyle, textAlign: 'right', fontWeight: 500 }} className="mono">{fmtPrice(campPrice)}</td>
+                          <td style={{ ...otdStyle, textAlign: 'right', color: discount > 30 ? T.green : T.ink, fontWeight: discount > 0 ? 600 : 400 }} className="mono">{discount > 0 ? `-${Math.round(discount)}%` : '—'}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{fmtDate(startDate)}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{fmtDate(endDate)}</td>
                           <td style={otdStyle}>{s.cartaz}</td>
                           <td style={{ ...otdStyle, background: stateOpt.bg, color: stateOpt.fg, fontWeight: 600, textAlign: 'center' }}>{stateOpt.label}</td>
-                          <td style={otdStyle} className="mono">{s.date || '—'}</td>
-                          <td style={{ ...otdStyle, background: s.campaign ? T.blue : 'transparent', color: s.campaign ? '#fff' : T.ink, fontWeight: s.campaign ? 500 : 400 }}>{s.campaign || '—'}</td>
                           <td style={otdStyle}>{s.observations || '—'}</td>
                           <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO2(s) || '0'}</td>
                           <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO3(s) || '0'}</td>
