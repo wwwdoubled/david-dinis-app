@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.0.2';
-const APP_BUILD_DATE = '2026-05-06T06:00';
+const APP_VERSION = '3.0.3';
+const APP_BUILD_DATE = '2026-05-06T07:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -435,6 +435,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.0.3', date: '2026-05-06', summary: 'Plano/Saída: PO2 e PO3 preenchidos automaticamente por EAN; Saída usa lookup dinâmico de stock; auto-preenchimento também grava PO2/PO3' },
   { version: '3.0.2', date: '2026-05-06', summary: 'Fix: famílias excluídas aplicadas também no auto-preenchimento, listagem de zonas, alterações de preço e stock' },
   { version: '3.0.1', date: '2026-05-06', summary: 'Famílias excluídas globalmente (Produtos Editoriais + Serviços): configurável no admin' },
   { version: '3.0.0', date: '2026-05-06', summary: 'Fix: campanhas aparecem todas ao mesmo tempo — fetch de metadados separado das rows comprimidas; hydratação das rows em background por campanha' },
@@ -4447,6 +4448,10 @@ function CampaignsView({
 
   // Apply accepted suggestions to floors (creates slots)
   const handleApplySuggestions = useCallback((acceptedMap) => {
+    // Build PO2/PO3 indexes so we can populate stock fields in created slots
+    const { index: _idxPO2 } = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
+    const { index: _idxPO3 } = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
+
     setFloors(prev => prev.map(f => ({
       ...f,
       zones: f.zones.map(z => {
@@ -4454,17 +4459,23 @@ function CampaignsView({
         const accepted = acceptedMap.get(key);
         if (!accepted || accepted.length === 0) return z;
         const _cols = detectColumns(primaryCampaign.headers);
-        const newSlots = accepted.map(sg => ({
-          id: 's-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
-          ref: sg.product[_cols.ean] || sg.ean,
-          name: _cols.description ? String(sg.product[_cols.description] || '') : '',
-          family: _cols.family ? String(sg.product[_cols.family] || '') : '',
-          subfamily: _cols.subfamily ? String(sg.product[_cols.subfamily] || '') : '',
-          state: 'pending',
-          cartaz: 'A3 HORIZONTAL',
-          date: '', campaign: '', observations: '', stockPO2: '', stockPO3: '', pedidoGU: '', star: false,
-          notes: `auto: ${sg.reasons.join(', ') || 'auto-preenchido'}`,
-        }));
+        const newSlots = accepted.map(sg => {
+          const eanKey = normalizeEAN(sg.ean);
+          return {
+            id: 's-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+            ref: sg.product[_cols.ean] || sg.ean,
+            name: _cols.description ? String(sg.product[_cols.description] || '') : '',
+            family: _cols.family ? String(sg.product[_cols.family] || '') : '',
+            subfamily: _cols.subfamily ? String(sg.product[_cols.subfamily] || '') : '',
+            state: 'pending',
+            cartaz: 'A3 HORIZONTAL',
+            date: '', campaign: '', observations: '',
+            stockPO2: String(_idxPO2.get(eanKey) ?? ''),
+            stockPO3: String(_idxPO3.get(eanKey) ?? ''),
+            pedidoGU: '', star: false,
+            notes: `auto: ${sg.reasons.join(', ') || 'auto-preenchido'}`,
+          };
+        });
         return { ...z, slots: [...z.slots, ...newSlots] };
       }),
     })));
@@ -4479,7 +4490,7 @@ function CampaignsView({
       });
     }
     setAutoFillWizard(null);
-  }, [setFloors, primaryCampaign, user]);
+  }, [setFloors, primaryCampaign, user, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
 
   return (
     <div className="fade-up">
@@ -4819,6 +4830,8 @@ function CampaignsView({
               editZones={editZones}
               activeCampaign={primaryCampaign ? { ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) } : null}
               candidates={candidates}
+              stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
+              stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
               onAddZone={() => addZone(floor.id)}
               onRenameZone={(zid, n) => renameZone(floor.id, zid, n)}
               onDeleteZone={zid => deleteZone(floor.id, zid)}
@@ -4857,7 +4870,11 @@ function CampaignsView({
           </div>
         )
       ) : (
-        <OutputPreview floors={combinedFloors} />
+        <OutputPreview
+          floors={combinedFloors}
+          stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
+          stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
+        />
       )}
 
       {restoreInfo && (
@@ -6741,7 +6758,7 @@ function ColumnMappingPanel({ headers, autoCols, cols, overrides, onSetOverride,
 // ─────────────────────────────────────────────────────────────────────────
 // Floor Planner
 // ─────────────────────────────────────────────────────────────────────────
-function FloorPlanner({ floor, editZones, activeCampaign, candidates, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   return (
     <section>
       <div style={{
@@ -6771,6 +6788,8 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, onAddZone,
             editZones={editZones}
             activeCampaign={activeCampaign}
             candidates={candidates}
+            stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
+            stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
             onRename={n => onRenameZone(zone.id, n)}
             onDelete={() => onDeleteZone(zone.id)}
             onAddSlot={() => onAddSlot(zone.id)}
@@ -6787,7 +6806,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, onAddZone,
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -6855,6 +6874,8 @@ function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, onRenam
                   slot={slot}
                   activeCampaign={activeCampaign}
                   candidates={candidates}
+                  stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
+                  stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
                   onUpdate={p => onUpdateSlot(slot.id, p)}
                   onDelete={() => onDeleteSlot(slot.id)}
                 />
@@ -6884,9 +6905,26 @@ const ztdStyle = { padding: '2px 4px', borderBottom: `1px solid ${T.lineSoft}`, 
 // ─────────────────────────────────────────────────────────────────────────
 // Slot Row
 // ─────────────────────────────────────────────────────────────────────────
-function SlotRow({ slot, activeCampaign, candidates, onUpdate, onDelete }) {
+function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {}, onUpdate, onDelete }) {
   const [showSuggest, setShowSuggest] = useState(false);
   const stateOpt = STATES.find(s => s.id === slot.state) || STATES[0];
+
+  // Build stock indexes (memoised per stock data, not per slot)
+  const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
+  const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+
+  // Resolve PO2/PO3: use stored value if set, otherwise look up by EAN from stock index
+  const resolvedPO2 = useMemo(() => {
+    if (slot.stockPO2 !== '' && slot.stockPO2 !== undefined) return slot.stockPO2;
+    const key = normalizeEAN(slot.ref);
+    return key ? String(stockIdxPO2.get(key) ?? '') : '';
+  }, [slot.stockPO2, slot.ref, stockIdxPO2]);
+
+  const resolvedPO3 = useMemo(() => {
+    if (slot.stockPO3 !== '' && slot.stockPO3 !== undefined) return slot.stockPO3;
+    const key = normalizeEAN(slot.ref);
+    return key ? String(stockIdxPO3.get(key) ?? '') : '';
+  }, [slot.stockPO3, slot.ref, stockIdxPO3]);
 
   // If slot.name is empty but slot.ref is set, resolve description from activeCampaign by EAN
   const resolvedName = useMemo(() => {
@@ -6983,11 +7021,25 @@ function SlotRow({ slot, activeCampaign, candidates, onUpdate, onDelete }) {
       <td style={ztdStyle}>
         <input value={slot.observations} onChange={e => onUpdate({ observations: e.target.value })} className="row-input" placeholder="—" />
       </td>
-      <td style={{ ...ztdStyle, textAlign: 'center' }}>
-        <input value={slot.stockPO2} onChange={e => onUpdate({ stockPO2: e.target.value })} className="row-input mono" style={{ textAlign: 'center', fontSize: 11 }} />
+      <td style={{ ...ztdStyle, textAlign: 'center', background: resolvedPO2 && !slot.stockPO2 ? '#EAF5FB' : 'transparent' }}>
+        <input
+          value={slot.stockPO2}
+          onChange={e => onUpdate({ stockPO2: e.target.value })}
+          onFocus={e => { if (!slot.stockPO2 && resolvedPO2) onUpdate({ stockPO2: resolvedPO2 }); }}
+          placeholder={resolvedPO2 || '—'}
+          className="row-input mono"
+          style={{ textAlign: 'center', fontSize: 11, color: slot.stockPO2 ? T.ink : T.inkMute }}
+        />
       </td>
-      <td style={{ ...ztdStyle, textAlign: 'center' }}>
-        <input value={slot.stockPO3} onChange={e => onUpdate({ stockPO3: e.target.value })} className="row-input mono" style={{ textAlign: 'center', fontSize: 11 }} />
+      <td style={{ ...ztdStyle, textAlign: 'center', background: resolvedPO3 && !slot.stockPO3 ? '#EAF5FB' : 'transparent' }}>
+        <input
+          value={slot.stockPO3}
+          onChange={e => onUpdate({ stockPO3: e.target.value })}
+          onFocus={e => { if (!slot.stockPO3 && resolvedPO3) onUpdate({ stockPO3: resolvedPO3 }); }}
+          placeholder={resolvedPO3 || '—'}
+          className="row-input mono"
+          style={{ textAlign: 'center', fontSize: 11, color: slot.stockPO3 ? T.ink : T.inkMute }}
+        />
       </td>
       <td style={{ ...ztdStyle, textAlign: 'center', background: T.yellow }}>
         <input value={slot.pedidoGU} onChange={e => onUpdate({ pedidoGU: e.target.value })} className="row-input mono" style={{ textAlign: 'center', fontSize: 11, fontWeight: 600 }} />
@@ -7009,7 +7061,23 @@ function SlotRow({ slot, activeCampaign, candidates, onUpdate, onDelete }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Output Preview — print-friendly structured view (matches spreadsheet)
 // ─────────────────────────────────────────────────────────────────────────
-function OutputPreview({ floors }) {
+function OutputPreview({ floors, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
+  // Build stock indexes once for EAN lookup
+  const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
+  const { index: idxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+
+  // Resolve PO2/PO3 for a slot: prefer stored value, fall back to live stock lookup by EAN
+  const resolvePO2 = (s) => {
+    if (s.stockPO2 !== '' && s.stockPO2 !== undefined && s.stockPO2 !== null) return s.stockPO2;
+    const key = normalizeEAN(s.ref);
+    return key ? (idxPO2.get(key) ?? '') : '';
+  };
+  const resolvePO3 = (s) => {
+    if (s.stockPO3 !== '' && s.stockPO3 !== undefined && s.stockPO3 !== null) return s.stockPO3;
+    const key = normalizeEAN(s.ref);
+    return key ? (idxPO3.get(key) ?? '') : '';
+  };
+
   return (
     <div>
       <div className="no-print" style={{
@@ -7079,8 +7147,8 @@ function OutputPreview({ floors }) {
                           <td style={otdStyle} className="mono">{s.date || '—'}</td>
                           <td style={{ ...otdStyle, background: s.campaign ? T.blue : 'transparent', color: s.campaign ? '#fff' : T.ink, fontWeight: s.campaign ? 500 : 400 }}>{s.campaign || '—'}</td>
                           <td style={otdStyle}>{s.observations || '—'}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{s.stockPO2 || '0'}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{s.stockPO3 || '0'}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO2(s) || '0'}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO3(s) || '0'}</td>
                           <td style={{ ...otdStyle, background: T.yellow, textAlign: 'center', fontWeight: 600 }} className="mono">{s.pedidoGU || '0'}</td>
                         </tr>
                       );
