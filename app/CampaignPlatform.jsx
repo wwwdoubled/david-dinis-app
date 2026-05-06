@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.5';
-const APP_BUILD_DATE = '2026-05-06T00:15';
+const APP_VERSION = '2.9.6';
+const APP_BUILD_DATE = '2026-05-06T00:45';
 const APP_CHANGELOG = [
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
@@ -2845,6 +2845,14 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
   // Notes — single global notebook, auto-saved
   const [notes, setNotes] = useStoredState('notes', '');
+  // Track when notes were last edited locally so we can compare with cloud timestamp
+  const notesUpdatedAtRef = useRef(storeGet('notes_updated_at', null));
+  const setNotesWithTimestamp = useCallback((val) => {
+    const ts = new Date().toISOString();
+    notesUpdatedAtRef.current = ts;
+    storeSet('notes_updated_at', ts);
+    setNotes(val);
+  }, [setNotes]);
   const [notesPanelOpen, setNotesPanelOpen] = useState(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
 
@@ -2894,19 +2902,22 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         return;
       }
 
-      // Remote row exists — decide whether to adopt remote or push local
+      // Remote row exists — pick the most recently updated version (no concatenation)
       const localHasNotes = (notes || '').trim().length > 0;
       const remoteHasNotes = (remote.notes || '').trim().length > 0;
 
-      // If local has notes but remote doesn't → push local
-      // If remote has notes but local doesn't → adopt remote
-      // If both have notes and they differ → merge (append remote with marker)
       let nextNotes = notes;
       if (!localHasNotes && remoteHasNotes) {
+        // Local is empty, remote has content → adopt remote
         nextNotes = remote.notes;
       } else if (localHasNotes && remoteHasNotes && notes !== remote.notes) {
-        // Conflict — keep local primary, append remote at the bottom
-        nextNotes = notes + '\n\n--- Notas da cloud ---\n\n' + remote.notes;
+        // Both have content and they differ → keep whichever was updated more recently
+        const localTs = notesUpdatedAtRef.current ? new Date(notesUpdatedAtRef.current).getTime() : 0;
+        const remoteTs = remote.updated_at ? new Date(remote.updated_at).getTime() : 0;
+        if (remoteTs > localTs) {
+          nextNotes = remote.notes; // cloud is newer
+        }
+        // else: local is newer or equal → keep local (nextNotes already = notes)
       }
 
       // Adopt remote default_layout only when local is the bare default (untouched)
@@ -3230,7 +3241,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           />}
           {view === 'images' && <FlyerEditor campaigns={campaigns} />}
           {view === 'pdfs' && <PdfEditor />}
-          {view === 'notes' && <NotesView notes={notes} setNotes={setNotes} />}
+          {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
           {view === 'admin' && isAdmin && (
             <AdminView
               user={user}
@@ -3349,7 +3360,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {notesPanelOpen && view !== 'notes' && (
         <NotesPanel
           notes={notes}
-          setNotes={setNotes}
+          setNotes={setNotesWithTimestamp}
           onClose={() => setNotesPanelOpen(false)}
           onOpenFull={() => { setNotesPanelOpen(false); setView('notes'); }}
         />
