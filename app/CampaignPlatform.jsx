@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.0.1';
-const APP_BUILD_DATE = '2026-05-06T05:00';
+const APP_VERSION = '3.0.2';
+const APP_BUILD_DATE = '2026-05-06T06:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -435,6 +435,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.0.2', date: '2026-05-06', summary: 'Fix: famílias excluídas aplicadas também no auto-preenchimento, listagem de zonas, alterações de preço e stock' },
   { version: '3.0.1', date: '2026-05-06', summary: 'Famílias excluídas globalmente (Produtos Editoriais + Serviços): configurável no admin' },
   { version: '3.0.0', date: '2026-05-06', summary: 'Fix: campanhas aparecem todas ao mesmo tempo — fetch de metadados separado das rows comprimidas; hydratação das rows em background por campanha' },
   { version: '2.9.9', date: '2026-05-06', summary: 'Plano: EAN+descrição+família gravados no slot (independente do Excel). AutoFill: alocação e restrição de famílias/subfamílias por móvel' },
@@ -4816,7 +4817,7 @@ function CampaignsView({
               key={floor.id}
               floor={floor}
               editZones={editZones}
-              activeCampaign={primaryCampaign}
+              activeCampaign={primaryCampaign ? { ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) } : null}
               candidates={candidates}
               onAddZone={() => addZone(floor.id)}
               onRenameZone={(zid, n) => renameZone(floor.id, zid, n)}
@@ -4918,7 +4919,7 @@ function CampaignsView({
         <AutoFillWizard
           state={autoFillWizard}
           floors={floors}
-          campaign={primaryCampaign}
+          campaign={{ ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) }}
           stockRowsPO2={stockRowsPO2}
           stockRowsPO3={stockRowsPO3}
           stockMapPO2={stockMapPO2}
@@ -7123,7 +7124,7 @@ const otdStyle = { padding: '6px 10px', borderBottom: `1px solid ${T.lineSoft}`,
 // ─────────────────────────────────────────────────────────────────────────
 
 // Aggregate all campaign rows within a period into a single compare-with object
-function buildPeriodCompareWith(periodId, campaigns, periods) {
+function buildPeriodCompareWith(periodId, campaigns, periods, excludedFamilies = []) {
   const camps = (campaigns || []).filter(c => c.periodId === periodId && c.rows?.length);
   if (!camps.length) return null;
   const period = (periods || []).find(p => p.id === periodId);
@@ -7131,7 +7132,8 @@ function buildPeriodCompareWith(periodId, campaigns, periods) {
   const byEan = new Map();
   for (const camp of camps) {
     const cols = detectColumns(camp.headers);
-    for (const row of camp.rows) {
+    const filteredRows = filterRowsByFamily(camp.rows, camp.headers, excludedFamilies);
+    for (const row of filteredRows) {
       const key = normalizeEAN(row[cols.ean]);
       if (!key || byEan.has(key)) continue;
       byEan.set(key, {
@@ -7209,22 +7211,26 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (newSource === 'campaign') {
       const c = campaigns.find(x => x.id === newCampaignId);
       if (!c) return null;
-      return { filename: c.name, uploaded: new Date(), headers: c.headers, rows: c.rows || [], itemCount: c.rows?.length || 0, fromSystem: true };
+      const rows = filterRowsByFamily(c.rows || [], c.headers, excludedFamilies);
+      return { filename: c.name, uploaded: new Date(), headers: c.headers, rows, itemCount: rows.length, fromSystem: true };
     }
     if (newSource === 'period') {
-      const built = buildPeriodCompareWith(newPeriodId, campaigns, periods);
+      const built = buildPeriodCompareWith(newPeriodId, campaigns, periods, excludedFamilies);
       if (!built) return null;
       const p = periods?.find(x => x.id === newPeriodId);
       return { ...built, filename: p?.name || 'Período', uploaded: new Date(), fromSystem: true };
     }
     return null;
-  }, [newSource, uploadedSnapshot, newCampaignId, newPeriodId, campaigns, periods]);
+  }, [newSource, uploadedSnapshot, newCampaignId, newPeriodId, campaigns, periods, excludedFamilies]);
 
   // ── Build compareWith (old/right) ────────────────────────────────────────
   const compareWith = useMemo(() => {
-    if (compareSource === 'period') return buildPeriodCompareWith(comparePeriodId, campaigns, periods);
-    return campaigns.find(c => c.id === compareWithId) || null;
-  }, [compareSource, comparePeriodId, compareWithId, campaigns, periods]);
+    if (compareSource === 'period') return buildPeriodCompareWith(comparePeriodId, campaigns, periods, excludedFamilies);
+    const c = campaigns.find(x => x.id === compareWithId);
+    if (!c) return null;
+    const rows = filterRowsByFamily(c.rows || [], c.headers, excludedFamilies);
+    return { ...c, rows, itemCount: rows.length };
+  }, [compareSource, comparePeriodId, compareWithId, campaigns, periods, excludedFamilies]);
 
   const handleFile = async (file) => {
     const buf = await file.arrayBuffer();
@@ -7250,9 +7256,9 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     const colsOld = detectColumns(compareWith.headers);
     const colsNew = detectColumns(snapshot.headers);
 
-    // Filter excluded families from both sides
-    const snapshotRows = filterRowsByFamily(snapshot.rows, snapshot.headers, excludedFamilies);
-    const compareRows = filterRowsByFamily(compareWith.rows, compareWith.headers, excludedFamilies);
+    // Rows are already filtered at source (snapshot/compareWith built with excludedFamilies applied)
+    const snapshotRows = snapshot.rows;
+    const compareRows = compareWith.rows;
 
     const lookupStock = (eanKey) => ({
       stockPO2: eanKey ? (stockIndexPO2.index.get(eanKey) ?? 0) : 0,
