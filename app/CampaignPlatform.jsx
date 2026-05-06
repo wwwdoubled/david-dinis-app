@@ -463,8 +463,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.2.0';
-const APP_BUILD_DATE = '2026-05-06T18:00';
+const APP_VERSION = '3.2.1';
+const APP_BUILD_DATE = '2026-05-06T18:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2738,6 +2738,32 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return DEFAULT_FLOORS;
   });
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
+
+  // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
+  // Runs once after cloud data is loaded; uses campaignsRef to read current state without
+  // re-running on every campaigns change.
+  const cleanupRanRef = useRef(false);
+  useEffect(() => {
+    if (!cloudDataLoaded || !user || cleanupRanRef.current) return;
+    cleanupRanRef.current = true;
+    const current = campaignsRef.current;
+    const emptyIds = current
+      .filter(c =>
+        c.id &&
+        !c._needsRows &&
+        !c._rowsCompressed &&
+        Array.isArray(c.rows) && c.rows.length === 0 &&
+        (c.itemCount === 0 || c.itemCount == null)
+      )
+      .map(c => c.id);
+    if (emptyIds.length === 0) return;
+    console.log('[cleanup] removing', emptyIds.length, 'empty campaigns:', emptyIds);
+    setCampaigns(cs => cs.filter(c => !emptyIds.includes(c.id)));
+    emptyIds.forEach(id => {
+      idbDelete(id).catch(() => {});
+      if (isUUID(String(id))) cloudDeleteCampaign(id).catch(() => {});
+    });
+  }, [cloudDataLoaded, user]);
 
   // Persist campaigns to IndexedDB — but ONLY the fields that change frequently
   // (floors, periodId, name) and ONLY campaigns that actually changed.
@@ -7501,7 +7527,24 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
   return (
     <tr style={{ background: slot.state === 'falta' ? '#FEF1EF' : 'transparent' }}>
       <td style={{ ...ztdStyle, background: T.cyan, fontFamily: 'Geist Mono', fontSize: 11 }}>
-        <input value={slot.ref} onChange={e => onUpdate({ ref: e.target.value })} className="row-input" placeholder="ref" style={{ fontSize: 11 }} />
+        <input
+          value={slot.ref}
+          onChange={e => onUpdate({ ref: e.target.value })}
+          onBlur={() => {
+            if (!resolvedProduct) return;
+            const updates = {};
+            if (!slot.name && resolvedProduct.name) updates.name = resolvedProduct.name;
+            if (!slot.family && resolvedProduct.family) updates.family = resolvedProduct.family;
+            if (!slot.subfamily && resolvedProduct.subfamily) updates.subfamily = resolvedProduct.subfamily;
+            if (!slot.basePrice && resolvedProduct.basePrice) updates.basePrice = resolvedProduct.basePrice;
+            if (!slot.campaignPrice && resolvedProduct.campaignPrice) updates.campaignPrice = resolvedProduct.campaignPrice;
+            if (!slot.discount && resolvedProduct.discount) updates.discount = resolvedProduct.discount;
+            if (Object.keys(updates).length > 0) onUpdate(updates);
+          }}
+          className="row-input"
+          placeholder="ref"
+          style={{ fontSize: 11 }}
+        />
       </td>
       <td style={{ ...ztdStyle, position: 'relative' }}>
         {(resolvedFamily || resolvedCampPrice > 0 || resolvedDiscount > 0) && (
@@ -7522,13 +7565,14 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
           </div>
         )}
         <input
-          value={slot.name}
+          value={slot.name || resolvedName || ''}
           onChange={e => { onUpdate({ name: e.target.value }); setShowSuggest(true); }}
           onFocus={() => setShowSuggest(true)}
           onBlur={() => setTimeout(() => setShowSuggest(false), 200)}
           className="row-input"
-          placeholder={resolvedName || 'nome do produto'}
+          placeholder="nome do produto"
           title={resolvedName}
+          style={!slot.name && resolvedName ? { color: T.inkSoft, fontStyle: 'italic' } : undefined}
         />
         {showSuggest && suggestions.length > 0 && (
           <div style={{
@@ -7757,48 +7801,59 @@ function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stock
                 <div style={{ background: floor.color, color: '#fff', padding: '6px 12px', fontSize: 11, fontWeight: 600, letterSpacing: '0.05em' }}>
                   {zone.name.toUpperCase()}
                 </div>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
                   <thead>
                     <tr style={{ background: T.lineSoft }}>
-                      <th style={ohStyle}>EAN</th>
-                      <th style={ohStyle}>DESCRIÇÃO</th>
-                      <th style={ohStyle}>FAMÍLIA</th>
-                      <th style={{ ...ohStyle, textAlign: 'right' }}>PVP BASE</th>
-                      <th style={{ ...ohStyle, textAlign: 'right' }}>PVP CAMP</th>
-                      <th style={{ ...ohStyle, textAlign: 'right' }}>DESC%</th>
-                      <th style={{ ...ohStyle, textAlign: 'center' }}>INÍCIO</th>
-                      <th style={{ ...ohStyle, textAlign: 'center' }}>FIM</th>
-                      <th style={ohStyle}>CARTAZ</th>
-                      <th style={ohStyle}>ESTADO</th>
+                      <th style={{ ...ohStyle, width: 110 }}>REF</th>
+                      <th style={ohStyle}>PRODUTO</th>
+                      <th style={{ ...ohStyle, width: 100 }}>CARTAZ</th>
+                      <th style={{ ...ohStyle, width: 80, textAlign: 'center' }}>ESTADO</th>
+                      <th style={{ ...ohStyle, width: 70 }}>DATA</th>
+                      <th style={{ ...ohStyle, width: 90 }}>CAMPANHA</th>
                       <th style={ohStyle}>OBS</th>
-                      <th style={{ ...ohStyle, background: T.cyan, textAlign: 'center' }}>PO2</th>
-                      <th style={{ ...ohStyle, background: T.cyan, textAlign: 'center' }}>PO3</th>
-                      <th style={{ ...ohStyle, background: T.yellow, textAlign: 'center' }}>GU</th>
+                      <th style={{ ...ohStyle, width: 50, background: T.cyan, textAlign: 'center' }}>PO2</th>
+                      <th style={{ ...ohStyle, width: 50, background: T.cyan, textAlign: 'center' }}>PO3</th>
+                      <th style={{ ...ohStyle, width: 50, background: T.yellow, textAlign: 'center' }}>GU</th>
                     </tr>
                   </thead>
                   <tbody>
                     {zone.slots.map(s => {
                       const stateOpt = STATES.find(o => o.id === s.state) || STATES[0];
                       const name = resolveField(s, 'name') || '—';
-                      const family = [resolveField(s, 'family'), resolveField(s, 'subfamily')].filter(Boolean).join(' › ') || '—';
+                      const family = resolveField(s, 'family');
+                      const subfamily = resolveField(s, 'subfamily');
+                      const famDisplay = [family, subfamily].filter(Boolean).join(' › ');
                       const basePrice = resolveField(s, 'basePrice');
                       const campPrice = resolveField(s, 'campaignPrice');
                       const discount = resolveField(s, 'discount');
-                      const startDate = resolveField(s, 'startDate') || s.date;
-                      const endDate = resolveField(s, 'endDate');
                       return (
                         <tr key={s.id}>
-                          <td style={{ ...otdStyle, background: T.cyan, fontFamily: 'Geist Mono' }}>{s.ref || '—'}</td>
-                          <td style={{ ...otdStyle, fontWeight: 500 }}>{name}</td>
-                          <td style={{ ...otdStyle, fontSize: 9, color: T.inkSoft }}>{family}</td>
-                          <td style={{ ...otdStyle, textAlign: 'right' }} className="mono">{fmtPrice(basePrice)}</td>
-                          <td style={{ ...otdStyle, textAlign: 'right', fontWeight: 500 }} className="mono">{fmtPrice(campPrice)}</td>
-                          <td style={{ ...otdStyle, textAlign: 'right', color: discount > 30 ? T.green : T.ink, fontWeight: discount > 0 ? 600 : 400 }} className="mono">{discount > 0 ? `-${Math.round(discount)}%` : '—'}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{fmtDate(startDate)}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{fmtDate(endDate)}</td>
-                          <td style={otdStyle}>{s.cartaz}</td>
-                          <td style={{ ...otdStyle, background: stateOpt.bg, color: stateOpt.fg, fontWeight: 600, textAlign: 'center' }}>{stateOpt.label}</td>
-                          <td style={otdStyle}>{s.observations || '—'}</td>
+                          <td style={{ ...otdStyle, background: T.cyan, fontFamily: 'Geist Mono', fontSize: 10 }}>{s.ref || '—'}</td>
+                          <td style={otdStyle}>
+                            <div style={{ fontWeight: 500, fontSize: 11, color: T.ink, lineHeight: 1.3 }}>{name}</div>
+                            {(famDisplay || campPrice > 0 || discount > 0) && (
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', marginTop: 2, flexWrap: 'wrap' }}>
+                                {famDisplay && <span>{famDisplay}</span>}
+                                {campPrice > 0 && (
+                                  <>
+                                    {famDisplay && <span style={{ color: T.line }}>·</span>}
+                                    <span style={{ color: T.ink, fontWeight: 600 }}>{Number(campPrice).toFixed(2)}€</span>
+                                    {basePrice > 0 && basePrice > campPrice && (
+                                      <span style={{ color: T.inkMute, textDecoration: 'line-through' }}>{Number(basePrice).toFixed(2)}€</span>
+                                    )}
+                                    {discount > 0 && (
+                                      <span style={{ color: discount >= 30 ? T.green : T.accent, fontWeight: 700 }}>-{Math.round(discount)}%</span>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            )}
+                          </td>
+                          <td style={{ ...otdStyle, fontSize: 10, color: T.inkSoft }}>{s.cartaz || '—'}</td>
+                          <td style={{ ...otdStyle, background: stateOpt.bg, color: stateOpt.fg, fontWeight: 600, textAlign: 'center', fontSize: 9, letterSpacing: '0.05em' }}>{stateOpt.label}</td>
+                          <td style={otdStyle} className="mono">{s.date || '—'}</td>
+                          <td style={{ ...otdStyle, background: s.campaign ? T.blue : 'transparent', color: s.campaign ? '#fff' : T.ink, fontSize: 10 }}>{s.campaign || '—'}</td>
+                          <td style={{ ...otdStyle, fontSize: 10, color: T.inkSoft }}>{s.observations || '—'}</td>
                           <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO2(s) !== '' ? resolvePO2(s) : '—'}</td>
                           <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO3(s) !== '' ? resolvePO3(s) : '—'}</td>
                           <td style={{ ...otdStyle, background: T.yellow, textAlign: 'center', fontWeight: 600 }} className="mono">{s.pedidoGU || '—'}</td>
