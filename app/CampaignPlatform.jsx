@@ -9551,7 +9551,6 @@ function toolBtn(disabled = false, danger = false) {
 // Inventory Scanner View
 // ─────────────────────────────────────────────────────────────────────────
 function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [] }) {
-  const T = useTheme();
   const videoRef = useRef(null);
   const inputRef = useRef(null);
   const streamRef = useRef(null);
