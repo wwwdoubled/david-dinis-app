@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.6';
-const APP_BUILD_DATE = '2026-05-06T00:45';
+const APP_VERSION = '2.9.7';
+const APP_BUILD_DATE = '2026-05-06T01:10';
 const APP_CHANGELOG = [
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
@@ -2410,115 +2410,63 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
     (async () => {
       // 1. Fetch cloud data
-      console.log('[cloud-sync] fetching from cloud...');
       const [cloudPeriods, cloudCampaigns] = await Promise.all([
         cloudFetchAllPeriods(),
         cloudFetchAllCampaigns(),
       ]);
       if (cancelled) return;
-      console.log(`[cloud-sync] cloud has ${cloudPeriods.length} periods, ${cloudCampaigns.length} campaigns`);
-      console.log(`[cloud-sync] local has ${periods.length} periods, ${campaigns.length} campaigns`);
 
-      // 2. Build maps for fast lookup
+      // 2. MERGE immediately — show everything right away without waiting for migration
+      const earlyMergedPeriods = mergePeriods(periodsRef.current, cloudPeriods);
+      const earlyMergedCampaigns = mergeCampaigns(campaignsRef.current, cloudCampaigns);
+      earlyMergedPeriods.sort((a, b) => {
+        if (!a.startDate && !b.startDate) return 0;
+        if (!a.startDate) return 1; if (!b.startDate) return -1;
+        return new Date(b.startDate) - new Date(a.startDate);
+      });
+      setPeriods(earlyMergedPeriods);
+      setCampaigns(earlyMergedCampaigns);
+      setCloudDataLoaded(true); // unblock the rest of the app immediately
+
+      // 3. Detect local-only items that need to be uploaded (migration, background)
       const cloudPeriodIds = new Set(cloudPeriods.map(p => p.id));
       const cloudCampaignKeys = new Set(cloudCampaigns.map(c => c.user_id + ':' + c.key));
+      const localOnlyPeriods = periodsRef.current.filter(p => !cloudPeriodIds.has(p.id));
+      const localOnlyCampaigns = campaignsRef.current.filter(c => !cloudCampaignKeys.has(user.id + ':' + c.key));
+      if (localOnlyPeriods.length === 0 && localOnlyCampaigns.length === 0) return; // nothing to migrate
 
-      // 3. Detect local-only items that need to be uploaded
-      const localOnlyPeriods = periods.filter(p => !cloudPeriodIds.has(p.id));
-      const localOnlyCampaigns = campaigns.filter(c => !cloudCampaignKeys.has(user.id + ':' + c.key));
-      console.log(`[cloud-sync] migrating ${localOnlyPeriods.length} periods, ${localOnlyCampaigns.length} campaigns`);
-
-      // 3.5 Build ID remap for periods with non-UUID legacy IDs (e.g. "p-1234567890-xytt")
-      // The Supabase schema requires UUID; we generate proper UUIDs and remap references.
-      const idRemap = new Map(); // oldId → newUUID
+      // 4. Remap non-UUID legacy period IDs
+      const idRemap = new Map();
       const periodsToMigrate = localOnlyPeriods.map(p => {
         if (isUUID(p.id)) return p;
         const newId = genUUID();
         idRemap.set(p.id, newId);
-        console.log(`[cloud-sync] remapping period id: ${p.id} → ${newId} (${p.name})`);
         return { ...p, id: newId };
       });
-
-      // Also update local periods state immediately so subsequent operations use new IDs
       if (idRemap.size > 0) {
-        setPeriods(prev => prev.map(p => {
-          const newId = idRemap.get(p.id);
-          return newId ? { ...p, id: newId } : p;
-        }));
-        // Update campaigns too — their periodId references must follow
-        setCampaigns(prev => prev.map(c => {
-          const newPid = idRemap.get(c.periodId);
-          return newPid ? { ...c, periodId: newPid } : c;
-        }));
-        // Persist remapped periods to IDB
-        for (const p of periodsToMigrate) {
-          idbPutPeriod(p).catch(err => console.warn('IDB remap failed:', err));
-        }
-        // Delete old non-UUID period entries from IDB
-        for (const oldId of idRemap.keys()) {
-          idbDeletePeriod(oldId).catch(() => {});
-        }
+        setPeriods(prev => prev.map(p => { const nid = idRemap.get(p.id); return nid ? { ...p, id: nid } : p; }));
+        setCampaigns(prev => prev.map(c => { const nid = idRemap.get(c.periodId); return nid ? { ...c, periodId: nid } : c; }));
+        periodsToMigrate.forEach(p => idbPutPeriod(p).catch(() => {}));
+        for (const oldId of idRemap.keys()) idbDeletePeriod(oldId).catch(() => {});
       }
 
-      // 4. Migrate local-only periods + campaigns to cloud in parallel
-      let migratedCount = 0;
-      let migrationErrors = 0;
-
-      const periodResults = await Promise.all(periodsToMigrate.map(async p => {
-        const periodWithUser = { ...p, user_id: p.user_id || user.id, created_by: p.created_by || user.id };
-        return cloudUpsertPeriod(periodWithUser, user.id);
-      }));
-      periodResults.forEach((res, i) => {
-        if (res.ok) migratedCount++;
-        else { migrationErrors++; console.warn('[cloud-sync] period upsert failed:', res.error, periodsToMigrate[i].name); }
-      });
-
-      // 5. Migrate local-only campaigns to cloud in parallel — remap any periodId references
-      const campaignsToMigrate = localOnlyCampaigns
-        .filter(c => c.key)
-        .map(c => {
+      // 5. Upload local-only items in parallel (background — UI already visible)
+      if (cancelled) return;
+      let migratedCount = 0, migrationErrors = 0;
+      const [periodResults, campaignResults] = await Promise.all([
+        Promise.all(periodsToMigrate.map(p =>
+          cloudUpsertPeriod({ ...p, user_id: p.user_id || user.id, created_by: p.created_by || user.id }, user.id)
+        )),
+        Promise.all(localOnlyCampaigns.filter(c => c.key).map(c => {
           const newPid = idRemap.get(c.periodId);
           const cw = { ...c, user_id: c.user_id || user.id, periodId: newPid || c.periodId };
-          if (cw.periodId && !isUUID(cw.periodId)) {
-            console.warn(`[cloud-sync] campaign ${c.name} has invalid periodId, setting to null`);
-            cw.periodId = null;
-          }
-          return cw;
-        });
-      const campaignResults = await Promise.all(campaignsToMigrate.map(c => cloudUpsertCampaign(c, user.id)));
-      campaignResults.forEach((res, i) => {
-        if (res.ok) migratedCount++;
-        else { migrationErrors++; console.warn('[cloud-sync] campaign upsert failed:', res.error, campaignsToMigrate[i].name); }
-      });
-
-      if (cancelled) return;
-
-      // 6. Re-fetch cloud after migration to have the latest IDs
-      const [finalCloudPeriods, finalCloudCampaigns] = await Promise.all([
-        cloudFetchAllPeriods(),
-        cloudFetchAllCampaigns(),
+          if (cw.periodId && !isUUID(cw.periodId)) cw.periodId = null;
+          return cloudUpsertCampaign(cw, user.id);
+        })),
       ]);
-      if (cancelled) return;
-      console.log(`[cloud-sync] after migration: ${finalCloudPeriods.length} periods, ${finalCloudCampaigns.length} campaigns`);
-
-      // 7. MERGE strategy (not replace): take union of local + cloud,
-      // preferring the more recently updated version of each item.
-      // Use refs (not closure values) so edits made while the async sync was running are not lost.
-      const mergedPeriods = mergePeriods(periodsRef.current, finalCloudPeriods);
-      const mergedCampaigns = mergeCampaigns(campaignsRef.current, finalCloudCampaigns);
-
-      console.log(`[cloud-sync] merged result: ${mergedPeriods.length} periods, ${mergedCampaigns.length} campaigns`);
-
-      // Sort periods by startDate desc
-      mergedPeriods.sort((a, b) => {
-        if (!a.startDate && !b.startDate) return 0;
-        if (!a.startDate) return 1;
-        if (!b.startDate) return -1;
-        return new Date(b.startDate) - new Date(a.startDate);
+      [...periodResults, ...campaignResults].forEach(res => {
+        if (res.ok) migratedCount++; else migrationErrors++;
       });
-      setPeriods(mergedPeriods);
-      setCampaigns(mergedCampaigns);
-      setCloudDataLoaded(true);
 
       if (migrationErrors > 0) {
         setMigrationStatus({ migrated: migratedCount, error: `${migrationErrors} ${migrationErrors === 1 ? 'item falhou' : 'itens falharam'} ao sincronizar para a cloud (verifica F12 para detalhes). Os dados ficam guardados localmente.` });
