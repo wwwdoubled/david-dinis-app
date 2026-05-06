@@ -9,7 +9,7 @@ import {
   Filter, ListTree, Layers, Tag, Lock, LogOut, AlertCircle, Sun, Moon,
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
-  Bell, Calendar, Inbox, AlertTriangle, ClipboardList
+  Bell, Calendar, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.0.3';
-const APP_BUILD_DATE = '2026-05-06T07:00';
+const APP_VERSION = '3.1.1';
+const APP_BUILD_DATE = '2026-05-06T13:10';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -435,6 +435,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.1.0', date: '2026-05-06', summary: 'Fix: carregamento de campanhas em 2 fases reais (SELECT sem rows + fetch separado); novo Inventário com leitura de códigos de barras por câmara ou leitor' },
   { version: '3.0.3', date: '2026-05-06', summary: 'Plano/Saída: PO2 e PO3 preenchidos automaticamente por EAN; Saída usa lookup dinâmico de stock; auto-preenchimento também grava PO2/PO3' },
   { version: '3.0.2', date: '2026-05-06', summary: 'Fix: famílias excluídas aplicadas também no auto-preenchimento, listagem de zonas, alterações de preço e stock' },
   { version: '3.0.1', date: '2026-05-06', summary: 'Famílias excluídas globalmente (Produtos Editoriais + Serviços): configurável no admin' },
@@ -628,9 +629,11 @@ const DEFAULT_MENU_VISIBILITY = {
   campaigns: { roles: ['user', 'manager', 'viewer'], visible: true },
   changes: { roles: ['user', 'manager'], visible: true },
   stock: { roles: ['user', 'manager'], visible: true },
+  inventory: { roles: ['user', 'manager', 'viewer'], visible: true },
   images: { roles: ['user', 'manager'], visible: true },
   pdfs: { roles: ['user', 'manager'], visible: true },
   notes: { roles: ['user', 'manager', 'viewer'], visible: true },
+  scanner: { visible: true, roles: ['user', 'manager', 'viewer'] },
 };
 
 async function fetchUIConfig() {
@@ -1066,16 +1069,13 @@ async function cloudFetchAllCampaignsMeta() {
   if (!supabase) return [];
   const { data, error } = await supabase
     .from('campaigns')
-    .select('id, user_id, period_id, campaign_key, name, headers, rows, rows_compressed, floors, floors_compressed, uploaded_at, updated_at, created_by, updated_by')
+    .select('id, user_id, period_id, campaign_key, name, headers, floors, floors_compressed, uploaded_at, updated_at, created_by, updated_by')
     .order('updated_at', { ascending: false });
   if (error) {
-    console.warn('cloudFetchAllCampaigns failed:', error.message);
+    console.warn('cloudFetchAllCampaigns (meta) failed:', error.message);
     return [];
   }
-  // Only decompress floors (small). For rows: use inline rows if present, else mark for hydration.
   const campaigns = await Promise.all((data || []).map(async (c) => {
-    const hasInlineRows = c.rows && c.rows.length > 0;
-    let rows = hasInlineRows ? c.rows : [];
     let floors = c.floors;
     if (!floors && c.floors_compressed) floors = await gunzipJSON(c.floors_compressed);
     return {
@@ -1085,9 +1085,9 @@ async function cloudFetchAllCampaignsMeta() {
       key: c.campaign_key,
       name: c.name,
       headers: c.headers || [],
-      rows,
-      itemCount: hasInlineRows ? rows.length : (c.rows_compressed ? -1 : 0), // -1 = known compressed, count unknown yet
-      _rowsCompressed: !hasInlineRows && c.rows_compressed ? c.rows_compressed : null, // stored for lazy hydration
+      rows: [],          // empty until hydrated
+      itemCount: -1,     // -1 = rows not yet loaded
+      _needsRows: true,  // flag for phase 2
       floors,
       uploaded: c.uploaded_at ? new Date(c.uploaded_at) : new Date(),
       created_by: c.created_by,
@@ -1098,17 +1098,30 @@ async function cloudFetchAllCampaignsMeta() {
   return campaigns;
 }
 
-// Full fetch kept for periodic refresh (already fast after first load since most are cached)
+// Fetch rows for specific campaign IDs (used in background hydration)
+async function cloudFetchCampaignRows(ids) {
+  if (!supabase || !ids.length) return [];
+  const { data, error } = await supabase
+    .from('campaigns')
+    .select('id, rows, rows_compressed')
+    .in('id', ids);
+  if (error) { console.warn('cloudFetchCampaignRows failed:', error.message); return []; }
+  return Promise.all((data || []).map(async (c) => {
+    let rows = c.rows && c.rows.length > 0 ? c.rows : null;
+    if (!rows && c.rows_compressed) rows = await gunzipJSON(c.rows_compressed);
+    return { id: c.id, rows: rows || [], itemCount: (rows || []).length };
+  }));
+}
+
+// Full fetch kept for periodic refresh
 async function cloudFetchAllCampaigns() {
   const meta = await cloudFetchAllCampaignsMeta();
-  // Hydrate all compressed rows now (used by periodic refresh — no streaming needed)
-  return Promise.all(meta.map(async c => {
-    if (c._rowsCompressed) {
-      const rows = await gunzipJSON(c._rowsCompressed);
-      return { ...c, rows, itemCount: rows.length, _rowsCompressed: null };
-    }
-    return c;
-  }));
+  const hydrated = await cloudFetchCampaignRows(meta.map(c => c.id));
+  const rowsById = new Map(hydrated.map(h => [h.id, h]));
+  return meta.map(c => {
+    const r = rowsById.get(c.id);
+    return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+  });
 }
 
 async function cloudUpsertCampaign(campaign, userId) {
@@ -2465,18 +2478,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
-      // 2b. Hydrate compressed rows in background — update each campaign as its rows arrive
-      const needsHydration = cloudCampaignsMeta.filter(c => c._rowsCompressed);
-      if (needsHydration.length > 0) {
-        // Decompress all in parallel (CPU-bound, but doesn't block UI render)
-        needsHydration.forEach(cloudC => {
-          gunzipJSON(cloudC._rowsCompressed).then(rows => {
-            if (cancelled) return;
-            setCampaigns(prev => prev.map(c =>
-              c.id === cloudC.id ? { ...c, rows, itemCount: rows.length, _rowsCompressed: null } : c
-            ));
-          }).catch(() => {});
-        });
+      // 2b. Phase 2: fetch rows for campaigns not already in IDB (one batch query, one setCampaigns call)
+      const idbCampaignKeys = new Set(campaignsRef.current.map(c => c.key).filter(Boolean));
+      const needsRows = earlyMergedCampaigns.filter(c => c._needsRows && !idbCampaignKeys.has(c.key));
+      if (needsRows.length > 0) {
+        cloudFetchCampaignRows(needsRows.map(c => c.id)).then(hydrated => {
+          if (cancelled) return;
+          const rowsById = new Map(hydrated.map(h => [h.id, h]));
+          setCampaigns(prev => prev.map(c => {
+            const r = rowsById.get(c.id);
+            return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+          }));
+        }).catch(() => {});
       }
 
       // 3. Detect local-only items that need to be uploaded (migration, background)
@@ -3243,6 +3256,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockMapPO3={stockMapPO3} setStockMapPO3={setStockMapPO3}
             excludedFamilies={excludedFamilies}
           />}
+          {view === 'inventory' && <InventoryView
+            stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3}
+            stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
+            campaigns={campaigns}
+            excludedFamilies={excludedFamilies}
+          />}
           {view === 'images' && <FlyerEditor campaigns={campaigns} />}
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
@@ -3444,6 +3463,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'campaigns', label: 'Campanhas', icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'changes', label: 'Alterações', icon: GitCompareArrows },
     { id: 'stock', label: 'Stock', icon: Package },
+    { id: 'inventory', label: 'Inventário', icon: ScanLine },
     { id: 'images', label: 'Folhetos', icon: ImageIcon },
     { id: 'pdfs', label: 'PDFs', icon: FileText },
     { id: 'notes', label: 'Notas', icon: NotebookPen },
@@ -9525,6 +9545,318 @@ function toolBtn(disabled = false, danger = false) {
     cursor: disabled ? 'not-allowed' : 'pointer',
     fontFamily: 'inherit',
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Inventory Scanner View
+// ─────────────────────────────────────────────────────────────────────────
+function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [] }) {
+  const T = useTheme();
+  const videoRef = useRef(null);
+  const inputRef = useRef(null);
+  const streamRef = useRef(null);
+  const detectorRef = useRef(null);
+  const rafRef = useRef(null);
+  const lastEanRef = useRef(null);
+  const lastEanTimeRef = useRef(0);
+
+  const [scanning, setScanning] = useState(false);
+  const [manualEan, setManualEan] = useState('');
+  const [scanned, setScanned] = useState([]); // [{ ean, descr, family, subfamily, po2, po3, ts, idx }]
+  const [cameraError, setCameraError] = useState(null);
+  const [mode, setMode] = useState('manual'); // 'camera' | 'manual'
+
+  // Build lookup indexes
+  const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
+  const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+
+  // Build EAN → product info from campaigns
+  const productIndex = useMemo(() => {
+    const map = new Map();
+    const excl = new Set((excludedFamilies || []).map(f => f.toUpperCase()));
+    for (const camp of campaigns) {
+      const cols = detectColumns(camp.headers || []);
+      if (!cols.ean) continue;
+      for (const row of (camp.rows || [])) {
+        const key = normalizeEAN(row[cols.ean]);
+        if (!key || map.has(key)) continue;
+        const fam = cols.family ? String(row[cols.family] ?? '').trim() : '';
+        if (fam && excl.has(fam.toUpperCase())) continue;
+        map.set(key, {
+          descr: cols.description ? String(row[cols.description] ?? '').trim() : '',
+          family: fam,
+          subfamily: cols.subfamily ? String(row[cols.subfamily] ?? '').trim() : '',
+          price: cols.campaignPrice ? parseNum(row[cols.campaignPrice]) : (cols.basePrice ? parseNum(row[cols.basePrice]) : 0),
+          discount: cols.discount ? parseNum(row[cols.discount]) : 0,
+        });
+      }
+    }
+    return map;
+  }, [campaigns, excludedFamilies]);
+
+  const processEan = useCallback((rawEan) => {
+    const ean = normalizeEAN(rawEan);
+    if (!ean) return;
+    // Debounce: ignore same EAN within 2 seconds (camera fires multiple times)
+    if (ean === lastEanRef.current && Date.now() - lastEanTimeRef.current < 2000) return;
+    lastEanRef.current = ean;
+    lastEanTimeRef.current = Date.now();
+
+    const product = productIndex.get(ean);
+    const po2 = stockIdxPO2.get(ean) ?? null;
+    const po3 = stockIdxPO3.get(ean) ?? null;
+
+    setScanned(prev => [{
+      ean,
+      descr: product?.descr || '',
+      family: product?.family || '',
+      subfamily: product?.subfamily || '',
+      price: product?.price || 0,
+      discount: product?.discount || 0,
+      po2,
+      po3,
+      ts: new Date(),
+      found: !!product,
+    }, ...prev]);
+
+    // Beep feedback
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = product ? 1200 : 600;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+      osc.start(); osc.stop(ctx.currentTime + 0.15);
+    } catch {}
+  }, [productIndex, stockIdxPO2, stockIdxPO3]);
+
+  // Start camera scanner
+  const startCamera = useCallback(async () => {
+    setCameraError(null);
+    try {
+      if (!('BarcodeDetector' in window)) {
+        setCameraError('O teu browser não suporta o leitor de câmara nativo. Usa o modo manual ou actualiza para iOS 17+ / Chrome 83+.');
+        return;
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      detectorRef.current = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39'] });
+      setScanning(true);
+
+      const detect = async () => {
+        if (!videoRef.current || !detectorRef.current) return;
+        try {
+          const barcodes = await detectorRef.current.detect(videoRef.current);
+          for (const b of barcodes) processEan(b.rawValue);
+        } catch {}
+        rafRef.current = requestAnimationFrame(detect);
+      };
+      rafRef.current = requestAnimationFrame(detect);
+    } catch (err) {
+      setCameraError('Erro ao aceder à câmara: ' + err.message);
+    }
+  }, [processEan]);
+
+  const stopCamera = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
+    streamRef.current = null;
+    detectorRef.current = null;
+    setScanning(false);
+  }, []);
+
+  useEffect(() => () => stopCamera(), [stopCamera]);
+
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    if (!manualEan.trim()) return;
+    processEan(manualEan.trim());
+    setManualEan('');
+    inputRef.current?.focus();
+  };
+
+  const exportCSV = () => {
+    const rows = [['EAN', 'Descrição', 'Família', 'Sub-família', 'Preço', 'Desc%', 'Stock PO2', 'Stock PO3', 'Hora']];
+    for (const s of [...scanned].reverse()) {
+      rows.push([s.ean, s.descr, s.family, s.subfamily,
+        s.price > 0 ? s.price.toFixed(2) : '',
+        s.discount > 0 ? Math.round(s.discount) : '',
+        s.po2 ?? '', s.po3 ?? '',
+        s.ts.toLocaleTimeString('pt-PT')]);
+    }
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url;
+    a.download = `inventario_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const totalFound = scanned.filter(s => s.found).length;
+  const totalNotFound = scanned.filter(s => !s.found).length;
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 900, margin: '0 auto' }}>
+      {/* Header */}
+      <div style={{ marginBottom: 24 }}>
+        <h2 style={{ fontSize: 22, fontWeight: 700, color: T.ink, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <ScanLine size={22} style={{ color: T.accent }} /> Scanner de Inventário
+        </h2>
+        <p style={{ fontSize: 13, color: T.inkMute, marginTop: 6 }}>
+          Lê códigos de barras com a câmara ou digita manualmente. Cada EAN é cruzado com o stock PO2/PO3.
+        </p>
+      </div>
+
+      {/* Mode toggle */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        {[{ v: 'camera', label: 'Câmara', icon: Camera }, { v: 'manual', label: 'Manual / Pistola', icon: ScanLine }].map(({ v, label, icon: Icon }) => (
+          <button key={v} onClick={() => { if (v !== mode) { stopCamera(); setMode(v); } }} style={{
+            padding: '7px 16px', borderRadius: 6, border: `1px solid ${mode === v ? T.accent : T.line}`,
+            background: mode === v ? T.accent : 'transparent', color: mode === v ? '#fff' : T.ink,
+            fontSize: 13, fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <Icon size={14} /> {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Camera mode */}
+      {mode === 'camera' && (
+        <div style={{ marginBottom: 20 }}>
+          {!scanning ? (
+            <button onClick={startCamera} style={{
+              padding: '10px 20px', background: T.ink, color: T.bg, border: 'none',
+              borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              <Camera size={16} /> Iniciar Câmara
+            </button>
+          ) : (
+            <button onClick={stopCamera} style={{
+              padding: '10px 20px', background: T.accent, color: '#fff', border: 'none',
+              borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 8,
+            }}>
+              <X size={16} /> Parar Câmara
+            </button>
+          )}
+          {cameraError && (
+            <div style={{ marginTop: 12, padding: '10px 14px', background: T.bgEl, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.accent, fontSize: 13 }}>
+              {cameraError}
+            </div>
+          )}
+          <div style={{ marginTop: 12, borderRadius: 10, overflow: 'hidden', background: '#000', display: scanning ? 'block' : 'none', maxWidth: 500 }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', display: 'block' }} />
+          </div>
+        </div>
+      )}
+
+      {/* Manual / pistola mode */}
+      {mode === 'manual' && (
+        <form onSubmit={handleManualSubmit} style={{ display: 'flex', gap: 8, marginBottom: 20, maxWidth: 400 }}>
+          <input
+            ref={inputRef}
+            autoFocus
+            value={manualEan}
+            onChange={e => setManualEan(e.target.value)}
+            placeholder="EAN (pistola ou teclado)…"
+            style={{
+              flex: 1, padding: '9px 12px', fontSize: 15, fontFamily: 'Geist Mono, monospace',
+              background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6, color: T.ink,
+              outline: 'none',
+            }}
+          />
+          <button type="submit" style={{
+            padding: '9px 16px', background: T.ink, color: T.bg, border: 'none',
+            borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          }}>Ler</button>
+        </form>
+      )}
+
+      {/* Stats row */}
+      {scanned.length > 0 && (
+        <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{ fontSize: 13, color: T.inkMute }}>
+            <strong style={{ color: T.ink }}>{scanned.length}</strong> leituras ·{' '}
+            <strong style={{ color: T.green }}>{totalFound}</strong> encontrados ·{' '}
+            <strong style={{ color: T.accent }}>{totalNotFound}</strong> não encontrados
+          </div>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button onClick={exportCSV} style={{
+              padding: '6px 12px', background: 'transparent', color: T.inkSoft,
+              border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <Download size={12} /> Exportar CSV
+            </button>
+            <button onClick={() => setScanned([])} style={{
+              padding: '6px 12px', background: 'transparent', color: T.accent,
+              border: `1px solid ${T.accent}30`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+            }}>
+              Limpar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Scanned list */}
+      {scanned.length === 0 ? (
+        <div style={{ padding: '40px 0', textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+          <ScanLine size={32} style={{ opacity: 0.3, marginBottom: 10 }} />
+          <div>Nenhum artigo lido ainda.</div>
+        </div>
+      ) : (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+          {/* Table header */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: '140px 1fr 120px 70px 70px 70px',
+            gap: 8, padding: '8px 12px', background: T.bgEl,
+            borderBottom: `1px solid ${T.line}`, fontSize: 11, fontWeight: 600,
+            color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.04em',
+          }}>
+            <div>EAN</div>
+            <div>Descrição / Família</div>
+            <div>Hora</div>
+            <div style={{ textAlign: 'right', color: T.cyan }}>PO2</div>
+            <div style={{ textAlign: 'right', color: T.cyan }}>PO3</div>
+            <div style={{ textAlign: 'right' }}>Desc%</div>
+          </div>
+          {scanned.map((s, i) => (
+            <div key={i} style={{
+              display: 'grid', gridTemplateColumns: '140px 1fr 120px 70px 70px 70px',
+              gap: 8, padding: '9px 12px', alignItems: 'center',
+              borderBottom: i < scanned.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
+              background: !s.found ? `${T.accent}08` : i === 0 ? `${T.green}08` : 'transparent',
+              borderLeft: `3px solid ${!s.found ? T.accent : T.green}`,
+            }}>
+              <div style={{ fontSize: 12, fontFamily: 'Geist Mono, monospace', color: T.ink }}>{s.ean}</div>
+              <div>
+                {s.descr ? (
+                  <>
+                    <div style={{ fontSize: 12, color: T.ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.descr}</div>
+                    <div style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>{[s.family, s.subfamily].filter(Boolean).join(' › ')}{s.price > 0 ? ` · ${s.price.toFixed(2)}€` : ''}</div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 12, color: T.accent, fontStyle: 'italic' }}>Não encontrado nas campanhas</div>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.ts.toLocaleTimeString('pt-PT')}</div>
+              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po2 ? 700 : 400, color: s.po2 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po2 ?? '—'}</div>
+              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po3 ? 700 : 400, color: s.po3 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po3 ?? '—'}</div>
+              <div style={{ textAlign: 'right', fontSize: 12, color: s.discount >= 30 ? T.green : (s.discount > 0 ? T.ink : T.inkMute), fontFamily: 'Geist Mono, monospace' }}>{s.discount > 0 ? `-${Math.round(s.discount)}%` : '—'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Full-page notes view (accessible via sidebar)
