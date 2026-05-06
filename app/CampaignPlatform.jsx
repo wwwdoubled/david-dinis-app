@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.3';
-const APP_BUILD_DATE = '2026-05-06T13:55';
+const APP_VERSION = '3.1.4';
+const APP_BUILD_DATE = '2026-05-06T14:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1264,6 +1264,16 @@ function mergeCampaigns(localList, cloudList) {
   for (const cc of (cloudList || [])) {
     const k = keyOf(cc);
     const local = map.get(k);
+    // Helper: given a merged object, restore rows/itemCount from local when cloud has none
+    const restoreRows = (merged, src) => {
+      if (merged._needsRows && src.rows && src.rows.length > 0) {
+        merged.rows = src.rows;
+        merged.itemCount = src.itemCount ?? src.rows.length;
+        merged._needsRows = false;
+      }
+      return merged;
+    };
+
     if (!local) {
       // Also check by campaign_key in case local had different id
       const altKey = `key:${cc.user_id || ''}:${cc.key || ''}`;
@@ -1271,7 +1281,7 @@ function mergeCampaigns(localList, cloudList) {
       if (localByKey && altKey !== k) {
         // Same campaign, different id — prefer cloud version (it has cloud id)
         map.delete(altKey);
-        map.set(k, { ...localByKey, ...cc });
+        map.set(k, restoreRows({ ...localByKey, ...cc }, localByKey));
       } else {
         map.set(k, cc);
       }
@@ -1279,9 +1289,9 @@ function mergeCampaigns(localList, cloudList) {
       const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : (local.uploaded ? local.uploaded.getTime() : 0);
       const cloudTime = cc.updatedAt ? new Date(cc.updatedAt).getTime() : 0;
       if (cloudTime >= localTime) {
-        map.set(k, { ...local, ...cc });
+        map.set(k, restoreRows({ ...local, ...cc }, local));
       } else {
-        map.set(k, { ...cc, ...local });
+        map.set(k, restoreRows({ ...cc, ...local }, local));
       }
     }
   }
@@ -2478,9 +2488,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
-      // 2b. Phase 2: fetch rows for campaigns not already in IDB (one batch query, one setCampaigns call)
-      const idbCampaignKeys = new Set(campaignsRef.current.map(c => c.key).filter(Boolean));
-      const needsRows = earlyMergedCampaigns.filter(c => c._needsRows && !idbCampaignKeys.has(c.key));
+      // 2b. Phase 2: fetch rows for campaigns that still need hydration.
+      // Condition: _needsRows flag OR rows are empty but itemCount > 0 (can happen when
+      // mergeCampaigns overwrites local rows with cloud meta's empty rows before restoreRows fix)
+      const needsRows = earlyMergedCampaigns.filter(c =>
+        c._needsRows || (!c.rows?.length && (c.itemCount > 0 || c.itemCount === -1))
+      );
       if (needsRows.length > 0) {
         cloudFetchCampaignRows(needsRows.map(c => c.id)).then(hydrated => {
           if (cancelled) return;
