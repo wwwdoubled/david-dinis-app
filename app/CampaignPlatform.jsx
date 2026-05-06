@@ -434,8 +434,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.5';
-const APP_BUILD_DATE = '2026-05-06T15:20';
+const APP_VERSION = '3.1.6';
+const APP_BUILD_DATE = '2026-05-06T15:50';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4110,6 +4110,8 @@ function CampaignsView({
   const [editZones, setEditZones] = useState(false);
   const [columnOverrides, setColumnOverrides] = useState({});
   const [restoreInfo, setRestoreInfo] = useState(null);
+  // Local upload status: { kind: 'parsing'|'saving'|'success'|'error', message: string }
+  const [uploadStatus, setUploadStatus] = useState(null);
 
   // Selected period object (null when not in any period)
   const selectedPeriod = useMemo(
@@ -4205,10 +4207,36 @@ function CampaignsView({
   }, []);
 
   const handleFile = async (file) => {
-    const buf = await file.arrayBuffer();
-    const expected = ['EAN', 'Descrição/Título', 'Des_Fam1', 'PVP Base FNAC', 'PVP Campanha'];
-    const { headers, rows } = parseExcelSmart(buf, expected);
-    const key = campaignKeyFromFilename(file.name);
+    if (!file) {
+      setUploadStatus({ kind: 'error', message: 'Nenhum ficheiro recebido.' });
+      return;
+    }
+    console.log('[upload] start', file.name, file.size, 'bytes');
+    setUploadStatus({ kind: 'parsing', message: `A ler "${file.name}"…` });
+
+    let buf, headers, rows, key;
+    try {
+      buf = await file.arrayBuffer();
+    } catch (e) {
+      console.error('[upload] arrayBuffer failed', e);
+      setUploadStatus({ kind: 'error', message: `Erro ao ler o ficheiro: ${e?.message || e}. Pode ser uma extensão do browser a interferir — tenta noutro browser ou em modo anónimo.` });
+      return;
+    }
+
+    try {
+      const expected = ['EAN', 'Descrição/Título', 'Des_Fam1', 'PVP Base FNAC', 'PVP Campanha'];
+      ({ headers, rows } = parseExcelSmart(buf, expected));
+      key = campaignKeyFromFilename(file.name);
+      if (!rows || rows.length === 0) {
+        setUploadStatus({ kind: 'error', message: 'O Excel parece estar vazio ou os cabeçalhos não foram reconhecidos.' });
+        return;
+      }
+      console.log('[upload] parsed', rows.length, 'rows,', headers.length, 'cols');
+    } catch (e) {
+      console.error('[upload] parse failed', e);
+      setUploadStatus({ kind: 'error', message: `Erro ao processar o Excel: ${e?.message || e}` });
+      return;
+    }
 
     // If a campaign with the same key is already loaded, replace its rows but keep its floors
     const existingInSession = campaigns.find(c => c.key === key);
@@ -4216,6 +4244,8 @@ function CampaignsView({
       const updated = { ...existingInSession, rows, headers, itemCount: rows.length, uploaded: new Date() };
       setCampaigns(cs => cs.map(c => c.id === existingInSession.id ? updated : c));
       setActiveIds(ids => ids.includes(existingInSession.id) ? ids : [...ids, existingInSession.id]);
+      setUploadStatus({ kind: 'success', message: `"${file.name}" actualizado — ${rows.length} produtos. A guardar na cloud…` });
+      setTimeout(() => setUploadStatus(null), 3500);
       return;
     }
 
@@ -4277,9 +4307,13 @@ function CampaignsView({
 
     if (savedFloors && savedSlotCount > 0) {
       setRestoreInfo({ tempCampaign: c, savedFloors, count: savedSlotCount });
+      setUploadStatus({ kind: 'success', message: `"${file.name}" carregado — ${rows.length} produtos. Confirma se queres restaurar o plano anterior.` });
+      setTimeout(() => setUploadStatus(null), 5000);
     } else {
       setCampaigns(p => [c, ...p]);
       setActiveIds(ids => [c.id, ...ids]);
+      setUploadStatus({ kind: 'success', message: `"${file.name}" carregado — ${rows.length} produtos. A guardar na cloud…` });
+      setTimeout(() => setUploadStatus(null), 4000);
       if (memoryHits > 0) {
         setTimeout(() => alert(`A memória de zonas pré-atribuiu ${memoryHits} ${memoryHits === 1 ? 'produto' : 'produtos'} com base em campanhas anteriores. Confirma na vista "Plano".`), 200);
       }
@@ -4594,6 +4628,29 @@ function CampaignsView({
         }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.accent, display: 'inline-block', animation: 'pulse 1s infinite' }} />
           A guardar na cloud…
+        </div>
+      )}
+      {/* Upload status banner */}
+      {uploadStatus && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: uploadStatus.kind === 'error' ? '#b91c1c'
+                    : uploadStatus.kind === 'success' ? T.green
+                    : T.bgEl,
+          color: uploadStatus.kind === 'error' || uploadStatus.kind === 'success' ? '#fff' : T.ink,
+          border: uploadStatus.kind === 'parsing' ? `1px solid ${T.line}` : 'none',
+          padding: '10px 14px', marginBottom: 12, borderRadius: 6, fontSize: 13,
+        }}>
+          {uploadStatus.kind === 'parsing' && <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.accent, animation: 'pulse 1s infinite' }} />}
+          {uploadStatus.kind === 'success' && <Check size={15} />}
+          {uploadStatus.kind === 'error' && <AlertTriangle size={15} />}
+          <span style={{ flex: 1 }}>{uploadStatus.message}</span>
+          {(uploadStatus.kind === 'error' || uploadStatus.kind === 'success') && (
+            <button onClick={() => setUploadStatus(null)} style={{
+              background: 'transparent', border: '1px solid rgba(255,255,255,0.4)',
+              color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+            }}>Dispensar</button>
+          )}
         </div>
       )}
       {/* Period overview: shown when no period is selected */}
@@ -8068,28 +8125,61 @@ function StockView({
 }) {
   const [historyDialog, setHistoryDialog] = useState(null); // 'PO2' | 'PO3' | null
   const [uploading, setUploading] = useState(null); // 'PO2' | 'PO3'
+  const [uploadStatus, setUploadStatus] = useState(null); // { kind, message, store }
 
   const handleUpload = async (file, store) => {
+    if (!file) {
+      setUploadStatus({ kind: 'error', message: 'Nenhum ficheiro recebido.', store });
+      return;
+    }
+    console.log('[stock-upload]', store, file.name, file.size, 'bytes');
     setUploading(store);
+    setUploadStatus({ kind: 'parsing', message: `A ler "${file.name}"…`, store });
+
+    let rows;
     try {
       const buf = await file.arrayBuffer();
-      const { rows } = parseExcelSmart(buf, ['EAN', 'Stock', 'Descrição']);
-      // If we have cloud, push to cloud (which also updates local state via callback)
+      const parsed = parseExcelSmart(buf, ['EAN', 'Stock', 'Descrição']);
+      rows = parsed.rows;
+      if (!rows || rows.length === 0) {
+        setUploadStatus({ kind: 'error', message: 'O ficheiro de stock parece vazio ou os cabeçalhos não foram reconhecidos.', store });
+        setUploading(null);
+        return;
+      }
+      console.log('[stock-upload]', store, 'parsed', rows.length, 'rows');
+    } catch (e) {
+      console.error('[stock-upload] parse failed', e);
+      setUploadStatus({ kind: 'error', message: `Erro ao ler o Excel: ${e?.message || e}. Pode ser uma extensão do browser a interferir.`, store });
+      setUploading(null);
+      return;
+    }
+
+    try {
       if (onUploadStock && user) {
         const res = await onUploadStock(store, file.name, rows);
         if (!res.ok) {
-          alert('Erro ao guardar na cloud: ' + res.error + '\n\nO stock fica disponível localmente.');
+          setUploadStatus({ kind: 'error', message: `Erro ao guardar na cloud: ${res.error || 'sem detalhe'}. O stock fica disponível localmente neste dispositivo.`, store });
           if (store === 'PO2') { setStockRowsPO2(rows); setStockMapPO2({}); }
           else { setStockRowsPO3(rows); setStockMapPO3({}); }
         } else {
           if (store === 'PO2') setStockMapPO2({});
           else setStockMapPO3({});
+          setUploadStatus({ kind: 'success', message: `Stock ${store} guardado — ${rows.length} referências.`, store });
+          setTimeout(() => setUploadStatus(s => s?.store === store && s?.kind === 'success' ? null : s), 4000);
         }
       } else {
         // No cloud — just local
         if (store === 'PO2') { setStockRowsPO2(rows); setStockMapPO2({}); }
         else { setStockRowsPO3(rows); setStockMapPO3({}); }
+        setUploadStatus({ kind: 'success', message: `Stock ${store} carregado localmente — ${rows.length} referências (sem cloud).`, store });
+        setTimeout(() => setUploadStatus(s => s?.store === store && s?.kind === 'success' ? null : s), 4000);
       }
+    } catch (e) {
+      console.error('[stock-upload] cloud save failed', e);
+      setUploadStatus({ kind: 'error', message: `Erro inesperado: ${e?.message || e}`, store });
+      // Still keep local data
+      if (store === 'PO2') { setStockRowsPO2(rows); setStockMapPO2({}); }
+      else { setStockRowsPO3(rows); setStockMapPO3({}); }
     } finally {
       setUploading(null);
     }
@@ -8167,6 +8257,28 @@ function StockView({
   return (
     <div className="fade-up">
       <Header eyebrow="Inventário" title="Stock" subtitle="Carrega os dois ficheiros — armazém (PO2) e ponto de loja (PO3). Os ficheiros são partilhados com toda a equipa: ao carregar um novo, todos os colegas passam a ter o stock atualizado. Mantém-se um histórico dos últimos 5 uploads por loja." />
+      {uploadStatus && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: uploadStatus.kind === 'error' ? '#b91c1c'
+                    : uploadStatus.kind === 'success' ? T.green
+                    : T.bgEl,
+          color: uploadStatus.kind === 'error' || uploadStatus.kind === 'success' ? '#fff' : T.ink,
+          border: uploadStatus.kind === 'parsing' ? `1px solid ${T.line}` : 'none',
+          padding: '10px 14px', marginBottom: 16, borderRadius: 6, fontSize: 13,
+        }}>
+          {uploadStatus.kind === 'parsing' && <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.accent, animation: 'pulse 1s infinite' }} />}
+          {uploadStatus.kind === 'success' && <Check size={15} />}
+          {uploadStatus.kind === 'error' && <AlertTriangle size={15} />}
+          <span style={{ flex: 1 }}><strong>{uploadStatus.store}:</strong> {uploadStatus.message}</span>
+          {(uploadStatus.kind === 'error' || uploadStatus.kind === 'success') && (
+            <button onClick={() => setUploadStatus(null)} style={{
+              background: 'transparent', border: '1px solid rgba(255,255,255,0.4)',
+              color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+            }}>Dispensar</button>
+          )}
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 32 }}>
         <StockPanel
           icon={Warehouse} eyebrow="PO2 — Armazém"
