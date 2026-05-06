@@ -30,6 +30,35 @@ const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
     })
   : null;
 
+// ─────────────────────────────────────────────────────────────────────────
+// Error reporting — minimal stub for production observability
+// To activate Sentry: `npm i @sentry/nextjs`, set NEXT_PUBLIC_SENTRY_DSN
+// in env, replace the body of `reportError` with `Sentry.captureException`.
+// Until then, errors are buffered to Supabase `error_log` table (best-effort).
+// ─────────────────────────────────────────────────────────────────────────
+function reportError(err, context = {}) {
+  try {
+    const payload = {
+      message: err?.message || String(err),
+      stack: err?.stack ? String(err.stack).slice(0, 4000) : null,
+      url: typeof window !== 'undefined' ? window.location.href : null,
+      user_agent: typeof navigator !== 'undefined' ? navigator.userAgent : null,
+      context: context || {},
+      created_at: new Date().toISOString(),
+    };
+    console.error('[reportError]', payload);
+    // Best-effort: silently drop if table doesn't exist (no app crash)
+    if (supabase) supabase.from('error_log').insert(payload).then(() => {}, () => {});
+  } catch {}
+}
+
+// Wire global handlers so uncaught errors / rejections also get logged
+if (typeof window !== 'undefined' && !window.__ddErrorWired) {
+  window.__ddErrorWired = true;
+  window.addEventListener('error', (ev) => reportError(ev.error || ev.message, { type: 'window.error' }));
+  window.addEventListener('unhandledrejection', (ev) => reportError(ev.reason, { type: 'unhandledrejection' }));
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tokens
@@ -434,8 +463,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.9';
-const APP_BUILD_DATE = '2026-05-06T17:30';
+const APP_VERSION = '3.2.0';
+const APP_BUILD_DATE = '2026-05-06T18:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -579,6 +608,39 @@ async function setUserSuspended(userId, suspended) {
   return { ok: !error, error: error?.message };
 }
 
+// ─── Realtime presence ─────────────────────────────────────────────────
+// Hook: tracks who is currently viewing a given resource (e.g. a period or
+// campaign). Returns a deduped array of { user_id, email, online_at }.
+// channelKey should be a stable string per resource (eg `period:${id}`).
+function usePresence(channelKey, currentUser) {
+  const [peers, setPeers] = useState([]);
+  useEffect(() => {
+    if (!supabase || !channelKey || !currentUser?.id) return;
+    const channel = supabase.channel(`presence:${channelKey}`, {
+      config: { presence: { key: currentUser.id } },
+    });
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState();
+        const all = [];
+        for (const [userId, metas] of Object.entries(state)) {
+          if (metas[0]) all.push({ user_id: userId, ...metas[0] });
+        }
+        setPeers(all);
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await channel.track({
+            email: currentUser.email,
+            online_at: new Date().toISOString(),
+          });
+        }
+      });
+    return () => { channel.unsubscribe(); };
+  }, [channelKey, currentUser?.id, currentUser?.email]);
+  return peers;
+}
+
 // ─── Activity log ──────────────────────────────────────────────────────
 // Record an action the user just performed. Best-effort; don't block on errors.
 async function logActivity({ userId, userEmail, action, resourceType, resourceId, resourceName, metadata }) {
@@ -596,6 +658,23 @@ async function logActivity({ userId, userEmail, action, resourceType, resourceId
   } catch (err) {
     console.warn('Activity log failed:', err);
   }
+}
+
+// Fetch activity for a specific resource (campaign/period)
+async function fetchActivityForResource(resourceType, resourceId, { limit = 50 } = {}) {
+  if (!supabase || !resourceId) return [];
+  const { data, error } = await supabase
+    .from('activity_log')
+    .select('*')
+    .eq('resource_type', resourceType)
+    .eq('resource_id', resourceId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) {
+    console.warn('Fetch resource activity failed:', error.message);
+    return [];
+  }
+  return data || [];
 }
 
 // Fetch recent activity (admin sees all, users see their own — enforced by RLS)
@@ -4112,6 +4191,10 @@ function CampaignsView({
   const [restoreInfo, setRestoreInfo] = useState(null);
   // Local upload status: { kind: 'parsing'|'saving'|'success'|'error', message: string }
   const [uploadStatus, setUploadStatus] = useState(null);
+  // History modal: { type: 'period' | 'campaign', id, name }
+  const [historyFor, setHistoryFor] = useState(null);
+  // Realtime presence — show who else is viewing the same period
+  const presencePeers = usePresence(selectedPeriodId ? `period:${selectedPeriodId}` : null, user);
 
   // Selected period object (null when not in any period)
   const selectedPeriod = useMemo(
@@ -4741,6 +4824,14 @@ function CampaignsView({
         }}>
           <Pencil size={11} /> Editar
         </button>
+        <button onClick={() => setHistoryFor({ type: 'period', id: selectedPeriod.id, name: selectedPeriod.name })} title="Histórico de alterações" style={{
+          padding: '6px 10px', background: 'transparent', color: T.inkSoft,
+          border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 11,
+          display: 'flex', alignItems: 'center', gap: 4,
+        }}>
+          <Activity size={11} /> Histórico
+        </button>
+        <PresenceIndicator peers={presencePeers} currentUserId={user?.id} />
         {scopedCampaigns.length === 0 && periods.length > 1 && (
           <button onClick={() => setShowImportFromPast(true)} title="Importar zonas/produtos de campanhas anteriores" style={{
             padding: '6px 10px', background: T.accent, color: '#fff',
@@ -5139,6 +5230,15 @@ function CampaignsView({
           onConfirm={confirmRestore}
         />
       )}
+
+      {historyFor && (
+        <HistoryModal
+          resourceType={historyFor.type}
+          resourceId={historyFor.id}
+          resourceName={historyFor.name}
+          onClose={() => setHistoryFor(null)}
+        />
+      )}
       </>
       )}
 
@@ -5207,6 +5307,156 @@ function CampaignsView({
           onApply={(acceptedMap) => handleApplySuggestions(acceptedMap)}
         />
       )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PresenceIndicator — shows avatars of users currently viewing the same resource
+// ─────────────────────────────────────────────────────────────────────────
+function PresenceIndicator({ peers = [], currentUserId }) {
+  // Filter out self
+  const others = peers.filter(p => p.user_id !== currentUserId);
+  if (others.length === 0) return null;
+  const colors = ['#7C9885', '#D87C5A', '#5B7C99', '#A87C9C', '#C49A6C'];
+  const initials = (email) => {
+    if (!email) return '?';
+    const parts = email.split('@')[0].split(/[._-]/);
+    return (parts[0]?.[0] || '?').toUpperCase() + (parts[1]?.[0] || '').toUpperCase();
+  };
+  return (
+    <div title={`${others.length} a ver agora: ${others.map(o => o.email).join(', ')}`} style={{
+      display: 'flex', alignItems: 'center', gap: 4, marginLeft: 4,
+    }}>
+      {others.slice(0, 3).map((p, i) => (
+        <div key={p.user_id} style={{
+          width: 22, height: 22, borderRadius: '50%',
+          background: colors[i % colors.length], color: '#fff',
+          fontSize: 9, fontWeight: 700, fontFamily: 'Geist Mono, monospace',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: `2px solid ${T.bg}`,
+          marginLeft: i === 0 ? 0 : -8,
+        }}>
+          {initials(p.email)}
+        </div>
+      ))}
+      {others.length > 3 && (
+        <span style={{ fontSize: 10, color: T.inkMute, marginLeft: 2 }}>+{others.length - 3}</span>
+      )}
+      <span style={{
+        width: 6, height: 6, borderRadius: '50%', background: T.green,
+        marginLeft: 4, animation: 'pulse 2s infinite',
+      }} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// HistoryModal — shows activity log for a specific resource (period/campaign)
+// ─────────────────────────────────────────────────────────────────────────
+function HistoryModal({ resourceType, resourceId, resourceName, onClose }) {
+  const [entries, setEntries] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchActivityForResource(resourceType, resourceId, { limit: 100 }).then(data => {
+      if (!cancelled) setEntries(data);
+    });
+    return () => { cancelled = true; };
+  }, [resourceType, resourceId]);
+
+  const ACTION_LABELS = {
+    create: 'Criou', update: 'Atualizou', delete: 'Eliminou',
+    upload: 'Carregou', upsert: 'Atualizou', activate: 'Activou',
+  };
+  const ACTION_COLORS = {
+    create: T.green, update: T.accent, delete: '#b91c1c',
+    upload: T.green, upsert: T.accent, activate: T.green,
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9999, padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 10, border: `1px solid ${T.line}`,
+        width: '100%', maxWidth: 640, maxHeight: '85vh',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 24px 48px -12px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{
+          padding: '14px 20px', borderBottom: `1px solid ${T.line}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>
+              Histórico · {resourceType === 'period' ? 'Período' : 'Campanha'}
+            </div>
+            <div className="display" style={{ fontSize: 18, fontStyle: 'italic', marginTop: 2 }}>{resourceName}</div>
+          </div>
+          <button onClick={onClose} style={{
+            padding: 6, background: 'transparent', border: 'none', color: T.inkMute, borderRadius: 4, cursor: 'pointer',
+          }}><X size={18} /></button>
+        </div>
+
+        <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
+          {entries === null ? (
+            <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>A carregar…</div>
+          ) : entries.length === 0 ? (
+            <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+              <Activity size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
+              <div>Sem alterações registadas para este recurso.</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {entries.map(e => {
+                const dt = new Date(e.created_at);
+                const dateStr = dt.toLocaleDateString('pt-PT', { day: '2-digit', month: 'short' });
+                const timeStr = dt.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
+                const actionColor = ACTION_COLORS[e.action] || T.inkMute;
+                return (
+                  <div key={e.id} style={{
+                    display: 'flex', gap: 10, padding: '8px 10px',
+                    border: `1px solid ${T.lineSoft}`, borderRadius: 6,
+                    background: T.paper,
+                  }}>
+                    <div style={{
+                      width: 4, alignSelf: 'stretch', background: actionColor, borderRadius: 2,
+                    }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 12, fontWeight: 500, color: T.ink }}>
+                          {ACTION_LABELS[e.action] || e.action}
+                        </span>
+                        <span style={{ fontSize: 11, color: T.inkSoft }}>{e.user_email || 'sistema'}</span>
+                        <span className="mono" style={{ fontSize: 10, color: T.inkMute, marginLeft: 'auto' }}>
+                          {dateStr} · {timeStr}
+                        </span>
+                      </div>
+                      {e.metadata && Object.keys(e.metadata).length > 0 && (
+                        <div className="mono" style={{
+                          fontSize: 10, color: T.inkMute, marginTop: 4,
+                          background: T.bgEl, padding: '4px 6px', borderRadius: 3,
+                          overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}>
+                          {Object.entries(e.metadata).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ')}
+                        </div>
+                      )}
+                      {e.reverted && (
+                        <div style={{ fontSize: 10, color: T.accent, fontStyle: 'italic', marginTop: 3 }}>
+                          ⤺ Revertido em {new Date(e.reverted_at).toLocaleString('pt-PT')}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -7433,14 +7683,49 @@ function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stock
   return (
     <div>
       <div className="no-print" style={{
-        display: 'flex', justifyContent: 'flex-end', marginBottom: 12,
+        display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 12,
       }}>
+        <button
+          onClick={async () => {
+            const target = document.querySelector('.print-area');
+            if (!target) return;
+            const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+              import('jspdf'), import('html2canvas'),
+            ]);
+            const canvas = await html2canvas(target, { scale: 2, backgroundColor: '#ffffff', useCORS: true });
+            const imgData = canvas.toDataURL('image/png');
+            // A4 landscape: 297 x 210 mm
+            const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+            const pdfW = 297, pdfH = 210;
+            const imgW = pdfW - 10; // 5mm margin each side
+            const imgH = (canvas.height * imgW) / canvas.width;
+            let heightLeft = imgH;
+            let y = 5;
+            pdf.addImage(imgData, 'PNG', 5, y, imgW, imgH);
+            heightLeft -= (pdfH - 10);
+            while (heightLeft > 0) {
+              y = -((imgH - heightLeft) - 5);
+              pdf.addPage();
+              pdf.addImage(imgData, 'PNG', 5, y, imgW, imgH);
+              heightLeft -= (pdfH - 10);
+            }
+            const stamp = new Date().toISOString().slice(0, 10);
+            pdf.save(`destaques_${stamp}.pdf`);
+          }}
+          style={{
+            padding: '8px 14px', fontSize: 12, fontWeight: 500,
+            background: 'transparent', color: T.ink, border: `1px solid ${T.line}`, borderRadius: 6,
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+          }}
+        >
+          <Download size={13} /> Exportar PDF
+        </button>
         <button
           onClick={() => window.print()}
           style={{
             padding: '8px 14px', fontSize: 12, fontWeight: 500,
             background: T.ink, color: T.bg, border: 'none', borderRadius: 6,
-            display: 'flex', alignItems: 'center', gap: 6,
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
           }}
         >
           <FileText size={13} /> Imprimir
