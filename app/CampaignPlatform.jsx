@@ -434,8 +434,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.6';
-const APP_BUILD_DATE = '2026-05-06T15:50';
+const APP_VERSION = '3.1.7';
+const APP_BUILD_DATE = '2026-05-06T16:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4238,14 +4238,30 @@ function CampaignsView({
       return;
     }
 
-    // If a campaign with the same key is already loaded, replace its rows but keep its floors
+    // If a campaign with the same key is already loaded, replace its rows + headers
+    // and ALWAYS align its periodId with the currently selected period (fixes the
+    // case where re-uploading inside period X kept the campaign in period Y).
     const existingInSession = campaigns.find(c => c.key === key);
     if (existingInSession) {
-      const updated = { ...existingInSession, rows, headers, itemCount: rows.length, uploaded: new Date() };
+      const targetPeriodId = selectedPeriodId || existingInSession.periodId || null;
+      const movedFromOtherPeriod = existingInSession.periodId && existingInSession.periodId !== targetPeriodId;
+      const updated = {
+        ...existingInSession,
+        rows, headers,
+        itemCount: rows.length,
+        uploaded: new Date(),
+        periodId: targetPeriodId,
+        updatedAt: new Date().toISOString(),
+      };
       setCampaigns(cs => cs.map(c => c.id === existingInSession.id ? updated : c));
       setActiveIds(ids => ids.includes(existingInSession.id) ? ids : [...ids, existingInSession.id]);
-      setUploadStatus({ kind: 'success', message: `"${file.name}" actualizado — ${rows.length} produtos. A guardar na cloud…` });
-      setTimeout(() => setUploadStatus(null), 3500);
+      setUploadStatus({
+        kind: 'success',
+        message: movedFromOtherPeriod
+          ? `"${file.name}" movido para este período — ${rows.length} produtos. A guardar na cloud…`
+          : `"${file.name}" actualizado — ${rows.length} produtos. A guardar na cloud…`,
+      });
+      setTimeout(() => setUploadStatus(null), 4000);
       return;
     }
 
@@ -4789,7 +4805,67 @@ function CampaignsView({
             )}
           </div>
           {scopedCampaigns.length === 0 ? (
-            <div style={{ fontSize: 13, color: T.inkMute }}>nenhum Excel ainda</div>
+            <div>
+              <div style={{ fontSize: 13, color: T.inkMute, marginBottom: 8 }}>nenhum Excel ainda</div>
+              {(() => {
+                const elsewhere = campaigns.filter(c => c.periodId !== selectedPeriodId);
+                if (elsewhere.length === 0) return null;
+                // Group by period name
+                const byPeriod = new Map();
+                elsewhere.forEach(c => {
+                  const p = periods.find(pp => pp.id === c.periodId);
+                  const name = p?.name || 'Sem período';
+                  if (!byPeriod.has(name)) byPeriod.set(name, []);
+                  byPeriod.get(name).push(c);
+                });
+                return (
+                  <div style={{
+                    marginTop: 8, padding: '10px 12px', fontSize: 11,
+                    background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6,
+                    color: T.inkSoft, lineHeight: 1.5,
+                  }}>
+                    <div style={{ fontWeight: 500, color: T.ink, marginBottom: 6 }}>
+                      📂 Tens {elsewhere.length} ficheiro{elsewhere.length === 1 ? '' : 's'} noutros períodos:
+                    </div>
+                    {[...byPeriod.entries()].map(([pname, list]) => (
+                      <div key={pname} style={{ marginBottom: 6 }}>
+                        <div style={{ fontSize: 10, color: T.inkMute, marginBottom: 2 }}>
+                          {pname} ({list.length}):
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          {list.slice(0, 5).map(c => (
+                            <button
+                              key={c.id}
+                              onClick={() => {
+                                setCampaigns(cs => cs.map(x => x.id === c.id ? { ...x, periodId: selectedPeriodId, updatedAt: new Date().toISOString() } : x));
+                                setActiveIds(ids => ids.includes(c.id) ? ids : [c.id, ...ids]);
+                              }}
+                              style={{
+                                textAlign: 'left', padding: '4px 8px', fontSize: 11,
+                                background: T.paper, border: `1px solid ${T.lineSoft}`,
+                                borderRadius: 4, color: T.ink, cursor: 'pointer',
+                                display: 'flex', alignItems: 'center', gap: 6,
+                              }}
+                              title={`Mover "${c.name}" para o período actual`}
+                            >
+                              <ArrowRight size={11} style={{ color: T.accent, flexShrink: 0 }} />
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{c.name}</span>
+                              <span style={{ fontSize: 9, color: T.inkMute }}>{c.itemCount}</span>
+                            </button>
+                          ))}
+                          {list.length > 5 && (
+                            <div style={{ fontSize: 10, color: T.inkMute, fontStyle: 'italic' }}>… e mais {list.length - 5}</div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4, fontStyle: 'italic' }}>
+                      Clica num ficheiro para o mover para este período.
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 3, maxHeight: 320, overflowY: 'auto' }}>
               {scopedCampaigns.map((c, idx) => {
