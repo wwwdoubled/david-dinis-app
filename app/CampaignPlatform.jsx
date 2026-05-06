@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.9';
-const APP_BUILD_DATE = '2026-05-06T03:00';
+const APP_VERSION = '3.0.0';
+const APP_BUILD_DATE = '2026-05-06T04:00';
 const APP_CHANGELOG = [
+  { version: '3.0.0', date: '2026-05-06', summary: 'Fix: campanhas aparecem todas ao mesmo tempo — fetch de metadados separado das rows comprimidas; hydratação das rows em background por campanha' },
   { version: '2.9.9', date: '2026-05-06', summary: 'Plano: EAN+descrição+família gravados no slot (independente do Excel). AutoFill: alocação e restrição de famílias/subfamílias por móvel' },
   { version: '2.9.8', date: '2026-05-06', summary: 'Alterações: filtro por família, botão "Sem alterações" na barra de filtros, artigos sem alterações na tabela e no CSV' },
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
@@ -1049,7 +1050,9 @@ async function cloudSetPeriodHidden(periodId, hidden) {
 // ─────────────────────────────────────────────────────────────────────────
 // Shared campaigns (Excels) — JSONB rows in 'campaigns' table
 // ─────────────────────────────────────────────────────────────────────────
-async function cloudFetchAllCampaigns() {
+// Light fetch: metadata + headers only (no rows). Fast — no large blobs.
+// Returns campaign shells with rows:[], rowsNeedHydration:true when compressed.
+async function cloudFetchAllCampaignsMeta() {
   if (!supabase) return [];
   const { data, error } = await supabase
     .from('campaigns')
@@ -1059,10 +1062,10 @@ async function cloudFetchAllCampaigns() {
     console.warn('cloudFetchAllCampaigns failed:', error.message);
     return [];
   }
-  // Decompress rows + floors in parallel
+  // Only decompress floors (small). For rows: use inline rows if present, else mark for hydration.
   const campaigns = await Promise.all((data || []).map(async (c) => {
-    let rows = c.rows && c.rows.length ? c.rows : null;
-    if (!rows && c.rows_compressed) rows = await gunzipJSON(c.rows_compressed);
+    const hasInlineRows = c.rows && c.rows.length > 0;
+    let rows = hasInlineRows ? c.rows : [];
     let floors = c.floors;
     if (!floors && c.floors_compressed) floors = await gunzipJSON(c.floors_compressed);
     return {
@@ -1072,8 +1075,9 @@ async function cloudFetchAllCampaigns() {
       key: c.campaign_key,
       name: c.name,
       headers: c.headers || [],
-      rows: rows || [],
-      itemCount: (rows || []).length,
+      rows,
+      itemCount: hasInlineRows ? rows.length : (c.rows_compressed ? -1 : 0), // -1 = known compressed, count unknown yet
+      _rowsCompressed: !hasInlineRows && c.rows_compressed ? c.rows_compressed : null, // stored for lazy hydration
       floors,
       uploaded: c.uploaded_at ? new Date(c.uploaded_at) : new Date(),
       created_by: c.created_by,
@@ -1082,6 +1086,19 @@ async function cloudFetchAllCampaigns() {
     };
   }));
   return campaigns;
+}
+
+// Full fetch kept for periodic refresh (already fast after first load since most are cached)
+async function cloudFetchAllCampaigns() {
+  const meta = await cloudFetchAllCampaignsMeta();
+  // Hydrate all compressed rows now (used by periodic refresh — no streaming needed)
+  return Promise.all(meta.map(async c => {
+    if (c._rowsCompressed) {
+      const rows = await gunzipJSON(c._rowsCompressed);
+      return { ...c, rows, itemCount: rows.length, _rowsCompressed: null };
+    }
+    return c;
+  }));
 }
 
 async function cloudUpsertCampaign(campaign, userId) {
@@ -2411,16 +2428,16 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     let cancelled = false;
 
     (async () => {
-      // 1. Fetch cloud data
-      const [cloudPeriods, cloudCampaigns] = await Promise.all([
+      // 1. Fetch periods + campaign metadata in parallel (no large row blobs yet → fast)
+      const [cloudPeriods, cloudCampaignsMeta] = await Promise.all([
         cloudFetchAllPeriods(),
-        cloudFetchAllCampaigns(),
+        cloudFetchAllCampaignsMeta(),
       ]);
       if (cancelled) return;
 
-      // 2. MERGE immediately — show everything right away without waiting for migration
+      // 2. MERGE immediately — show everything right away without waiting for row hydration
       const earlyMergedPeriods = mergePeriods(periodsRef.current, cloudPeriods);
-      const earlyMergedCampaigns = mergeCampaigns(campaignsRef.current, cloudCampaigns);
+      const earlyMergedCampaigns = mergeCampaigns(campaignsRef.current, cloudCampaignsMeta);
       earlyMergedPeriods.sort((a, b) => {
         if (!a.startDate && !b.startDate) return 0;
         if (!a.startDate) return 1; if (!b.startDate) return -1;
@@ -2430,9 +2447,23 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
+      // 2b. Hydrate compressed rows in background — update each campaign as its rows arrive
+      const needsHydration = cloudCampaignsMeta.filter(c => c._rowsCompressed);
+      if (needsHydration.length > 0) {
+        // Decompress all in parallel (CPU-bound, but doesn't block UI render)
+        needsHydration.forEach(cloudC => {
+          gunzipJSON(cloudC._rowsCompressed).then(rows => {
+            if (cancelled) return;
+            setCampaigns(prev => prev.map(c =>
+              c.id === cloudC.id ? { ...c, rows, itemCount: rows.length, _rowsCompressed: null } : c
+            ));
+          }).catch(() => {});
+        });
+      }
+
       // 3. Detect local-only items that need to be uploaded (migration, background)
       const cloudPeriodIds = new Set(cloudPeriods.map(p => p.id));
-      const cloudCampaignKeys = new Set(cloudCampaigns.map(c => c.user_id + ':' + c.key));
+      const cloudCampaignKeys = new Set(cloudCampaignsMeta.map(c => c.user_id + ':' + c.key));
       const localOnlyPeriods = periodsRef.current.filter(p => !cloudPeriodIds.has(p.id));
       const localOnlyCampaigns = campaignsRef.current.filter(c => !cloudCampaignKeys.has(user.id + ':' + c.key));
       if (localOnlyPeriods.length === 0 && localOnlyCampaigns.length === 0) return; // nothing to migrate
@@ -2576,6 +2607,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       const sig = `${c.id}|${c.name}|${c.periodId}|${c.updatedAt}|${JSON.stringify(c.floors)}`;
       if (idbSigRef.current.get(c.key) === sig) return; // unchanged — skip write
       idbSigRef.current.set(c.key, sig);
+      // Skip IDB write if rows aren't hydrated yet (avoid caching empty rows)
+      if (c._rowsCompressed) return;
       idbPut({
         key: c.key,
         id: c.id,
@@ -2600,6 +2633,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       // Find campaigns whose floors actually changed — push them in parallel
       const toSync = currentCampaigns.filter(c => {
         if (!c.key || !c.floors) return false;
+        if (c._rowsCompressed) return false; // not hydrated yet — skip
         const sig = JSON.stringify(c.floors);
         return lastPushedFloorsRef.current.get(c.id) !== sig;
       });
