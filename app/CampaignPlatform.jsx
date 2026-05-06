@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.1';
-const APP_BUILD_DATE = '2026-05-06T13:10';
+const APP_VERSION = '3.1.2';
+const APP_BUILD_DATE = '2026-05-06T13:25';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -10995,6 +10995,7 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
     campaigns: { label: 'Campanhas', icon: Layers },
     changes: { label: 'Alterações', icon: GitCompareArrows },
     stock: { label: 'Stock', icon: Package },
+    inventory: { label: 'Inventário', icon: ScanLine },
     images: { label: 'Folhetos', icon: ImageIcon },
     pdfs: { label: 'PDFs', icon: FileText },
     notes: { label: 'Notas', icon: NotebookPen },
