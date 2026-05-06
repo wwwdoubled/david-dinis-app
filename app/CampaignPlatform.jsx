@@ -425,9 +425,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.8';
-const APP_BUILD_DATE = '2026-05-06T02:10';
+const APP_VERSION = '2.9.9';
+const APP_BUILD_DATE = '2026-05-06T03:00';
 const APP_CHANGELOG = [
+  { version: '2.9.9', date: '2026-05-06', summary: 'Plano: EAN+descrição+família gravados no slot (independente do Excel). AutoFill: alocação e restrição de famílias/subfamílias por móvel' },
   { version: '2.9.8', date: '2026-05-06', summary: 'Alterações: filtro por família, botão "Sem alterações" na barra de filtros, artigos sem alterações na tabela e no CSV' },
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
@@ -4341,6 +4342,9 @@ function CampaignsView({
           capacityMin: perZone.capacityMin ?? rules?.capacityMin ?? 1,
           capacityMax: perZone.capacityMax ?? rules?.capacityMax ?? 8,
           preferredFamilies: perZone.preferredFamilies ?? rules?.preferredFamilies ?? [],
+          allocatedFamilies: perZone.allocatedFamilies ?? [],
+          restrictedFamilies: perZone.restrictedFamilies ?? [],
+          restrictedSubfamilies: perZone.restrictedSubfamilies ?? [],
           minDiscount: perZone.minDiscount ?? rules?.minDiscount ?? 0,
           minStock: perZone.minStock ?? rules?.minStock ?? 0,
           maxPrice: perZone.maxPrice ?? rules?.maxPrice ?? 0,
@@ -4393,12 +4397,17 @@ function CampaignsView({
         const key = `${f.id}:${z.id}`;
         const accepted = acceptedMap.get(key);
         if (!accepted || accepted.length === 0) return z;
+        const _cols = detectColumns(primaryCampaign.headers);
         const newSlots = accepted.map(sg => ({
           id: 's-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
-          ref: sg.product[detectColumns(primaryCampaign.headers).ean] || sg.ean,
-          status: 'sugerido',
+          ref: sg.product[_cols.ean] || sg.ean,
+          name: _cols.description ? String(sg.product[_cols.description] || '') : '',
+          family: _cols.family ? String(sg.product[_cols.family] || '') : '',
+          subfamily: _cols.subfamily ? String(sg.product[_cols.subfamily] || '') : '',
+          state: 'pending',
+          cartaz: 'A3 HORIZONTAL',
+          date: '', campaign: '', observations: '', stockPO2: '', stockPO3: '', pedidoGU: '', star: false,
           notes: `auto: ${sg.reasons.join(', ') || 'auto-preenchido'}`,
-          starred: false,
         }));
         return { ...z, slots: [...z.slots, ...newSlots] };
       }),
@@ -5075,7 +5084,10 @@ function defaultZoneAutofillConfig() {
     enabled: true,
     capacityMin: 1,
     capacityMax: 8,
-    preferredFamilies: [], // empty = all
+    preferredFamilies: [],    // legacy — keep for compat
+    allocatedFamilies: [],    // soft boost: these families score higher in this zone
+    restrictedFamilies: [],   // hard filter: ONLY products from these families (empty = all)
+    restrictedSubfamilies: [],// hard filter: ONLY products from these subfamilies (empty = all)
     minDiscount: 0,
     minStock: 0,
     maxPrice: 0,
@@ -5181,8 +5193,18 @@ function suggestForZone({
     if (!ean) continue;
     if (excludeEans.has(ean)) continue;
 
-    // Family filter
-    if (config.preferredFamilies && config.preferredFamilies.length > 0 && columns.family) {
+    // Hard family restriction: only allow products from these families
+    if (config.restrictedFamilies && config.restrictedFamilies.length > 0 && columns.family) {
+      const fam = String(product[columns.family] || '').trim();
+      if (!config.restrictedFamilies.includes(fam)) continue;
+    }
+    // Hard subfamily restriction: only allow products from these subfamilies
+    if (config.restrictedSubfamilies && config.restrictedSubfamilies.length > 0 && columns.subfamily) {
+      const sub = String(product[columns.subfamily] || '').trim();
+      if (!config.restrictedSubfamilies.includes(sub)) continue;
+    }
+    // Legacy: preferredFamilies used as hard filter (kept for backwards compat)
+    if (config.preferredFamilies && config.preferredFamilies.length > 0 && !config.restrictedFamilies?.length && columns.family) {
       const fam = String(product[columns.family] || '').trim();
       if (!config.preferredFamilies.includes(fam)) continue;
     }
@@ -5204,7 +5226,15 @@ function suggestForZone({
     if (minStock > 0 && stockTotal < minStock) continue;
 
     // Score it
-    const { score, reasons } = scoreProduct(product, columns, stockTotal, strategy);
+    let { score, reasons } = scoreProduct(product, columns, stockTotal, strategy);
+    // Soft boost for allocated families: +30% score for matching family
+    if (config.allocatedFamilies && config.allocatedFamilies.length > 0 && columns.family) {
+      const fam = String(product[columns.family] || '').trim();
+      if (config.allocatedFamilies.includes(fam)) {
+        score *= 1.3;
+        reasons = [...reasons, `família alocada: ${fam}`];
+      }
+    }
     candidates.push({ ean, product, score, reasons, stockTotal });
   }
 
@@ -6789,6 +6819,17 @@ function SlotRow({ slot, activeCampaign, candidates, onUpdate, onDelete }) {
   const [showSuggest, setShowSuggest] = useState(false);
   const stateOpt = STATES.find(s => s.id === slot.state) || STATES[0];
 
+  // If slot.name is empty but slot.ref is set, resolve description from activeCampaign by EAN
+  const resolvedName = useMemo(() => {
+    if (slot.name) return slot.name;
+    if (!slot.ref || !activeCampaign) return '';
+    const cols = detectColumns(activeCampaign.headers);
+    if (!cols.ean || !cols.description) return '';
+    const normRef = normalizeEAN(slot.ref);
+    const match = activeCampaign.rows.find(r => normalizeEAN(String(r[cols.ean] || '')) === normRef);
+    return match ? String(match[cols.description] || '') : '';
+  }, [slot.ref, slot.name, activeCampaign]);
+
   // Auto-suggest from active campaign or candidates as user types
   const suggestions = useMemo(() => {
     if (!slot.name || slot.name.length < 2) return [];
@@ -6811,13 +6852,19 @@ function SlotRow({ slot, activeCampaign, candidates, onUpdate, onDelete }) {
         <input value={slot.ref} onChange={e => onUpdate({ ref: e.target.value })} className="row-input" placeholder="ref" style={{ fontSize: 11 }} />
       </td>
       <td style={{ ...ztdStyle, position: 'relative' }}>
+        {slot.family && (
+          <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', marginBottom: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {slot.family}{slot.subfamily ? ` › ${slot.subfamily}` : ''}
+          </div>
+        )}
         <input
           value={slot.name}
           onChange={e => { onUpdate({ name: e.target.value }); setShowSuggest(true); }}
           onFocus={() => setShowSuggest(true)}
           onBlur={() => setTimeout(() => setShowSuggest(false), 200)}
           className="row-input"
-          placeholder="nome do produto"
+          placeholder={resolvedName || 'nome do produto'}
+          title={resolvedName}
         />
         {showSuggest && suggestions.length > 0 && (
           <div style={{
@@ -11787,6 +11834,17 @@ function RulesStep({ state, campaign, floors, onBack, onContinue }) {
     return Array.from(set).sort();
   }, [campaign]);
 
+  const availableSubfamilies = useMemo(() => {
+    const cols = detectColumns(campaign.headers);
+    if (!cols.subfamily) return [];
+    const set = new Set();
+    campaign.rows.forEach(r => {
+      const f = String(r[cols.subfamily] || '').trim();
+      if (f) set.add(f);
+    });
+    return Array.from(set).sort();
+  }, [campaign]);
+
   const targetZones = useMemo(() => {
     if (state.mode === 'zone') {
       const f = floors.find(x => x.id === state.floorId);
@@ -11805,6 +11863,14 @@ function RulesStep({ state, campaign, floors, onBack, onContinue }) {
 
   const setZoneCapacity = (zid, key, val) => {
     setPerZone(p => ({ ...p, [zid]: { ...p[zid], [key]: Number(val) || 0 } }));
+  };
+
+  const toggleZoneFamily = (zid, listKey, fam) => {
+    setPerZone(p => {
+      const cur = p[zid]?.[listKey] || [];
+      const next = cur.includes(fam) ? cur.filter(x => x !== fam) : [...cur, fam];
+      return { ...p, [zid]: { ...p[zid], [listKey]: next } };
+    });
   };
 
   const submit = () => {
@@ -11897,7 +11963,7 @@ function RulesStep({ state, campaign, floors, onBack, onContinue }) {
       )}
 
       {/* Advanced — per-zone overrides */}
-      {state.mode === 'global' && targetZones.length > 1 && (
+      {targetZones.length > 0 && (
         <div style={{ marginBottom: 18 }}>
           <button onClick={() => setShowAdvanced(s => !s)} style={{
             display: 'flex', alignItems: 'center', gap: 6,
@@ -11905,35 +11971,110 @@ function RulesStep({ state, campaign, floors, onBack, onContinue }) {
             color: T.inkSoft, border: 'none', fontSize: 12,
             cursor: 'pointer', fontFamily: 'inherit',
           }}>
-            <Settings size={12} /> {showAdvanced ? 'Ocultar' : 'Configuração avançada por móvel'}
+            <Settings size={12} /> {showAdvanced ? 'Ocultar' : 'Configuração avançada por móvel (famílias, capacidade)'}
             <ChevronRight size={12} style={{ transform: showAdvanced ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
           </button>
           {showAdvanced && (
             <div style={{ marginTop: 8, padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
-              <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 10 }}>
-                Sobrepor a capacidade global em móveis específicos. Vazio = usa o global.
+              <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 12 }}>
+                Configura por móvel: capacidade, famílias alocadas (boost) e famílias/subfamílias restritas (filtro duro).
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 240, overflowY: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 440, overflowY: 'auto' }}>
                 {targetZones.map(({ floor, zone }) => {
                   const ov = perZone[zone.id] || {};
+                  const allocFams = ov.allocatedFamilies || [];
+                  const restFams = ov.restrictedFamilies || [];
+                  const restSubs = ov.restrictedSubfamilies || [];
+                  const hasFamilyConfig = allocFams.length > 0 || restFams.length > 0 || restSubs.length > 0;
                   return (
                     <div key={zone.id} style={{
-                      display: 'grid', gridTemplateColumns: '1fr 80px 80px',
-                      gap: 8, alignItems: 'center', padding: '6px 8px',
-                      background: T.bg, border: `1px solid ${T.lineSoft}`, borderRadius: 4,
+                      padding: '10px 12px',
+                      background: T.bg, border: `1px solid ${hasFamilyConfig ? T.accent : T.lineSoft}`, borderRadius: 6,
                     }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 12, color: T.ink, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{zone.name}</div>
-                        <div className="mono" style={{ fontSize: 9, color: T.inkMute }}>{floor.name}</div>
+                      {/* Zone header + capacity */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 80px', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12, color: T.ink, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{zone.name}</div>
+                          <div className="mono" style={{ fontSize: 9, color: T.inkMute }}>{floor.name}</div>
+                        </div>
+                        <input type="number" placeholder={`min ${capacityMin}`} value={ov.capacityMin ?? ''}
+                          onChange={e => setZoneCapacity(zone.id, 'capacityMin', e.target.value)}
+                          style={{ ...dialogInput(), padding: '4px 6px', fontSize: 11 }}
+                        />
+                        <input type="number" placeholder={`max ${capacityMax}`} value={ov.capacityMax ?? ''}
+                          onChange={e => setZoneCapacity(zone.id, 'capacityMax', e.target.value)}
+                          style={{ ...dialogInput(), padding: '4px 6px', fontSize: 11 }}
+                        />
                       </div>
-                      <input type="number" placeholder={`min ${capacityMin}`} value={ov.capacityMin ?? ''}
-                        onChange={e => setZoneCapacity(zone.id, 'capacityMin', e.target.value)}
-                        style={{ ...dialogInput(), padding: '4px 6px', fontSize: 11 }}
-                      />
-                      <input type="number" placeholder={`max ${capacityMax}`} value={ov.capacityMax ?? ''}
-                        onChange={e => setZoneCapacity(zone.id, 'capacityMax', e.target.value)}
-                        style={{ ...dialogInput(), padding: '4px 6px', fontSize: 11 }}
-                      />
+
+                      {/* Family allocation (soft boost) */}
+                      {availableFamilies.length > 0 && (
+                        <div style={{ marginBottom: 8 }}>
+                          <div className="mono" style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
+                            Famílias alocadas <span style={{ color: T.green, fontSize: 8 }}>▲ boost</span>
+                            {allocFams.length > 0 && <button onClick={() => setPerZone(p => ({ ...p, [zone.id]: { ...p[zone.id], allocatedFamilies: [] } }))} style={{ marginLeft: 6, fontSize: 9, padding: '1px 4px', background: 'transparent', color: T.inkMute, border: `1px solid ${T.line}`, borderRadius: 2, cursor: 'pointer' }}>×</button>}
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableFamilies.map(fam => {
+                              const active = allocFams.includes(fam);
+                              return (
+                                <button key={fam} onClick={() => toggleZoneFamily(zone.id, 'allocatedFamilies', fam)} style={{
+                                  padding: '2px 7px', fontSize: 9, borderRadius: 3, cursor: 'pointer', fontFamily: 'inherit',
+                                  background: active ? T.green : 'transparent',
+                                  color: active ? '#fff' : T.inkSoft,
+                                  border: `1px solid ${active ? T.green : T.line}`,
+                                }}>{fam}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Family restriction (hard filter) */}
+                      {availableFamilies.length > 0 && (
+                        <div style={{ marginBottom: 8 }}>
+                          <div className="mono" style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
+                            Famílias restritas <span style={{ color: T.red, fontSize: 8 }}>✕ exclusivo</span>
+                            {restFams.length > 0 && <button onClick={() => setPerZone(p => ({ ...p, [zone.id]: { ...p[zone.id], restrictedFamilies: [] } }))} style={{ marginLeft: 6, fontSize: 9, padding: '1px 4px', background: 'transparent', color: T.inkMute, border: `1px solid ${T.line}`, borderRadius: 2, cursor: 'pointer' }}>×</button>}
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableFamilies.map(fam => {
+                              const active = restFams.includes(fam);
+                              return (
+                                <button key={fam} onClick={() => toggleZoneFamily(zone.id, 'restrictedFamilies', fam)} style={{
+                                  padding: '2px 7px', fontSize: 9, borderRadius: 3, cursor: 'pointer', fontFamily: 'inherit',
+                                  background: active ? T.red : 'transparent',
+                                  color: active ? '#fff' : T.inkSoft,
+                                  border: `1px solid ${active ? T.red : T.line}`,
+                                }}>{fam}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Subfamily restriction (hard filter) */}
+                      {availableSubfamilies.length > 0 && (
+                        <div>
+                          <div className="mono" style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>
+                            Sub-famílias restritas <span style={{ color: T.red, fontSize: 8 }}>✕ exclusivo</span>
+                            {restSubs.length > 0 && <button onClick={() => setPerZone(p => ({ ...p, [zone.id]: { ...p[zone.id], restrictedSubfamilies: [] } }))} style={{ marginLeft: 6, fontSize: 9, padding: '1px 4px', background: 'transparent', color: T.inkMute, border: `1px solid ${T.line}`, borderRadius: 2, cursor: 'pointer' }}>×</button>}
+                          </div>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {availableSubfamilies.map(sub => {
+                              const active = restSubs.includes(sub);
+                              return (
+                                <button key={sub} onClick={() => toggleZoneFamily(zone.id, 'restrictedSubfamilies', sub)} style={{
+                                  padding: '2px 7px', fontSize: 9, borderRadius: 3, cursor: 'pointer', fontFamily: 'inherit',
+                                  background: active ? T.orange : 'transparent',
+                                  color: active ? '#fff' : T.inkSoft,
+                                  border: `1px solid ${active ? T.orange : T.line}`,
+                                }}>{sub}</button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
