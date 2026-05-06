@@ -292,6 +292,15 @@ async function idbGetAll() {
   });
 }
 
+async function idbClear() {
+  return new Promise(resolve => {
+    const req = indexedDB.deleteDatabase(IDB_NAME);
+    req.onsuccess = resolve;
+    req.onerror = resolve;
+    req.onblocked = resolve;
+  });
+}
+
 async function idbDelete(key) {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
@@ -425,8 +434,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.4';
-const APP_BUILD_DATE = '2026-05-06T14:30';
+const APP_VERSION = '3.1.5';
+const APP_BUILD_DATE = '2026-05-06T15:20';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2617,10 +2626,22 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     if (orphans.length > 0) {
       let importPeriod = periodsRef.current.find(p => p.name === 'Importadas');
       if (!importPeriod) {
-        importPeriod = newPeriod({ name: 'Importadas', notes: 'Campanhas migradas da versão anterior. Move-as para campanhas novas conforme precisares.' });
-        idbPutPeriod(importPeriod).catch(() => {});
-        if (user && supabase) cloudUpsertPeriod({ ...importPeriod, user_id: user.id }, user.id).catch(() => {});
-        setPeriods(ps => [importPeriod, ...ps]);
+        // Check localStorage for a previously created "Importadas" period id
+        const cachedId = storeGet('importadas_period_id', null);
+        if (cachedId) {
+          // Reconstruct minimal period object and re-add to state if missing
+          importPeriod = { id: cachedId, name: 'Importadas', notes: 'Campanhas migradas da versão anterior.' };
+          setPeriods(ps => ps.some(p => p.id === cachedId) ? ps : [importPeriod, ...ps]);
+        } else {
+          importPeriod = newPeriod({ name: 'Importadas', notes: 'Campanhas migradas da versão anterior. Move-as para campanhas novas conforme precisares.' });
+          storeSet('importadas_period_id', importPeriod.id);
+          idbPutPeriod(importPeriod).catch(() => {});
+          if (user && supabase) cloudUpsertPeriod({ ...importPeriod, user_id: user.id }, user.id).catch(() => {});
+          setPeriods(ps => [importPeriod, ...ps]);
+        }
+      } else {
+        // Period exists — persist its id so we never recreate it
+        storeSet('importadas_period_id', importPeriod.id);
       }
       const targetId = importPeriod.id;
       setCampaigns(cs => cs.map(c => c.periodId ? c : { ...c, periodId: targetId }));
@@ -2669,10 +2690,11 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [campaigns, campaignsLoaded]);
 
   // Cloud sync for campaign changes (debounced, fires after 1.2s of inactivity)
-  // We compare snapshot vs last pushed to avoid re-uploading unchanged campaigns
+  const [syncError, setSyncError] = useState(null);   // null = ok, string = error message
+  const [syncing, setSyncing] = useState(false);       // true while upload is in-flight
   const lastPushedFloorsRef = useRef(new Map()); // campaignId → JSON of floors
   const pushCampaignsToCloud = useMemo(
-    () => debounce(async (currentUser, currentCampaigns) => {
+    () => debounce(async (currentUser, currentCampaigns, setCampaignsFn) => {
       if (!currentUser || !supabase) return;
       // Find campaigns whose floors actually changed — push them in parallel
       const toSync = currentCampaigns.filter(c => {
@@ -2682,18 +2704,36 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         return lastPushedFloorsRef.current.get(c.id) !== sig;
       });
       if (toSync.length === 0) return;
-      await Promise.all(toSync.map(async c => {
-        const sig = JSON.stringify(c.floors);
-        const res = await cloudUpsertCampaign({ ...c, user_id: c.user_id || currentUser.id }, currentUser.id);
-        if (res.ok) lastPushedFloorsRef.current.set(c.id, sig);
-      }));
+      setSyncing(true);
+      try {
+        const results = await Promise.all(toSync.map(async c => {
+          const sig = JSON.stringify(c.floors);
+          const res = await cloudUpsertCampaign({ ...c, user_id: c.user_id || currentUser.id }, currentUser.id);
+          if (res.ok) {
+            lastPushedFloorsRef.current.set(c.id, sig);
+            // If cloud assigned a new UUID (new insert), update the local campaign id
+            if (res.data?.id && !isUUID(String(c.id))) {
+              setCampaignsFn(prev => prev.map(x =>
+                x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || currentUser.id } : x
+              ));
+            }
+          }
+          return res;
+        }));
+        const failed = results.filter(r => !r.ok);
+        setSyncError(failed.length > 0 ? `${failed.length} campanha(s) não guardadas na cloud — verifica a ligação.` : null);
+      } catch (e) {
+        setSyncError('Erro ao guardar campanhas na cloud — verifica a ligação.');
+      } finally {
+        setSyncing(false);
+      }
     }, 1200),
     []
   );
 
   useEffect(() => {
     if (!cloudDataLoaded || !user) return;
-    pushCampaignsToCloud(user, campaigns);
+    pushCampaignsToCloud(user, campaigns, setCampaigns);
   }, [campaigns, user, cloudDataLoaded, pushCampaignsToCloud]);
 
   const [candidates, setCandidates] = useState([]);
@@ -3256,6 +3296,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
             onExport={exportSession} onImport={importSession}
             excludedFamilies={excludedFamilies}
+            syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
           />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
           {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
@@ -4055,6 +4096,7 @@ function CampaignsView({
   stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3,
   onExport, onImport,
   excludedFamilies = [],
+  syncError = null, syncing = false, onClearSyncError,
 }) {
   // Selected period (null = show periods overview / no period entered)
   const [selectedPeriodId, setSelectedPeriodId] = useStoredState('campaigns.selectedPeriodId', null);
@@ -4529,6 +4571,31 @@ function CampaignsView({
 
   return (
     <div className="fade-up">
+      {/* Cloud sync error banner */}
+      {syncError && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: '#b91c1c', color: '#fff',
+          padding: '10px 16px', marginBottom: 12, borderRadius: 6, fontSize: 13,
+        }}>
+          <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>⚠ {syncError}</span>
+          <button onClick={onClearSyncError} style={{
+            background: 'transparent', border: '1px solid rgba(255,255,255,0.4)',
+            color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+          }}>Dispensar</button>
+        </div>
+      )}
+      {/* Saving indicator */}
+      {syncing && !syncError && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 11, color: T.inkMute, marginBottom: 8,
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.accent, display: 'inline-block', animation: 'pulse 1s infinite' }} />
+          A guardar na cloud…
+        </div>
+      )}
       {/* Period overview: shown when no period is selected */}
       {!selectedPeriod ? (
         <PeriodsOverview
@@ -11235,6 +11302,37 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
             Para alterar o papel de um utilizador, vai à aba Utilizadores. Por agora, todos os utilizadores são "Utilizador" — os papéis Gestor/Visualizador são uma estrutura preparada para uso futuro.
           </p>
         </div>
+      </div>
+
+      {/* ── Reset local data ── */}
+      <div style={{ marginTop: 24, padding: 20, background: `${T.accent}10`, border: `1px solid ${T.accent}40`, borderRadius: 8 }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.accent, textTransform: 'uppercase', marginBottom: 8 }}>
+          Zona de perigo
+        </div>
+        <p style={{ fontSize: 12, color: T.inkSoft, margin: '0 0 12px', lineHeight: 1.5 }}>
+          <strong>Limpar dados locais</strong> — apaga o IndexedDB e as preferências do browser neste dispositivo.
+          Os dados na cloud (campanhas, stock, períodos) mantêm-se intactos e são recarregados automaticamente após o reset.
+          Útil quando a app fica bloqueada ou mostra dados corrompidos.
+        </p>
+        <button
+          onClick={async () => {
+            if (!confirm('Apagar todos os dados locais deste dispositivo? Os dados na cloud mantêm-se.')) return;
+            await idbClear();
+            ['stockMap.PO2', 'stockMap.PO3', 'importadas_period_id', 'default_layout', 'floors',
+             'campaigns.selectedPeriodId', 'campaigns.activeIds', 'campaigns.mode',
+             'listing.filterStock', 'listing.filterFamily', 'listing.search',
+             'changes.newPeriodId', 'changes.comparePeriodId',
+            ].forEach(k => storeDelete(k));
+            window.location.reload();
+          }}
+          style={{
+            padding: '8px 16px', background: T.accent, color: '#fff',
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+          }}
+        >
+          <RotateCcw size={13} /> Limpar dados locais e recarregar
+        </button>
       </div>
     </div>
   );
