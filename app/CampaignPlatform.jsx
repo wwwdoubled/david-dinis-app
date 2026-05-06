@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '2.9.4';
-const APP_BUILD_DATE = '2026-05-05T19:50';
+const APP_VERSION = '2.9.5';
+const APP_BUILD_DATE = '2026-05-06T00:15';
 const APP_CHANGELOG = [
   { version: '2.9.3', date: '2026-05-05', summary: 'Fix: períodos "Importadas" duplicados removidos automaticamente; migração de orphans só corre após cloud sync' },
   { version: '2.9.2', date: '2026-05-05', summary: 'Fix: status de campanha já não fica sempre "Planeada" — statusOverride guardado como null na cloud em vez de "planned" por defeito' },
@@ -2460,34 +2460,36 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         }
       }
 
-      // 4. Migrate local-only periods to cloud (with possibly-remapped IDs)
+      // 4. Migrate local-only periods + campaigns to cloud in parallel
       let migratedCount = 0;
       let migrationErrors = 0;
-      for (const p of periodsToMigrate) {
-        const periodWithUser = { ...p, user_id: p.user_id || user.id, created_by: p.created_by || user.id };
-        const res = await cloudUpsertPeriod(periodWithUser, user.id);
-        if (res.ok) migratedCount++;
-        else { migrationErrors++; console.warn('[cloud-sync] period upsert failed:', res.error, p.name); }
-      }
 
-      // 5. Migrate local-only campaigns to cloud — remap any periodId references
-      for (const c of localOnlyCampaigns) {
-        if (!c.key) continue;
-        const newPid = idRemap.get(c.periodId);
-        const campaignWithUser = {
-          ...c,
-          user_id: c.user_id || user.id,
-          periodId: newPid || c.periodId,
-        };
-        // Skip campaign migration if periodId is non-UUID and not in remap (orphan)
-        if (campaignWithUser.periodId && !isUUID(campaignWithUser.periodId)) {
-          console.warn(`[cloud-sync] campaign ${c.name} has invalid periodId, setting to null`);
-          campaignWithUser.periodId = null;
-        }
-        const res = await cloudUpsertCampaign(campaignWithUser, user.id);
+      const periodResults = await Promise.all(periodsToMigrate.map(async p => {
+        const periodWithUser = { ...p, user_id: p.user_id || user.id, created_by: p.created_by || user.id };
+        return cloudUpsertPeriod(periodWithUser, user.id);
+      }));
+      periodResults.forEach((res, i) => {
         if (res.ok) migratedCount++;
-        else { migrationErrors++; console.warn('[cloud-sync] campaign upsert failed:', res.error, c.name); }
-      }
+        else { migrationErrors++; console.warn('[cloud-sync] period upsert failed:', res.error, periodsToMigrate[i].name); }
+      });
+
+      // 5. Migrate local-only campaigns to cloud in parallel — remap any periodId references
+      const campaignsToMigrate = localOnlyCampaigns
+        .filter(c => c.key)
+        .map(c => {
+          const newPid = idRemap.get(c.periodId);
+          const cw = { ...c, user_id: c.user_id || user.id, periodId: newPid || c.periodId };
+          if (cw.periodId && !isUUID(cw.periodId)) {
+            console.warn(`[cloud-sync] campaign ${c.name} has invalid periodId, setting to null`);
+            cw.periodId = null;
+          }
+          return cw;
+        });
+      const campaignResults = await Promise.all(campaignsToMigrate.map(c => cloudUpsertCampaign(c, user.id)));
+      campaignResults.forEach((res, i) => {
+        if (res.ok) migratedCount++;
+        else { migrationErrors++; console.warn('[cloud-sync] campaign upsert failed:', res.error, campaignsToMigrate[i].name); }
+      });
 
       if (cancelled) return;
 
@@ -2612,23 +2614,30 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   });
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
 
-  // Persist each campaign to IndexedDB whenever campaigns change.
-  // Skip the initial render before campaigns are loaded (avoids overwriting with []).
+  // Persist campaigns to IndexedDB — but ONLY the fields that change frequently
+  // (floors, periodId, name) and ONLY campaigns that actually changed.
+  // Rows are large (48k+ lines) — they're written once on upload and not on every sync.
+  const idbSigRef = useRef(new Map()); // key → signature of last-written state
   useEffect(() => {
     if (!campaignsLoaded) return;
     campaigns.forEach(c => {
-      if (c.key) {
-        idbPut({
-          key: c.key,
-          id: c.id,
-          name: c.name,
-          uploaded: c.uploaded ? c.uploaded.toISOString() : new Date().toISOString(),
-          headers: c.headers,
-          rows: c.rows,
-          floors: c.floors,
-          periodId: c.periodId || null,
-        }).catch(err => console.warn('IDB put failed:', err));
-      }
+      if (!c.key) return;
+      // Signature covers only the fields we write (excludes rows to avoid hashing 48k rows)
+      const sig = `${c.id}|${c.name}|${c.periodId}|${c.updatedAt}|${JSON.stringify(c.floors)}`;
+      if (idbSigRef.current.get(c.key) === sig) return; // unchanged — skip write
+      idbSigRef.current.set(c.key, sig);
+      idbPut({
+        key: c.key,
+        id: c.id,
+        name: c.name,
+        uploaded: c.uploaded ? c.uploaded.toISOString() : new Date().toISOString(),
+        headers: c.headers,
+        rows: c.rows,       // rows written on first save; subsequent writes re-use same array
+        floors: c.floors,
+        periodId: c.periodId || null,
+        updatedAt: c.updatedAt,
+        sortOrder: c.sortOrder,
+      }).catch(err => console.warn('IDB put failed:', err));
     });
   }, [campaigns, campaignsLoaded]);
 
@@ -2638,16 +2647,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const pushCampaignsToCloud = useMemo(
     () => debounce(async (currentUser, currentCampaigns) => {
       if (!currentUser || !supabase) return;
-      for (const c of currentCampaigns) {
-        if (!c.key || !c.floors) continue;
-        const prevSig = lastPushedFloorsRef.current.get(c.id);
+      // Find campaigns whose floors actually changed — push them in parallel
+      const toSync = currentCampaigns.filter(c => {
+        if (!c.key || !c.floors) return false;
         const sig = JSON.stringify(c.floors);
-        if (prevSig === sig) continue; // unchanged since last push
+        return lastPushedFloorsRef.current.get(c.id) !== sig;
+      });
+      if (toSync.length === 0) return;
+      await Promise.all(toSync.map(async c => {
+        const sig = JSON.stringify(c.floors);
         const res = await cloudUpsertCampaign({ ...c, user_id: c.user_id || currentUser.id }, currentUser.id);
-        if (res.ok) {
-          lastPushedFloorsRef.current.set(c.id, sig);
-        }
-      }
+        if (res.ok) lastPushedFloorsRef.current.set(c.id, sig);
+      }));
     }, 1200),
     []
   );
