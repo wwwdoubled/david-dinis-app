@@ -425,9 +425,17 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.0.0';
-const APP_BUILD_DATE = '2026-05-06T04:00';
+const APP_VERSION = '3.0.1';
+const APP_BUILD_DATE = '2026-05-06T05:00';
+
+// Families excluded from the entire app by default (Produtos Editoriais + Serviços).
+// Admins can re-enable them in the Config tab.
+const DEFAULT_EXCLUDED_FAMILIES = [
+  'JOGOS', 'PAPELARIA', 'DISCOS', 'VÍDEOS', 'INSTRUMENTOS MUSICAIS', 'LIVROS', 'SERVIÇOS',
+];
+
 const APP_CHANGELOG = [
+  { version: '3.0.1', date: '2026-05-06', summary: 'Famílias excluídas globalmente (Produtos Editoriais + Serviços): configurável no admin' },
   { version: '3.0.0', date: '2026-05-06', summary: 'Fix: campanhas aparecem todas ao mesmo tempo — fetch de metadados separado das rows comprimidas; hydratação das rows em background por campanha' },
   { version: '2.9.9', date: '2026-05-06', summary: 'Plano: EAN+descrição+família gravados no slot (independente do Excel). AutoFill: alocação e restrição de famílias/subfamílias por móvel' },
   { version: '2.9.8', date: '2026-05-06', summary: 'Alterações: filtro por família, botão "Sem alterações" na barra de filtros, artigos sem alterações na tabela e no CSV' },
@@ -2232,6 +2240,14 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [userProfile, setUserProfile] = useState(null);
   const [uiConfig, setUIConfig] = useState(null);
 
+  // Families excluded from the entire webapp. Admin can override in Config tab.
+  // Falls back to DEFAULT_EXCLUDED_FAMILIES when uiConfig hasn't loaded yet.
+  const excludedFamilies = useMemo(() => {
+    if (!uiConfig) return DEFAULT_EXCLUDED_FAMILIES;
+    const cfg = uiConfig?.global_settings?.excluded_families;
+    return Array.isArray(cfg) ? cfg : DEFAULT_EXCLUDED_FAMILIES;
+  }, [uiConfig]);
+
   // ─── Posters / poster zones / notifications ───────────────────────────
   const [posters, setPosters] = useState([]);
   const [posterZones, setPosterZones] = useState([]);
@@ -3209,9 +3225,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3}
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
             onExport={exportSession} onImport={importSession}
+            excludedFamilies={excludedFamilies}
           />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
-          {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} />}
+          {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
             stockRowsPO2={stockRowsPO2} setStockRowsPO2={setStockRowsPO2}
             stockRowsPO3={stockRowsPO3} setStockRowsPO3={setStockRowsPO3}
@@ -3222,6 +3239,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             campaigns={campaigns}
             stockMapPO2={stockMapPO2} setStockMapPO2={setStockMapPO2}
             stockMapPO3={stockMapPO3} setStockMapPO3={setStockMapPO3}
+            excludedFamilies={excludedFamilies}
           />}
           {view === 'images' && <FlyerEditor campaigns={campaigns} />}
           {view === 'pdfs' && <PdfEditor />}
@@ -3998,7 +4016,8 @@ function CampaignsView({
   defaultLayout, setDefaultLayout,
   candidates, setCandidates,
   stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3,
-  onExport, onImport
+  onExport, onImport,
+  excludedFamilies = [],
 }) {
   // Selected period (null = show periods overview / no period entered)
   const [selectedPeriodId, setSelectedPeriodId] = useStoredState('campaigns.selectedPeriodId', null);
@@ -4402,9 +4421,10 @@ function CampaignsView({
         if (e) usedEans.add(e);
       })));
 
+      const filteredRows = filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies);
       const suggestions = suggestForZone({
         zone: buildEffectiveZone(zone),
-        products: primaryCampaign.rows, columns,
+        products: filteredRows, columns,
         stockIndex: combined, excludeEans: usedEans,
         strategy: effStrategy,
       });
@@ -4415,13 +4435,14 @@ function CampaignsView({
     }
 
     // Global: all empty zones
+    const filteredRows = filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies);
     const enrichedFloors = floors.map(f => ({ ...f, zones: f.zones.map(buildEffectiveZone) }));
     return suggestForAllZones({
-      floors: enrichedFloors, products: primaryCampaign.rows, columns,
+      floors: enrichedFloors, products: filteredRows, columns,
       stockPO2Index: stockIdxPO2, stockPO3Index: stockIdxPO3,
       strategy: effStrategy, onlyEmpty: true,
     });
-  }, [floors, primaryCampaign, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
+  }, [floors, primaryCampaign, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, excludedFamilies]);
 
   // Apply accepted suggestions to floors (creates slots)
   const handleApplySuggestions = useCallback((acceptedMap) => {
@@ -4810,7 +4831,7 @@ function CampaignsView({
       ) : mode === 'list' ? (
         activeCampaigns.length > 0 ? (
           <ProductListing
-            campaigns={activeCampaigns}
+            campaigns={activeCampaigns.map(c => ({ ...c, rows: filterRowsByFamily(c.rows, c.headers, excludedFamilies) }))}
             primaryCampaignId={primaryCampaign?.id}
             floors={floors}
             stockRowsPO2={stockRowsPO2}
@@ -5034,6 +5055,19 @@ function normalizeEAN(v) {
   s = s.replace(/[^\d]/g, '');
   // Strip leading zeros for comparison
   return s.replace(/^0+/, '');
+}
+
+// Filter rows by family: remove rows whose Des_Fam1 is in excludedFamilies (case-insensitive).
+// Returns original array if nothing to filter (avoids unnecessary allocations).
+function filterRowsByFamily(rows, headers, excludedFamilies) {
+  if (!excludedFamilies || excludedFamilies.length === 0 || !rows || rows.length === 0) return rows;
+  const cols = detectColumns(headers);
+  if (!cols.family) return rows;
+  const excluded = new Set(excludedFamilies.map(f => f.toUpperCase()));
+  return rows.filter(r => {
+    const fam = String(r[cols.family] || '').trim().toUpperCase();
+    return !excluded.has(fam);
+  });
 }
 
 // Build an indexed Map of stock rows keyed by normalized EAN. O(n) build, O(1) lookup.
@@ -7120,7 +7154,7 @@ function buildPeriodCompareWith(periodId, campaigns, periods) {
   };
 }
 
-function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, user }) {
+function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, user, excludedFamilies = [] }) {
   // ── "Novo" side (left) ───────────────────────────────────────────────────
   const [newSource, setNewSource] = useStoredState('changes.newSource', 'period'); // 'period'|'campaign'|'upload'
   const [newPeriodId, setNewPeriodId] = useStoredState('changes.newPeriodId', null);
@@ -7209,12 +7243,16 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const stockIndexPO2 = useMemo(() => buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {}), [stockRowsPO2, stockMapPO2]);
   const stockIndexPO3 = useMemo(() => buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {}), [stockRowsPO3, stockMapPO3]);
 
-  // Build the diff
+  // Build the diff — apply family exclusion on both sides before comparing
   const diff = useMemo(() => {
     if (!snapshot || !compareWith) return null;
 
     const colsOld = detectColumns(compareWith.headers);
     const colsNew = detectColumns(snapshot.headers);
+
+    // Filter excluded families from both sides
+    const snapshotRows = filterRowsByFamily(snapshot.rows, snapshot.headers, excludedFamilies);
+    const compareRows = filterRowsByFamily(compareWith.rows, compareWith.headers, excludedFamilies);
 
     const lookupStock = (eanKey) => ({
       stockPO2: eanKey ? (stockIndexPO2.index.get(eanKey) ?? 0) : 0,
@@ -7223,13 +7261,13 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
 
     // Index OLD by EAN
     const oldByEan = new Map();
-    compareWith.rows.forEach(r => {
+    compareRows.forEach(r => {
       const key = normalizeEAN(r[colsOld.ean]);
       if (key) oldByEan.set(key, r);
     });
 
     const newByEan = new Map();
-    snapshot.rows.forEach(r => {
+    snapshotRows.forEach(r => {
       const key = normalizeEAN(r[colsNew.ean]);
       if (key) newByEan.set(key, r);
     });
@@ -7295,7 +7333,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     }
 
     return { added, removed, changed, unchanged };
-  }, [snapshot, compareWith, stockIndexPO2, stockIndexPO3]);
+  }, [snapshot, compareWith, stockIndexPO2, stockIndexPO3, excludedFamilies]);
 
   // All unique families across all diff categories
   const allFamilies = useMemo(() => {
@@ -7836,6 +7874,7 @@ function StockView({
   onUploadStock, onActivateSnapshot,
   user, isAdmin,
   campaigns, stockMapPO2, setStockMapPO2, stockMapPO3, setStockMapPO3,
+  excludedFamilies = [],
 }) {
   const [historyDialog, setHistoryDialog] = useState(null); // 'PO2' | 'PO3' | null
   const [uploading, setUploading] = useState(null); // 'PO2' | 'PO3'
@@ -7868,23 +7907,26 @@ function StockView({
 
   const totalCampaign = campaigns.reduce((s, c) => s + (c.rows?.length || 0), 0);
 
-  // Build EAN → { family, subfamily } lookup from all campaigns
+  // Build EAN → { family, subfamily } lookup from all campaigns (excluding filtered families)
   const eanFamilyMap = useMemo(() => {
     const map = new Map();
+    const excl = new Set((excludedFamilies || []).map(f => f.toUpperCase()));
     for (const camp of campaigns) {
       const cols = detectColumns(camp.headers || []);
       if (!cols.ean) continue;
       for (const row of (camp.rows || [])) {
         const key = normalizeEAN(row[cols.ean]);
         if (!key || map.has(key)) continue;
+        const fam = cols.family ? String(row[cols.family] ?? '').trim() : '';
+        if (excl.has(fam.toUpperCase())) continue; // skip excluded
         map.set(key, {
-          family: cols.family ? String(row[cols.family] ?? '').trim() : '',
+          family: fam,
           subfamily: cols.subfamily ? String(row[cols.subfamily] ?? '').trim() : '',
         });
       }
     }
     return map;
-  }, [campaigns]);
+  }, [campaigns, excludedFamilies]);
 
   // Build stock by family/subfamily breakdown
   const familyBreakdown = useMemo(() => {
@@ -10521,8 +10563,20 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
   const [emailsEnabled, setEmailsEnabled] = useState(() => {
     return uiConfig?.global_settings?.emails_enabled || false;
   });
+  // Excluded families: start from uiConfig or the app default
+  const [excludedFamsDraft, setExcludedFamsDraft] = useState(() => {
+    const cfg = uiConfig?.global_settings?.excluded_families;
+    return Array.isArray(cfg) ? cfg : [...DEFAULT_EXCLUDED_FAMILIES];
+  });
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+
+  // All known families = DEFAULT list (admin can add/remove from it)
+  const ALL_KNOWN_FAMILIES = [
+    ...DEFAULT_EXCLUDED_FAMILIES,
+    // add any extra families found in the uiConfig that aren't in the default
+    ...((uiConfig?.global_settings?.excluded_families || []).filter(f => !DEFAULT_EXCLUDED_FAMILIES.includes(f))),
+  ];
 
   const ROLES = [
     { id: 'user', label: 'Utilizador' },
@@ -10567,6 +10621,7 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
       ...(uiConfig?.global_settings || {}),
       warn_days_before_end: parsedWarnDays.length > 0 ? parsedWarnDays : DEFAULT_WARN_DAYS,
       emails_enabled: emailsEnabled,
+      excluded_families: excludedFamsDraft,
     };
     const res = await saveUIConfig(draft, currentUserId, globalSettings);
     if (res.ok) {
@@ -10624,6 +10679,46 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
                 </div>
               </div>
             </label>
+          </div>
+        </div>
+      </div>
+
+      {/* Excluded families */}
+      <div style={{ marginBottom: 24 }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 6 }}>
+          Famílias excluídas da webapp
+        </div>
+        <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 10, lineHeight: 1.5 }}>
+          Produtos destas famílias são ocultados em toda a app (campanhas, alterações, stock, auto-preenchimento). Por defeito excluem-se os <strong>Produtos Editoriais</strong> e <strong>Serviços</strong>. Desativa uma família para a tornar visível novamente.
+        </div>
+        <div style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {ALL_KNOWN_FAMILIES.map(fam => {
+              const isExcluded = excludedFamsDraft.includes(fam);
+              return (
+                <button
+                  key={fam}
+                  onClick={() => setExcludedFamsDraft(prev =>
+                    isExcluded ? prev.filter(f => f !== fam) : [...prev, fam]
+                  )}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontWeight: 500, borderRadius: 6,
+                    border: `1px solid ${isExcluded ? T.red : T.green}`,
+                    background: isExcluded ? '#FEE7E5' : '#E5F4E5',
+                    color: isExcluded ? T.red : '#2e7d32',
+                    cursor: 'pointer', fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  {isExcluded ? <X size={10} /> : <Check size={10} />}
+                  {fam}
+                  <span style={{ fontSize: 9, opacity: 0.7 }}>{isExcluded ? 'excluída' : 'ativa'}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 10, fontSize: 10, color: T.inkMute }}>
+            Clica numa família para alternar entre excluída (vermelho) e ativa (verde). Guarda para aplicar.
           </div>
         </div>
       </div>
