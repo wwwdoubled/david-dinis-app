@@ -425,8 +425,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.2';
-const APP_BUILD_DATE = '2026-05-06T13:25';
+const APP_VERSION = '3.1.3';
+const APP_BUILD_DATE = '2026-05-06T13:55';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2684,8 +2684,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [campaigns, user, cloudDataLoaded, pushCampaignsToCloud]);
 
   const [candidates, setCandidates] = useState([]);
-  const [stockMapPO2, setStockMapPO2] = useState({});
-  const [stockMapPO3, setStockMapPO3] = useState({});
+  const [stockMapPO2, setStockMapPO2Raw] = useState(() => storeGet('stockMap.PO2', {}));
+  const [stockMapPO3, setStockMapPO3Raw] = useState(() => storeGet('stockMap.PO3', {}));
+  const setStockMapPO2 = useCallback((v) => { storeSet('stockMap.PO2', v); setStockMapPO2Raw(v); }, []);
+  const setStockMapPO3 = useCallback((v) => { storeSet('stockMap.PO3', v); setStockMapPO3Raw(v); }, []);
 
   // ─── Notifications computed from periods + posters ─────────────────────
   // Get configurable warn-days from ui_config (default [2, 0])
@@ -5120,9 +5122,23 @@ function buildStockIndex(stockRows, mapping = {}) {
 
   let stockCol = mapping.stockCol;
   if (!stockCol) {
-    stockCol = headers.find(h => /^\s*stock\s*$/i.test(h)) ||
-               headers.find(h => /aveiro/i.test(h)) ||
-               headers.find(h => /^qtd$|quantidade|disponí|disponi|existên|existen/i.test(h.trim()));
+    stockCol =
+      headers.find(h => /^\s*stock\s*$/i.test(h)) ||
+      headers.find(h => /aveiro/i.test(h)) ||
+      headers.find(h => /\bstock\b/i.test(h)) ||
+      headers.find(h => /^qtd[\s._-]?disp/i.test(h.trim())) ||
+      headers.find(h => /^qtd$|quantidade|disponí|disponi|existên|existen/i.test(h.trim())) ||
+      headers.find(h => /saldo|dispon/i.test(h)) ||
+      // Last resort: first non-EAN header that has at least one numeric value in the first 20 rows
+      headers.find(h => {
+        if (h === eanCol) return false;
+        let numCount = 0;
+        for (let i = 0; i < Math.min(20, stockRows.length); i++) {
+          const v = stockRows[i][h];
+          if (v !== null && v !== '' && !isNaN(Number(v))) numCount++;
+        }
+        return numCount >= Math.min(5, stockRows.length);
+      });
   }
 
   const index = new Map();
