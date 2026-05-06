@@ -434,8 +434,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.1.8';
-const APP_BUILD_DATE = '2026-05-06T17:00';
+const APP_VERSION = '3.1.9';
+const APP_BUILD_DATE = '2026-05-06T17:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4594,15 +4594,29 @@ function CampaignsView({
         const _cols = detectColumns(primaryCampaign.headers);
         const newSlots = accepted.map(sg => {
           const eanKey = normalizeEAN(sg.ean);
+          const basePriceVal = _cols.basePrice ? parseNum(sg.product[_cols.basePrice]) : 0;
+          const campPriceVal = _cols.campaignPrice ? parseNum(sg.product[_cols.campaignPrice]) : 0;
+          const explicitDisc = _cols.discount ? parseNum(sg.product[_cols.discount]) : 0;
+          const calcDisc = (basePriceVal > 0 && campPriceVal > 0 && campPriceVal < basePriceVal)
+            ? ((basePriceVal - campPriceVal) / basePriceVal) * 100 : 0;
+          const startDateVal = _cols.startDate ? sg.product[_cols.startDate] : '';
+          const endDateVal = _cols.endDate ? sg.product[_cols.endDate] : '';
           return {
             id: 's-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
             ref: sg.product[_cols.ean] || sg.ean,
             name: _cols.description ? String(sg.product[_cols.description] || '') : '',
             family: _cols.family ? String(sg.product[_cols.family] || '') : '',
             subfamily: _cols.subfamily ? String(sg.product[_cols.subfamily] || '') : '',
-            state: 'pending',
+            basePrice: basePriceVal || '',
+            campaignPrice: campPriceVal || '',
+            discount: explicitDisc >= 0.5 ? explicitDisc : (calcDisc > 0 ? calcDisc : 0),
+            startDate: startDateVal ? String(startDateVal) : '',
+            endDate: endDateVal ? String(endDateVal) : '',
+            state: 'sugerido',
             cartaz: 'A3 HORIZONTAL',
-            date: '', campaign: '', observations: '',
+            date: startDateVal ? String(startDateVal) : '',
+            campaign: '',
+            observations: '',
             stockPO2: String(_idxPO2.get(eanKey) ?? ''),
             stockPO3: String(_idxPO3.get(eanKey) ?? ''),
             pedidoGU: '', star: false,
@@ -7182,26 +7196,51 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
     return key ? String(stockIdxPO3.get(key) ?? '') : '';
   }, [slot.stockPO3, slot.ref, stockIdxPO3]);
 
-  // If slot.name is empty but slot.ref is set, resolve description from activeCampaign by EAN
-  const resolvedName = useMemo(() => {
-    if (slot.name) return slot.name;
-    if (!slot.ref || !activeCampaign) return '';
+  // If slot.name is empty but slot.ref is set, resolve full product info from activeCampaign by EAN
+  const resolvedProduct = useMemo(() => {
+    if (!slot.ref || !activeCampaign) return null;
     const cols = detectColumns(activeCampaign.headers);
-    if (!cols.ean || !cols.description) return '';
+    if (!cols.ean) return null;
     const normRef = normalizeEAN(slot.ref);
     const match = activeCampaign.rows.find(r => normalizeEAN(String(r[cols.ean] || '')) === normRef);
-    return match ? String(match[cols.description] || '') : '';
-  }, [slot.ref, slot.name, activeCampaign]);
+    if (!match) return null;
+    return {
+      name: cols.description ? String(match[cols.description] || '') : '',
+      family: cols.family ? String(match[cols.family] || '') : '',
+      subfamily: cols.subfamily ? String(match[cols.subfamily] || '') : '',
+      basePrice: cols.basePrice ? parseNum(match[cols.basePrice]) : 0,
+      campaignPrice: cols.campaignPrice ? parseNum(match[cols.campaignPrice]) : 0,
+      discount: cols.discount ? parseNum(match[cols.discount]) : 0,
+    };
+  }, [slot.ref, activeCampaign]);
+  const resolvedName = slot.name || resolvedProduct?.name || '';
+  const resolvedFamily = slot.family || resolvedProduct?.family || '';
+  const resolvedSubfamily = slot.subfamily || resolvedProduct?.subfamily || '';
+  const resolvedBasePrice = slot.basePrice || resolvedProduct?.basePrice || 0;
+  const resolvedCampPrice = slot.campaignPrice || resolvedProduct?.campaignPrice || 0;
+  const resolvedDiscount = slot.discount || resolvedProduct?.discount || 0;
 
-  // Auto-suggest from active campaign or candidates as user types
+  // Auto-suggest from active campaign or candidates as user types — full product object
   const suggestions = useMemo(() => {
     if (!slot.name || slot.name.length < 2) return [];
     const all = [];
     if (activeCampaign) {
+      const cols = detectColumns(activeCampaign.headers || []);
       activeCampaign.rows.forEach((r, i) => {
-        const refKey = activeCampaign.headers.find(h => /ref|sku|cód|cod|ean/i.test(h)) || activeCampaign.headers[0];
-        const nameKey = activeCampaign.headers.find(h => /nome|descri|produto|artigo/i.test(h)) || activeCampaign.headers[1];
-        all.push({ source: 'campanha', ref: String(r[refKey] ?? `#${i}`), name: String(r[nameKey] ?? '') });
+        const refKey = cols.ean || activeCampaign.headers.find(h => /ref|sku|cód|cod|ean/i.test(h)) || activeCampaign.headers[0];
+        const nameKey = cols.description || activeCampaign.headers.find(h => /nome|descri|produto|artigo/i.test(h)) || activeCampaign.headers[1];
+        all.push({
+          source: 'campanha',
+          ref: String(r[refKey] ?? `#${i}`),
+          name: String(r[nameKey] ?? ''),
+          family: cols.family ? String(r[cols.family] ?? '') : '',
+          subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '') : '',
+          basePrice: cols.basePrice ? parseNum(r[cols.basePrice]) : 0,
+          campaignPrice: cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0,
+          discount: cols.discount ? parseNum(r[cols.discount]) : 0,
+          startDate: cols.startDate ? r[cols.startDate] : '',
+          endDate: cols.endDate ? r[cols.endDate] : '',
+        });
       });
     }
     candidates.forEach(c => all.push({ source: 'vendas', ref: c.ref, name: c.name }));
@@ -7215,9 +7254,21 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
         <input value={slot.ref} onChange={e => onUpdate({ ref: e.target.value })} className="row-input" placeholder="ref" style={{ fontSize: 11 }} />
       </td>
       <td style={{ ...ztdStyle, position: 'relative' }}>
-        {slot.family && (
-          <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', marginBottom: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {slot.family}{slot.subfamily ? ` › ${slot.subfamily}` : ''}
+        {(resolvedFamily || resolvedCampPrice > 0 || resolvedDiscount > 0) && (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', marginBottom: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {resolvedFamily && <span>{resolvedFamily}{resolvedSubfamily ? ` › ${resolvedSubfamily}` : ''}</span>}
+            {resolvedCampPrice > 0 && (
+              <>
+                {resolvedFamily && <span style={{ color: T.line }}>·</span>}
+                <span style={{ color: T.ink, fontWeight: 500 }}>{Number(resolvedCampPrice).toFixed(2)}€</span>
+                {resolvedBasePrice > 0 && resolvedBasePrice > resolvedCampPrice && (
+                  <span style={{ color: T.inkMute, textDecoration: 'line-through' }}>{Number(resolvedBasePrice).toFixed(2)}€</span>
+                )}
+                {resolvedDiscount > 0 && (
+                  <span style={{ color: resolvedDiscount >= 30 ? T.green : T.accent, fontWeight: 600 }}>-{Math.round(resolvedDiscount)}%</span>
+                )}
+              </>
+            )}
           </div>
         )}
         <input
@@ -7236,7 +7287,14 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
             boxShadow: '0 8px 24px rgba(20,18,16,0.12)', marginTop: 2,
           }}>
             {suggestions.map((s, i) => (
-              <button key={i} onClick={() => onUpdate({ ref: s.ref, name: s.name })} style={{
+              <button key={i} onClick={() => onUpdate({
+                ref: s.ref, name: s.name,
+                family: s.family || '', subfamily: s.subfamily || '',
+                basePrice: s.basePrice || '', campaignPrice: s.campaignPrice || '',
+                discount: s.discount || 0,
+                startDate: s.startDate ? String(s.startDate) : '',
+                endDate: s.endDate ? String(s.endDate) : '',
+              })} style={{
                 display: 'flex', width: '100%', padding: '8px 10px', textAlign: 'left',
                 background: 'transparent', border: 'none', borderBottom: i < suggestions.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
                 gap: 8, alignItems: 'center',
@@ -7456,9 +7514,9 @@ function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stock
                           <td style={otdStyle}>{s.cartaz}</td>
                           <td style={{ ...otdStyle, background: stateOpt.bg, color: stateOpt.fg, fontWeight: 600, textAlign: 'center' }}>{stateOpt.label}</td>
                           <td style={otdStyle}>{s.observations || '—'}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO2(s) || '0'}</td>
-                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO3(s) || '0'}</td>
-                          <td style={{ ...otdStyle, background: T.yellow, textAlign: 'center', fontWeight: 600 }} className="mono">{s.pedidoGU || '0'}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO2(s) !== '' ? resolvePO2(s) : '—'}</td>
+                          <td style={{ ...otdStyle, textAlign: 'center' }} className="mono">{resolvePO3(s) !== '' ? resolvePO3(s) : '—'}</td>
+                          <td style={{ ...otdStyle, background: T.yellow, textAlign: 'center', fontWeight: 600 }} className="mono">{s.pedidoGU || '—'}</td>
                         </tr>
                       );
                     })}
