@@ -240,6 +240,27 @@ function storeDelete(key) {
   if (typeof localStorage === 'undefined') return;
   try { localStorage.removeItem(STORE_PREFIX + key); } catch {}
 }
+
+// ─── Templates de campanha ─────────────────────────────────────────────
+// Guardam o layout (floors+zones) para reutilizar em campanhas recorrentes
+function listTemplates() {
+  return storeGet('templates', []);
+}
+function saveTemplate(name, floors) {
+  const list = listTemplates();
+  const tpl = {
+    id: 'tpl-' + Date.now(),
+    name: String(name || 'Sem nome'),
+    floors: layoutOnly(floors || []),
+    createdAt: new Date().toISOString(),
+  };
+  list.unshift(tpl);
+  storeSet('templates', list.slice(0, 50)); // cap at 50
+  return tpl;
+}
+function deleteTemplate(id) {
+  storeSet('templates', listTemplates().filter(t => t.id !== id));
+}
 function storeListWithPrefix(prefix) {
   if (typeof localStorage === 'undefined') return [];
   const out = [];
@@ -463,8 +484,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.2.1';
-const APP_BUILD_DATE = '2026-05-06T18:30';
+const APP_VERSION = '3.3.0';
+const APP_BUILD_DATE = '2026-05-07T10:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -715,6 +736,7 @@ const DEFAULT_MENU_VISIBILITY = {
   dashboard: { roles: ['user', 'manager', 'viewer'], visible: true },
   sales: { roles: ['user', 'manager'], visible: true },
   campaigns: { roles: ['user', 'manager', 'viewer'], visible: true },
+  calendar: { roles: ['user', 'manager', 'viewer'], visible: true },
   changes: { roles: ['user', 'manager'], visible: true },
   stock: { roles: ['user', 'manager'], visible: true },
   inventory: { roles: ['user', 'manager', 'viewer'], visible: true },
@@ -2740,14 +2762,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
 
   // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
-  // Runs once after cloud data is loaded; uses campaignsRef to read current state without
-  // re-running on every campaigns change.
-  const cleanupRanRef = useRef(false);
+  // Runs every time campaigns change so cloud-resynced empties are also caught.
+  // Uses a ref to avoid re-firing for the same set of ids.
+  const lastCleanedRef = useRef(new Set());
   useEffect(() => {
-    if (!cloudDataLoaded || !user || cleanupRanRef.current) return;
-    cleanupRanRef.current = true;
-    const current = campaignsRef.current;
-    const emptyIds = current
+    if (!cloudDataLoaded || !user) return;
+    const emptyIds = campaigns
       .filter(c =>
         c.id &&
         !c._needsRows &&
@@ -2757,13 +2777,17 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       )
       .map(c => c.id);
     if (emptyIds.length === 0) return;
+    // Skip if we already cleaned exactly these
+    const key = emptyIds.sort().join(',');
+    if (lastCleanedRef.current.has(key)) return;
+    lastCleanedRef.current.add(key);
     console.log('[cleanup] removing', emptyIds.length, 'empty campaigns:', emptyIds);
     setCampaigns(cs => cs.filter(c => !emptyIds.includes(c.id)));
     emptyIds.forEach(id => {
       idbDelete(id).catch(() => {});
       if (isUUID(String(id))) cloudDeleteCampaign(id).catch(() => {});
     });
-  }, [cloudDataLoaded, user]);
+  }, [campaigns, cloudDataLoaded, user]);
 
   // Persist campaigns to IndexedDB — but ONLY the fields that change frequently
   // (floors, periodId, name) and ONLY campaigns that actually changed.
@@ -3335,6 +3359,45 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           /* Hide cosmetic decoration */
           .print-area .fade-up { animation: none !important; }
         }
+
+        /* ─── Mobile responsive ─── */
+        /* Tablet & phone: collapse sidebar to bottom nav, simplify tables */
+        @media (max-width: 900px) {
+          aside.no-print {
+            position: fixed !important;
+            bottom: 0 !important; left: 0 !important; right: 0 !important;
+            top: auto !important;
+            width: 100% !important; height: auto !important;
+            flex-direction: row !important;
+            padding: 8px 12px !important;
+            border-right: none !important;
+            border-top: 1px solid ${T.line} !important;
+            overflow-x: auto !important;
+            z-index: 50;
+          }
+          aside.no-print > div { display: flex; flex-direction: row; gap: 4px; flex: 1; }
+          aside.no-print h1, aside.no-print .display { display: none !important; }
+          aside.no-print button { padding: 8px 10px !important; font-size: 11px !important; }
+          aside.no-print button span { display: none !important; }
+          main { padding-bottom: 80px !important; padding-left: 16px !important; padding-right: 16px !important; max-width: 100% !important; }
+          /* Tables: allow horizontal scroll */
+          table { font-size: 10px !important; }
+          /* Hide low-priority columns by class */
+          .mobile-hide { display: none !important; }
+          /* Modals full-width on mobile */
+          [role="dialog"], .modal { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+          /* Period overview cards stack */
+          .period-grid { grid-template-columns: 1fr !important; }
+          /* Header buttons wrap */
+          h1, h2, .display { font-size: 18px !important; }
+        }
+        @media (max-width: 600px) {
+          /* Hide more columns on phones */
+          .phone-hide { display: none !important; }
+          input, select, button { font-size: 14px !important; }
+          /* Touch targets at least 40px */
+          button { min-height: 36px; }
+        }
       `}</style>
 
       <div key={theme} style={{ display: 'flex', minHeight: '100vh' }}>
@@ -3403,6 +3466,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             excludedFamilies={excludedFamilies}
             syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
           />}
+          {view === 'calendar' && <CalendarView periods={periods} campaigns={campaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
           {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
@@ -3622,6 +3686,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'dashboard', label: 'Visão Geral', icon: LayoutDashboard },
     { id: 'sales', label: 'Análise de Vendas', icon: BarChart3, badge: candidates.length || null },
     { id: 'campaigns', label: 'Campanhas', icon: Layers, dot: notifCount > 0 ? notifCount : null },
+    { id: 'calendar', label: 'Calendário', icon: Calendar },
     { id: 'changes', label: 'Alterações', icon: GitCompareArrows },
     { id: 'stock', label: 'Stock', icon: Package },
     { id: 'inventory', label: 'Inventário', icon: ScanLine },
@@ -4221,6 +4286,8 @@ function CampaignsView({
   const [historyFor, setHistoryFor] = useState(null);
   // Realtime presence — show who else is viewing the same period
   const presencePeers = usePresence(selectedPeriodId ? `period:${selectedPeriodId}` : null, user);
+  // Templates manager modal
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   // Selected period object (null when not in any period)
   const selectedPeriod = useMemo(
@@ -4476,10 +4543,30 @@ function CampaignsView({
   const deleteCampaign = async (campaignId) => {
     const c = campaigns.find(x => x.id === campaignId);
     if (!c) return;
-    if (!confirm(`Remover a campanha "${c.name}" e o respetivo progresso guardado?`)) return;
+    if (!confirm(`Eliminar definitivamente "${c.name}"?\n\nApaga local + cloud + IDB. Não pode ser desfeito.`)) return;
+    // Local state
     setCampaigns(cs => cs.filter(x => x.id !== campaignId));
     setActiveIds(ids => ids.filter(id => id !== campaignId));
+    // IDB (try both key and id since old code stored by key)
     if (c.key) { try { await idbDelete(c.key); } catch {} }
+    if (c.id) { try { await idbDelete(c.id); } catch {} }
+    // Cloud — only attempts if id is a UUID (cloud-assigned)
+    if (isUUID(String(c.id))) {
+      try {
+        const res = await cloudDeleteCampaign(c.id);
+        if (!res?.ok) console.warn('[delete] cloud delete returned not-ok', res);
+      } catch (e) {
+        console.warn('[delete] cloud delete failed', e);
+      }
+    }
+    // Activity log
+    if (user) {
+      logActivity({
+        userId: user.id, userEmail: user.email,
+        action: 'delete', resourceType: 'campaign',
+        resourceId: c.id, resourceName: c.name,
+      });
+    }
   };
 
   // Reorder a campaign within its period (up or down). Order controls dedup priority & primary.
@@ -4748,6 +4835,44 @@ function CampaignsView({
     setAutoFillWizard(null);
   }, [setFloors, primaryCampaign, user, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
 
+  // Cleanup orphan slots: remove slots whose EAN isn't in the active campaign rows
+  const cleanupOrphanSlots = useCallback(() => {
+    if (!primaryCampaign) {
+      alert('Carrega uma campanha primeiro.');
+      return;
+    }
+    const cols = detectColumns(primaryCampaign.headers);
+    if (!cols.ean) {
+      alert('Não foi detectada coluna EAN na campanha activa.');
+      return;
+    }
+    // Build set of valid EANs from current campaign
+    const validEans = new Set();
+    for (const r of (primaryCampaign.rows || [])) {
+      const k = normalizeEAN(r[cols.ean]);
+      if (k) validEans.add(k);
+    }
+    let removed = 0;
+    setFloors(prev => prev.map(f => ({
+      ...f,
+      zones: f.zones.map(z => {
+        const filtered = z.slots.filter(s => {
+          const eanKey = normalizeEAN(s.ref);
+          if (!eanKey) return true; // keep empty/manual slots
+          if (validEans.has(eanKey)) return true;
+          removed++;
+          return false;
+        });
+        return { ...z, slots: filtered };
+      }),
+    })));
+    setTimeout(() => {
+      alert(removed === 0
+        ? 'Todos os slots já correspondem a artigos da campanha activa.'
+        : `Removidos ${removed} slot${removed === 1 ? '' : 's'} órfão${removed === 1 ? '' : 's'} (EAN não existe na campanha "${primaryCampaign.name}").`);
+    }, 50);
+  }, [primaryCampaign, setFloors]);
+
   return (
     <div className="fade-up">
       {/* Cloud sync error banner */}
@@ -4857,6 +4982,13 @@ function CampaignsView({
         }}>
           <Activity size={11} /> Histórico
         </button>
+        <button onClick={() => setTemplatesOpen(true)} title="Guardar/aplicar templates de plano" style={{
+          padding: '6px 10px', background: 'transparent', color: T.inkSoft,
+          border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 11,
+          display: 'flex', alignItems: 'center', gap: 4,
+        }}>
+          <Layers size={11} /> Templates
+        </button>
         <PresenceIndicator peers={presencePeers} currentUserId={user?.id} />
         {scopedCampaigns.length === 0 && periods.length > 1 && (
           <button onClick={() => setShowImportFromPast(true)} title="Importar zonas/produtos de campanhas anteriores" style={{
@@ -4874,6 +5006,15 @@ function CampaignsView({
             display: 'flex', alignItems: 'center', gap: 4,
           }}>
             <Sparkles size={11} /> Auto-preencher campanha
+          </button>
+        )}
+        {primaryCampaign && (
+          <button onClick={cleanupOrphanSlots} title="Remove slots cujo EAN não existe na campanha activa" style={{
+            padding: '6px 10px', background: 'transparent', color: T.accent,
+            border: `1px solid ${T.accent}40`, borderRadius: 6, fontSize: 11,
+            display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+          }}>
+            <Trash2 size={11} /> Limpar órfãos
           </button>
         )}
       </div>
@@ -5265,6 +5406,20 @@ function CampaignsView({
           onClose={() => setHistoryFor(null)}
         />
       )}
+
+      {templatesOpen && (
+        <TemplatesModal
+          currentFloors={primaryCampaign?.floors || floors}
+          currentName={primaryCampaign?.name || selectedPeriod?.name || ''}
+          onApply={(tpl) => {
+            if (!primaryCampaign) { alert('Carrega uma campanha primeiro para aplicar o template.'); return; }
+            if (!confirm(`Substituir o plano actual de "${primaryCampaign.name}" pelo template "${tpl.name}"? Os slots actuais serão perdidos.`)) return;
+            setCampaigns(cs => cs.map(c => c.id === primaryCampaign.id ? { ...c, floors: tpl.floors, updatedAt: new Date().toISOString() } : c));
+            setTemplatesOpen(false);
+          }}
+          onClose={() => setTemplatesOpen(false)}
+        />
+      )}
       </>
       )}
 
@@ -5373,6 +5528,137 @@ function PresenceIndicator({ peers = [], currentUserId }) {
         width: 6, height: 6, borderRadius: '50%', background: T.green,
         marginLeft: 4, animation: 'pulse 2s infinite',
       }} />
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TemplatesModal — save/apply layout templates for recurring campaigns
+// ─────────────────────────────────────────────────────────────────────────
+function TemplatesModal({ currentFloors, currentName, onApply, onClose }) {
+  const [list, setList] = useState(() => listTemplates());
+  const [name, setName] = useState(currentName || '');
+
+  const refresh = () => setList(listTemplates());
+
+  const handleSave = () => {
+    const trimmed = name.trim();
+    if (!trimmed) { alert('Indica um nome para o template.'); return; }
+    if (!currentFloors || currentFloors.length === 0) { alert('Não há plano para guardar.'); return; }
+    saveTemplate(trimmed, currentFloors);
+    setName('');
+    refresh();
+  };
+
+  const handleDelete = (id) => {
+    if (!confirm('Eliminar este template?')) return;
+    deleteTemplate(id);
+    refresh();
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9999, padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 10, border: `1px solid ${T.line}`,
+        width: '100%', maxWidth: 600, maxHeight: '85vh',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        boxShadow: '0 24px 48px -12px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{
+          padding: '14px 20px', borderBottom: `1px solid ${T.line}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>
+              Templates de plano
+            </div>
+            <div className="display" style={{ fontSize: 18, fontStyle: 'italic', marginTop: 2 }}>
+              Guardar / aplicar layout
+            </div>
+          </div>
+          <button onClick={onClose} style={{
+            padding: 6, background: 'transparent', border: 'none', color: T.inkMute, borderRadius: 4, cursor: 'pointer',
+          }}><X size={18} /></button>
+        </div>
+
+        {/* Save current */}
+        <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
+          <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 8 }}>
+            Guardar o plano actual ({(currentFloors || []).reduce((s, f) => s + (f.zones || []).length, 0)} zonas) como template:
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="Nome do template (ex: Apple Week)"
+              style={{
+                flex: 1, padding: '8px 12px', fontSize: 13,
+                background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6,
+                color: T.ink, outline: 'none',
+              }}
+              onKeyDown={e => { if (e.key === 'Enter') handleSave(); }}
+            />
+            <button onClick={handleSave} style={{
+              padding: '8px 14px', background: T.ink, color: T.bg, border: 'none',
+              borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <Plus size={12} /> Guardar
+            </button>
+          </div>
+        </div>
+
+        {/* List */}
+        <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
+          {list.length === 0 ? (
+            <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+              <Layers size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
+              <div>Sem templates guardados.</div>
+              <div style={{ fontSize: 11, marginTop: 4 }}>Guarda o plano actual acima para criar o primeiro.</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {list.map(t => {
+                const zones = (t.floors || []).reduce((s, f) => s + (f.zones || []).length, 0);
+                const slots = (t.floors || []).reduce((s, f) => s + (f.zones || []).reduce((ss, z) => ss + (z.slots || []).length, 0), 0);
+                const date = new Date(t.createdAt).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' });
+                return (
+                  <div key={t.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                    border: `1px solid ${T.lineSoft}`, borderRadius: 6, background: T.paper,
+                  }}>
+                    <Layers size={14} style={{ color: T.accent }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {t.name}
+                      </div>
+                      <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, fontFamily: 'Geist Mono, monospace' }}>
+                        {zones} zonas · {slots} slots · {date}
+                      </div>
+                    </div>
+                    <button onClick={() => onApply(t)} title="Aplicar este template à campanha activa" style={{
+                      padding: '6px 10px', background: T.green, color: '#fff', border: 'none',
+                      borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', gap: 4,
+                    }}>
+                      <Check size={11} /> Aplicar
+                    </button>
+                    <button onClick={() => handleDelete(t.id)} title="Eliminar template" style={{
+                      padding: 6, background: 'transparent', color: T.inkMute, border: 'none', borderRadius: 4, cursor: 'pointer',
+                    }}>
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -6599,6 +6885,34 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
 
   const visible = useMemo(() => filtered.slice(0, pageSize), [filtered, pageSize]);
 
+  // Bulk selection: Set of product ids
+  const [selected, setSelected] = useState(new Set());
+  const [bulkZonePicker, setBulkZonePicker] = useState(false);
+  const toggleSelect = useCallback((id) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleAll = useCallback(() => {
+    setSelected(prev => {
+      const visibleIds = visible.map(p => p.id);
+      const allSelected = visibleIds.every(id => prev.has(id));
+      if (allSelected) {
+        const next = new Set(prev);
+        visibleIds.forEach(id => next.delete(id));
+        return next;
+      }
+      const next = new Set(prev);
+      visibleIds.forEach(id => next.add(id));
+      return next;
+    });
+  }, [visible]);
+  const clearSelection = useCallback(() => setSelected(new Set()), []);
+  // Reset selection on filter change to avoid acting on hidden items
+  useEffect(() => { setSelected(new Set()); }, [search, filterFamily, filterStar, filterAssign, filterStock, filterCampaign]);
+
   const stockReady = stockRowsPO2.length > 0 || stockRowsPO3.length > 0;
   // Cheap: count assigned via products.length comparison; compute lazily
   const totalAssigned = useMemo(() => products.reduce((n, p) => n + (p.assigned ? 1 : 0), 0), [products]);
@@ -6752,12 +7066,63 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
       )}
       </div>{/* end no-print controls */}
 
+      {/* Bulk action bar */}
+      {selected.size > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '10px 14px', marginBottom: 10,
+          background: T.accent, color: '#fff', borderRadius: 8,
+          fontSize: 13, fontWeight: 500,
+        }}>
+          <Check size={14} />
+          <span><strong>{selected.size}</strong> seleccionados</span>
+          <button onClick={() => setBulkZonePicker(true)} style={{
+            marginLeft: 'auto', padding: '6px 12px', fontSize: 12,
+            background: '#fff', color: T.accent, border: 'none', borderRadius: 5,
+            fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+          }}>
+            <MapPin size={12} /> Mover para zona
+          </button>
+          <button onClick={clearSelection} title="Limpar selecção" style={{
+            padding: '6px 10px', fontSize: 11,
+            background: 'transparent', color: '#fff', border: '1px solid rgba(255,255,255,0.4)', borderRadius: 5,
+            cursor: 'pointer',
+          }}>
+            <X size={11} />
+          </button>
+        </div>
+      )}
+
+      {/* Bulk zone picker modal */}
+      {bulkZonePicker && (
+        <BulkZonePicker
+          floors={floors}
+          count={selected.size}
+          onClose={() => setBulkZonePicker(false)}
+          onPick={({ floorId, zoneId }) => {
+            const productsToMove = visible.filter(p => selected.has(p.id));
+            productsToMove.forEach(p => onSetPrimaryZone(p, { floorId, zoneId }));
+            setBulkZonePicker(false);
+            clearSelection();
+          }}
+        />
+      )}
+
       {/* Listing table */}
       <div className="print-area" style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: isMulti ? 1360 : 1280, tableLayout: 'fixed' }}>
             <thead style={{ background: T.lineSoft }}>
               <tr>
+                <th style={{ ...lhStyle, width: 28, textAlign: 'center', padding: '4px' }}>
+                  <input
+                    type="checkbox"
+                    checked={visible.length > 0 && visible.every(p => selected.has(p.id))}
+                    onChange={toggleAll}
+                    style={{ cursor: 'pointer' }}
+                    title="Selecionar tudo o que está visível"
+                  />
+                </th>
                 <SortHeader label="★" align="center" width={28} />
                 <SortHeader field="family" current={sortBy} dir={sortDir} onSort={(f, d) => { setSortBy(f); setSortDir(d); }} label="Família" width={90} />
                 <SortHeader field="ean" current={sortBy} dir={sortDir} onSort={(f, d) => { setSortBy(f); setSortDir(d); }} label="EAN" width={110} />
@@ -6777,7 +7142,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td colSpan={isMulti ? 15 : 14} style={{ padding: 32, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+                <tr><td colSpan={isMulti ? 16 : 15} style={{ padding: 32, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
                   Sem resultados para os filtros atuais.
                 </td></tr>
               ) : visible.map((p, i) => (
@@ -6785,6 +7150,8 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
                   key={p.id}
                   product={p}
                   zebra={i % 2 === 1}
+                  isSelected={selected.has(p.id)}
+                  onToggleSelect={toggleSelect}
                   floors={floors}
                   isMulti={isMulti}
                   onSetPrimaryZone={onSetPrimaryZone}
@@ -6949,6 +7316,73 @@ const lhStyle = {
   borderBottom: `1px solid ${T.line}`, whiteSpace: 'nowrap',
 };
 
+// ─── BulkZonePicker — modal to pick a destination zone for N selected products
+function BulkZonePicker({ floors = [], count, onClose, onPick }) {
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9999, padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 10, border: `1px solid ${T.line}`,
+        width: '100%', maxWidth: 560, maxHeight: '85vh',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+      }}>
+        <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>Mover em massa</div>
+            <div className="display" style={{ fontSize: 18, fontStyle: 'italic', marginTop: 2 }}>
+              {count} produto{count === 1 ? '' : 's'} → escolhe destino
+            </div>
+          </div>
+          <button onClick={onClose} style={{ padding: 6, background: 'transparent', border: 'none', color: T.inkMute, cursor: 'pointer' }}>
+            <X size={18} />
+          </button>
+        </div>
+        <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
+          {floors.map(floor => (
+            <div key={floor.id} style={{ marginBottom: 16 }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                fontSize: 11, fontWeight: 600, color: T.inkSoft,
+                paddingBottom: 6, marginBottom: 8, borderBottom: `2px solid ${floor.color}`,
+                letterSpacing: '0.05em', textTransform: 'uppercase',
+              }}>
+                {floor.star && <Star size={11} fill={floor.color} stroke={floor.color} />}
+                {floor.name}
+              </div>
+              {floor.zones.length === 0 ? (
+                <div style={{ fontSize: 11, color: T.inkMute, fontStyle: 'italic' }}>Sem zonas neste piso</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 6 }}>
+                  {floor.zones.map(zone => (
+                    <button
+                      key={zone.id}
+                      onClick={() => onPick({ floorId: floor.id, zoneId: zone.id })}
+                      style={{
+                        padding: '8px 10px', textAlign: 'left',
+                        background: T.paper, border: `1px solid ${T.lineSoft}`,
+                        borderRadius: 5, fontSize: 12, color: T.ink, cursor: 'pointer',
+                        display: 'flex', flexDirection: 'column', gap: 2,
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.background = `${T.accent}08`; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = T.lineSoft; e.currentTarget.style.background = T.paper; }}
+                    >
+                      <span style={{ fontWeight: 500 }}>{zone.name}</span>
+                      <span style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono' }}>{(zone.slots || []).length} slots</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Deterministic hue from string — consistent colour per campaign name
 function strHue(s) {
   let h = 0;
@@ -6956,7 +7390,7 @@ function strHue(s) {
   return h % 360;
 }
 
-const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMulti, onSetPrimaryZone, onAssignMore }) {
+const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMulti, onSetPrimaryZone, onAssignMore, isSelected, onToggleSelect }) {
   const p = product;
   const discount = Number(p.discount);
   const hasStock = p.stockTotal > 0;
@@ -6974,10 +7408,13 @@ const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMu
 
   return (
     <tr style={{
-      background: zebra ? T.bg : 'transparent',
-      borderLeft: p.isStar ? `3px solid ${T.yellow}` : '3px solid transparent',
+      background: isSelected ? `${T.accent}10` : (zebra ? T.bg : 'transparent'),
+      borderLeft: isSelected ? `3px solid ${T.accent}` : (p.isStar ? `3px solid ${T.yellow}` : '3px solid transparent'),
       borderBottom: `1px solid ${T.lineSoft}`,
     }}>
+      <td style={{ ...ltdStyle, textAlign: 'center', padding: '4px' }}>
+        <input type="checkbox" checked={!!isSelected} onChange={() => onToggleSelect && onToggleSelect(p.id)} style={{ cursor: 'pointer' }} />
+      </td>
       <td style={{ ...ltdStyle, textAlign: 'center' }}>
         {p.isStar && <Star size={14} fill={T.yellow} stroke={T.yellow} style={{ verticalAlign: 'middle' }} />}
       </td>
@@ -10600,6 +11037,161 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// CalendarView — month-grid view of all campaign periods over time
+// ─────────────────────────────────────────────────────────────────────────
+function CalendarView({ periods = [], campaigns = [], onEnterPeriod }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+
+  const monthLabel = cursor.toLocaleDateString('pt-PT', { month: 'long', year: 'numeric' });
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const daysInMonth = lastDay.getDate();
+  // Monday=0 .. Sunday=6
+  const startWeekday = (firstDay.getDay() + 6) % 7;
+
+  // Filter periods that overlap with current month
+  const monthStart = firstDay.getTime();
+  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59).getTime();
+  const visiblePeriods = useMemo(() => {
+    return (periods || []).filter(p => {
+      if (!p.startDate || !p.endDate) return false;
+      const ps = new Date(p.startDate).getTime();
+      const pe = new Date(p.endDate).getTime();
+      return pe >= monthStart && ps <= monthEnd;
+    }).sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+  }, [periods, monthStart, monthEnd]);
+
+  const STATUS_COLOR = { planned: T.blue, active: T.green, finished: T.inkMute };
+  const STATUS_LABEL = { planned: 'Planeado', active: 'Em curso', finished: 'Terminado' };
+
+  // Build cells array: 6 weeks x 7 days = 42 cells
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+  while (cells.length % 7 !== 0) cells.push(null);
+  while (cells.length < 42) cells.push(null);
+
+  const isToday = (d) => {
+    if (!d) return false;
+    const t = new Date();
+    return d.getFullYear() === t.getFullYear() && d.getMonth() === t.getMonth() && d.getDate() === t.getDate();
+  };
+
+  const periodsForDay = (day) => {
+    if (!day) return [];
+    const t = day.getTime();
+    return visiblePeriods.filter(p => {
+      const ps = new Date(p.startDate).setHours(0, 0, 0, 0);
+      const pe = new Date(p.endDate).setHours(23, 59, 59, 999);
+      return t >= ps && t <= pe;
+    });
+  };
+
+  const navMonth = (delta) => setCursor(c => new Date(c.getFullYear(), c.getMonth() + delta, 1));
+
+  return (
+    <div className="fade-up">
+      <Header eyebrow="Linha do tempo" title="Calendário" subtitle="Vista mensal de todos os períodos de campanha. Clica num bloco para entrar nessa campanha." />
+
+      {/* Month nav */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+        <button onClick={() => navMonth(-1)} style={navBtnStyle}><ArrowLeft size={14} /></button>
+        <div className="display" style={{ fontSize: 22, fontStyle: 'italic', textTransform: 'capitalize', minWidth: 220 }}>{monthLabel}</div>
+        <button onClick={() => navMonth(1)} style={navBtnStyle}><ArrowRight size={14} /></button>
+        <button onClick={() => setCursor(new Date(new Date().getFullYear(), new Date().getMonth(), 1))} style={{ ...navBtnStyle, fontSize: 11, padding: '6px 12px' }}>Hoje</button>
+        <div style={{ marginLeft: 'auto', fontSize: 11, color: T.inkMute }}>
+          {visiblePeriods.length} período{visiblePeriods.length === 1 ? '' : 's'} neste mês
+        </div>
+      </div>
+
+      {/* Calendar grid */}
+      <div style={{ background: T.bg, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', background: T.bgEl, borderBottom: `1px solid ${T.line}` }}>
+          {['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map(d => (
+            <div key={d} style={{ padding: '10px 8px', fontSize: 10, fontWeight: 600, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', textAlign: 'center' }}>{d}</div>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)' }}>
+          {cells.map((day, i) => {
+            const periodsHere = periodsForDay(day);
+            const today = isToday(day);
+            return (
+              <div key={i} style={{
+                minHeight: 110, padding: 6,
+                borderRight: (i + 1) % 7 !== 0 ? `1px solid ${T.lineSoft}` : 'none',
+                borderBottom: i < 35 ? `1px solid ${T.lineSoft}` : 'none',
+                background: today ? `${T.accent}08` : (day ? T.paper : T.bgEl),
+              }}>
+                {day && (
+                  <>
+                    <div style={{
+                      fontSize: 11, fontWeight: today ? 700 : 500,
+                      color: today ? T.accent : T.inkSoft,
+                      marginBottom: 4,
+                    }}>
+                      {day.getDate()}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {periodsHere.slice(0, 3).map(p => {
+                        const status = periodStatus(p);
+                        const color = STATUS_COLOR[status];
+                        const campCount = (campaigns || []).filter(c => c.periodId === p.id).length;
+                        return (
+                          <button
+                            key={p.id}
+                            onClick={() => onEnterPeriod && onEnterPeriod(p.id)}
+                            title={`${p.name} · ${STATUS_LABEL[status]} · ${campCount} ficheiro${campCount === 1 ? '' : 's'}`}
+                            style={{
+                              padding: '3px 6px', fontSize: 10,
+                              background: color, color: '#fff', borderRadius: 3,
+                              border: 'none', cursor: 'pointer', textAlign: 'left',
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              fontWeight: 500,
+                            }}
+                          >
+                            {p.name}
+                          </button>
+                        );
+                      })}
+                      {periodsHere.length > 3 && (
+                        <div style={{ fontSize: 9, color: T.inkMute, fontStyle: 'italic', paddingLeft: 4 }}>
+                          +{periodsHere.length - 3} mais
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div style={{ marginTop: 16, display: 'flex', gap: 16, fontSize: 11, color: T.inkSoft, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600 }}>Estado:</span>
+        {[['planned', 'Planeado'], ['active', 'Em curso'], ['finished', 'Terminado']].map(([k, l]) => (
+          <span key={k} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ width: 10, height: 10, background: STATUS_COLOR[k], borderRadius: 2 }} /> {l}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const navBtnStyle = {
+  padding: '7px 10px', background: 'transparent', color: T.ink,
+  border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+  display: 'flex', alignItems: 'center', gap: 4, fontSize: 12,
+};
+
 // Full-page notes view (accessible via sidebar)
 function NotesView({ notes, setNotes }) {
   const textareaRef = useRef();
@@ -11735,6 +12327,7 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
     dashboard: { label: 'Visão Geral', icon: LayoutDashboard },
     sales: { label: 'Análise de Vendas', icon: BarChart3 },
     campaigns: { label: 'Campanhas', icon: Layers },
+    calendar: { label: 'Calendário', icon: Calendar },
     changes: { label: 'Alterações', icon: GitCompareArrows },
     stock: { label: 'Stock', icon: Package },
     inventory: { label: 'Inventário', icon: ScanLine },
