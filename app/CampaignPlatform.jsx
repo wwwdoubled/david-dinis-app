@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.4.0';
-const APP_BUILD_DATE = '2026-05-07T11:30';
+const APP_VERSION = '3.4.1';
+const APP_BUILD_DATE = '2026-05-07T12:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -8541,7 +8541,12 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
 
   // ── Build snapshot (new/left) ────────────────────────────────────────────
   const snapshot = useMemo(() => {
-    if (newSource === 'upload') return uploadedSnapshot;
+    if (newSource === 'upload') {
+      if (!uploadedSnapshot) return null;
+      // Apply excluded families filter to the uploaded snapshot too
+      const filtered = filterRowsByFamily(uploadedSnapshot.rows || [], uploadedSnapshot.headers, excludedFamilies);
+      return { ...uploadedSnapshot, rows: filtered, itemCount: filtered.length };
+    }
     if (newSource === 'campaign') {
       const c = campaigns.find(x => x.id === newCampaignId);
       if (!c) return null;
@@ -8675,14 +8680,23 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     return { added, removed, changed, unchanged };
   }, [snapshot, compareWith, stockIndexPO2, stockIndexPO3, excludedFamilies]);
 
-  // All unique families across all diff categories
+  // All unique families across all diff categories WITH counts (for FamilyChips)
   const allFamilies = useMemo(() => {
     if (!diff) return [];
-    const fams = new Set();
+    const counts = new Map();
     [...diff.added, ...diff.changed, ...diff.removed, ...diff.unchanged].forEach(p => {
-      if (p.family) fams.add(p.family);
+      const fam = p.family || '';
+      if (!fam) return;
+      counts.set(fam, (counts.get(fam) || 0) + 1);
     });
-    return Array.from(fams).sort();
+    return Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count); // most populated first
+  }, [diff]);
+  // Total products across all categories — used for "Todas" chip count
+  const totalDiffProducts = useMemo(() => {
+    if (!diff) return 0;
+    return diff.added.length + diff.changed.length + diff.removed.length + diff.unchanged.length;
   }, [diff]);
 
   const filteredItems = useMemo(() => {
@@ -8693,7 +8707,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (filter === 'all' || filter === 'removed') items = items.concat(diff.removed.map(p => ({ ...p, kind: 'removed' })));
     if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged.map(p => ({ ...p, kind: 'unchanged' })));
     if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
-    if (filterFamily) items = items.filter(p => p.family === filterFamily);
+    if (filterFamily && filterFamily !== 'all') items = items.filter(p => p.family === filterFamily);
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -8901,6 +8915,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               filterFamily={filterFamily}
               setFilterFamily={setFilterFamily}
               allFamilies={allFamilies}
+              totalDiffProducts={totalDiffProducts}
               search={search}
               setSearch={setSearch}
               filteredItems={filteredItems}
@@ -8915,7 +8930,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, search, setSearch, filteredItems, onClear, onExport, stockRowsPO3 }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, onClear, onExport, stockRowsPO3 }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
@@ -9012,7 +9027,8 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             {filterAveiro && <X size={10} />}
           </button>
         )}
-        {allFamilies.length > 0 && (
+        {/* Family filter is now rendered as chips below this row (see FamilyChips) */}
+        {false && (
           <select
             value={filterFamily}
             onChange={e => setFilterFamily(e.target.value)}
@@ -9025,13 +9041,23 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             }}
           >
             <option value=''>Todas as famílias</option>
-            {allFamilies.map(f => <option key={f} value={f}>{f}</option>)}
+            {allFamilies.map(f => <option key={f.name || f} value={f.name || f}>{f.name || f}</option>)}
           </select>
         )}
         <div className="mono" style={{ marginLeft: 'auto', fontSize: 11, color: T.inkMute }}>
           {filteredItems.length} resultados
         </div>
       </div>
+
+      {/* Family chips — visual filter strip with counts */}
+      {allFamilies.length > 0 && (
+        <FamilyChips
+          families={allFamilies}
+          selected={filterFamily || 'all'}
+          onSelect={(name) => setFilterFamily(name === 'all' ? '' : name)}
+          totalProducts={totalDiffProducts}
+        />
+      )}
 
       {/* Results table */}
       <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
