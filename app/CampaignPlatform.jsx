@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.4.2';
-const APP_BUILD_DATE = '2026-05-07T12:30';
+const APP_VERSION = '3.4.3';
+const APP_BUILD_DATE = '2026-05-07T13:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -8072,9 +8072,14 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
   const resolvedName = slot.name || resolvedProduct?.name || '';
   const resolvedFamily = slot.family || resolvedProduct?.family || '';
   const resolvedSubfamily = slot.subfamily || resolvedProduct?.subfamily || '';
-  const resolvedBasePrice = slot.basePrice || resolvedProduct?.basePrice || 0;
-  const resolvedCampPrice = slot.campaignPrice || resolvedProduct?.campaignPrice || 0;
-  const resolvedDiscount = slot.discount || resolvedProduct?.discount || 0;
+  const resolvedBasePrice = Number(slot.basePrice || resolvedProduct?.basePrice || 0);
+  const resolvedCampPrice = Number(slot.campaignPrice || resolvedProduct?.campaignPrice || 0);
+  // Use the explicit discount when ≥0.5%; otherwise compute from prices
+  const explicitDiscount = Number(slot.discount || resolvedProduct?.discount || 0);
+  const calcDiscount = (resolvedBasePrice > 0 && resolvedCampPrice > 0 && resolvedCampPrice < resolvedBasePrice)
+    ? ((resolvedBasePrice - resolvedCampPrice) / resolvedBasePrice) * 100
+    : 0;
+  const resolvedDiscount = explicitDiscount >= 0.5 ? explicitDiscount : calcDiscount;
 
   // Auto-suggest from active campaign or candidates as user types — full product object
   const suggestions = useMemo(() => {
@@ -8263,13 +8268,18 @@ function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stock
     for (const r of (activeCampaign.rows || [])) {
       const key = normalizeEAN(r[cols.ean]);
       if (!key || map.has(key)) continue;
+      const basePriceVal = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
+      const campPriceVal = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
+      const explicitDisc = cols.discount ? parseNum(r[cols.discount]) : 0;
+      const calcDisc = (basePriceVal > 0 && campPriceVal > 0 && campPriceVal < basePriceVal)
+        ? ((basePriceVal - campPriceVal) / basePriceVal) * 100 : 0;
       map.set(key, {
         name: cols.description ? String(r[cols.description] ?? '').trim() : '',
         family: cols.family ? String(r[cols.family] ?? '').trim() : '',
         subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '').trim() : '',
-        basePrice: cols.basePrice ? parseNum(r[cols.basePrice]) : 0,
-        campaignPrice: cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0,
-        discount: cols.discount ? parseNum(r[cols.discount]) : 0,
+        basePrice: basePriceVal,
+        campaignPrice: campPriceVal,
+        discount: explicitDisc >= 0.5 ? explicitDisc : calcDisc,
         startDate: cols.startDate ? r[cols.startDate] : '',
         endDate: cols.endDate ? r[cols.endDate] : '',
       });
@@ -8403,9 +8413,12 @@ function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stock
                       const family = resolveField(s, 'family');
                       const subfamily = resolveField(s, 'subfamily');
                       const famDisplay = [family, subfamily].filter(Boolean).join(' › ');
-                      const basePrice = resolveField(s, 'basePrice');
-                      const campPrice = resolveField(s, 'campaignPrice');
-                      const discount = resolveField(s, 'discount');
+                      const basePrice = Number(resolveField(s, 'basePrice') || 0);
+                      const campPrice = Number(resolveField(s, 'campaignPrice') || 0);
+                      const explicitDisc = Number(resolveField(s, 'discount') || 0);
+                      const calcDisc = (basePrice > 0 && campPrice > 0 && campPrice < basePrice)
+                        ? ((basePrice - campPrice) / basePrice) * 100 : 0;
+                      const discount = explicitDisc >= 0.5 ? explicitDisc : calcDisc;
                       return (
                         <tr key={s.id}>
                           <td style={{ ...otdStyle, background: T.cyan, fontFamily: 'Geist Mono', fontSize: 10 }}>{s.ref || '—'}</td>
