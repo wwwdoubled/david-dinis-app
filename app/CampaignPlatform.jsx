@@ -241,6 +241,30 @@ function storeDelete(key) {
   try { localStorage.removeItem(STORE_PREFIX + key); } catch {}
 }
 
+// ─── Tombstones (recently-deleted ids) ────────────────────────────────
+// Quando o utilizador apaga algo, registamos o id aqui durante 5 min para
+// que a sync periódica não ressuscite o item enquanto a cloud ainda tem
+// o registo em flight.
+const TOMBSTONE_TTL = 5 * 60 * 1000;
+function getTombstones(kind) {
+  const all = storeGet('tombstones', {});
+  const list = all[kind] || [];
+  const now = Date.now();
+  return list.filter(t => now - t.at < TOMBSTONE_TTL);
+}
+function addTombstone(kind, id) {
+  if (id == null) return;
+  const all = storeGet('tombstones', {});
+  const fresh = (all[kind] || []).filter(t => Date.now() - t.at < TOMBSTONE_TTL);
+  fresh.push({ id: String(id), at: Date.now() });
+  all[kind] = fresh.slice(-200);
+  storeSet('tombstones', all);
+}
+function isTombstoned(kind, id) {
+  if (id == null) return false;
+  return getTombstones(kind).some(t => t.id === String(id));
+}
+
 // ─── Templates de campanha ─────────────────────────────────────────────
 // Guardam o layout (floors+zones) para reutilizar em campanhas recorrentes
 function listTemplates() {
@@ -484,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.3.0';
-const APP_BUILD_DATE = '2026-05-07T10:00';
+const APP_VERSION = '3.3.1';
+const APP_BUILD_DATE = '2026-05-07T10:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1330,13 +1354,13 @@ async function cloudDeleteCampaign(campaignId) {
 // ─────────────────────────────────────────────────────────────────────────
 function mergePeriods(localList, cloudList) {
   const map = new Map();
-  // Start with local
+  // Start with local — exclude tombstoned ids
   for (const p of (localList || [])) {
-    if (p.id) map.set(p.id, p);
+    if (p.id && !isTombstoned('period', p.id)) map.set(p.id, p);
   }
-  // Overlay cloud, preferring more recent
+  // Overlay cloud, preferring more recent — exclude tombstoned ids
   for (const cp of (cloudList || [])) {
-    if (!cp.id) continue;
+    if (!cp.id || isTombstoned('period', cp.id)) continue;
     const local = map.get(cp.id);
     if (!local) {
       map.set(cp.id, cp);
@@ -1364,14 +1388,17 @@ function mergePeriods(localList, cloudList) {
 
 function mergeCampaigns(localList, cloudList) {
   const map = new Map();
+  // Filter out tombstoned ids — items the user just deleted shouldn't resurrect
+  const filteredLocal = (localList || []).filter(c => !isTombstoned('campaign', c.id));
+  const filteredCloud = (cloudList || []).filter(c => !isTombstoned('campaign', c.id));
   // Use a composite key (user_id + campaign_key) for duplicates from different sources
   // but campaigns also have `id` — prefer id when available
   const keyOf = (c) => c.id ? `id:${c.id}` : `key:${c.user_id || ''}:${c.key || ''}`;
 
-  for (const c of (localList || [])) {
+  for (const c of filteredLocal) {
     map.set(keyOf(c), c);
   }
-  for (const cc of (cloudList || [])) {
+  for (const cc of filteredCloud) {
     const k = keyOf(cc);
     const local = map.get(k);
     // Helper: given a merged object, restore rows/itemCount from local when cloud has none
@@ -2618,8 +2645,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       // 3. Detect local-only items that need to be uploaded (migration, background)
       const cloudPeriodIds = new Set(cloudPeriods.map(p => p.id));
       const cloudCampaignKeys = new Set(cloudCampaignsMeta.map(c => c.user_id + ':' + c.key));
-      const localOnlyPeriods = periodsRef.current.filter(p => !cloudPeriodIds.has(p.id));
-      const localOnlyCampaigns = campaignsRef.current.filter(c => !cloudCampaignKeys.has(user.id + ':' + c.key));
+      const localOnlyPeriods = periodsRef.current.filter(p => !cloudPeriodIds.has(p.id) && !isTombstoned('period', p.id));
+      const localOnlyCampaigns = campaignsRef.current.filter(c => !cloudCampaignKeys.has(user.id + ':' + c.key) && !isTombstoned('campaign', c.id));
       if (localOnlyPeriods.length === 0 && localOnlyCampaigns.length === 0) return; // nothing to migrate
 
       // 4. Remap non-UUID legacy period IDs
@@ -2644,23 +2671,35 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         Promise.all(periodsToMigrate.map(p =>
           cloudUpsertPeriod({ ...p, user_id: p.user_id || user.id, created_by: p.created_by || user.id }, user.id)
         )),
-        Promise.all(localOnlyCampaigns.filter(c => c.key).map(c => {
+        Promise.all(localOnlyCampaigns.filter(c => c.key && !isTombstoned('campaign', c.id)).map(async c => {
           const newPid = idRemap.get(c.periodId);
           const cw = { ...c, user_id: c.user_id || user.id, periodId: newPid || c.periodId };
           if (cw.periodId && !isUUID(cw.periodId)) cw.periodId = null;
-          return cloudUpsertCampaign(cw, user.id);
+          const res = await cloudUpsertCampaign(cw, user.id);
+          // Adopt cloud-assigned UUID locally so next session doesn't try to re-migrate
+          if (res.ok && res.data?.id && !isUUID(String(c.id))) {
+            setCampaigns(prev => prev.map(x => x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x));
+          }
+          return res;
         })),
       ]);
       [...periodResults, ...campaignResults].forEach(res => {
         if (res.ok) migratedCount++; else migrationErrors++;
       });
 
+      // Suppress success banner if migration ran successfully recently (last 24h)
+      const lastMig = storeGet('last_migration_at', 0);
+      const isRecent = Date.now() - lastMig < 24 * 60 * 60 * 1000;
       if (migrationErrors > 0) {
         setMigrationStatus({ migrated: migratedCount, error: `${migrationErrors} ${migrationErrors === 1 ? 'item falhou' : 'itens falharam'} ao sincronizar para a cloud (verifica F12 para detalhes). Os dados ficam guardados localmente.` });
         setTimeout(() => setMigrationStatus(null), 12000);
-      } else if (migratedCount > 0) {
+      } else if (migratedCount > 0 && !isRecent) {
         setMigrationStatus({ migrated: migratedCount });
+        storeSet('last_migration_at', Date.now());
         setTimeout(() => setMigrationStatus(null), 8000);
+      } else if (migratedCount > 0) {
+        // Silent: just record the timestamp
+        storeSet('last_migration_at', Date.now());
       }
     })().catch(err => {
       console.warn('Cloud sync failed:', err);
@@ -2782,6 +2821,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     if (lastCleanedRef.current.has(key)) return;
     lastCleanedRef.current.add(key);
     console.log('[cleanup] removing', emptyIds.length, 'empty campaigns:', emptyIds);
+    emptyIds.forEach(id => addTombstone('campaign', id));
     setCampaigns(cs => cs.filter(c => !emptyIds.includes(c.id)));
     emptyIds.forEach(id => {
       idbDelete(id).catch(() => {});
@@ -2984,28 +3024,35 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     }));
   }, [user]);
 
-  const deletePeriod = useCallback((id, alsoDeleteCampaigns = false) => {
+  const deletePeriod = useCallback((id) => {
     const p = periods.find(x => x.id === id);
-    if (alsoDeleteCampaigns) {
-      setCampaigns(cs => {
-        const toDelete = cs.filter(c => c.periodId === id);
-        toDelete.forEach(c => {
-          if (c.key) idbDelete(c.key).catch(() => {});
-          if (user && supabase && c.id) cloudDeleteCampaign(c.id).catch(() => {});
-        });
-        return cs.filter(c => c.periodId !== id);
+    if (!p) return;
+    const campaignsHere = campaignsRef.current.filter(c => c.periodId === id);
+    const msg = campaignsHere.length === 0
+      ? `Eliminar período "${p.name}"?\n\nNão tem campanhas associadas. Não pode ser desfeito.`
+      : `Eliminar período "${p.name}" e as ${campaignsHere.length} campanha(s) associadas?\n\nApaga TUDO (local + IDB + cloud). Não pode ser desfeito.`;
+    if (!confirm(msg)) return;
+    // Tombstones FIRST so periodic refresh doesn't resurrect anything
+    addTombstone('period', id);
+    campaignsHere.forEach(c => addTombstone('campaign', c.id));
+    // Delete campaigns (local + IDB + cloud)
+    if (campaignsHere.length > 0) {
+      campaignsHere.forEach(c => {
+        if (c.key) idbDelete(c.key).catch(() => {});
+        if (c.id) idbDelete(c.id).catch(() => {});
+        if (user && supabase && isUUID(String(c.id))) cloudDeleteCampaign(c.id).catch(err => console.warn('[delete-period] cloud campaign delete failed', err));
       });
-    } else {
-      setCampaigns(cs => cs.map(c => c.periodId === id ? { ...c, periodId: null } : c));
+      setCampaigns(cs => cs.filter(c => c.periodId !== id));
     }
-    idbDeletePeriod(id).catch(err => console.warn('Period delete failed:', err));
-    if (user && supabase) cloudDeletePeriod(id).catch(err => console.warn('Period cloud delete failed:', err));
+    // Delete period
+    idbDeletePeriod(id).catch(err => console.warn('[delete-period] IDB delete failed:', err));
+    if (user && supabase && isUUID(String(id))) cloudDeletePeriod(id).catch(err => console.warn('[delete-period] cloud delete failed:', err));
     setPeriods(ps => ps.filter(p => p.id !== id));
     if (user) logActivity({
       userId: user.id, userEmail: user.email,
       action: 'delete', resourceType: 'period',
       resourceId: id, resourceName: p?.name,
-      metadata: { alsoDeleteCampaigns },
+      metadata: { campaignsDeleted: campaignsHere.length },
     });
   }, [user, periods]);
 
@@ -4544,6 +4591,8 @@ function CampaignsView({
     const c = campaigns.find(x => x.id === campaignId);
     if (!c) return;
     if (!confirm(`Eliminar definitivamente "${c.name}"?\n\nApaga local + cloud + IDB. Não pode ser desfeito.`)) return;
+    // Tombstone first so periodic refresh doesn't resurrect
+    addTombstone('campaign', c.id);
     // Local state
     setCampaigns(cs => cs.filter(x => x.id !== campaignId));
     setActiveIds(ids => ids.filter(id => id !== campaignId));
@@ -6370,7 +6419,7 @@ function PeriodGroup({ title, badge, periods, stats, onEnter, onEdit, onDelete, 
             currentUserId={currentUserId}
             onEnter={() => onEnter(p.id)}
             onEdit={() => onEdit(p)}
-            onDelete={() => onDelete(p.id, false)}
+            onDelete={() => onDelete(p.id)}
             onToggleHidden={onToggleHidden}
             dimmed={dimmed || p.hidden}
           />
