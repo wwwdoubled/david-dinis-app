@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.5.0';
-const APP_BUILD_DATE = '2026-05-07T14:00';
+const APP_VERSION = '3.5.1';
+const APP_BUILD_DATE = '2026-05-07T14:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -10990,7 +10990,21 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
 
   const [scanning, setScanning] = useState(false);
   const [manualEan, setManualEan] = useState('');
-  const [scanned, setScanned] = useState([]); // [{ ean, descr, family, subfamily, po2, po3, ts, idx }]
+  // Persisted scan history — survives menu changes, page reloads, crashes.
+  // ts is stored as ISO string in localStorage and deserialised back to Date here.
+  const [scannedRaw, setScannedRaw] = useStoredState('inventory.scanned', []);
+  const scanned = useMemo(
+    () => (scannedRaw || []).map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts : new Date(s.ts) })),
+    [scannedRaw]
+  );
+  const setScanned = useCallback((updater) => {
+    setScannedRaw(prev => {
+      const list = (prev || []).map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts : new Date(s.ts) }));
+      const next = typeof updater === 'function' ? updater(list) : updater;
+      // Serialise ts to ISO string before storing
+      return next.map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts.toISOString() : s.ts }));
+    });
+  }, [setScannedRaw]);
   const [cameraError, setCameraError] = useState(null);
   const [mode, setMode] = useState('manual'); // 'camera' | 'manual'
   const [compareWith, setCompareWith] = useStoredState('inventory.compareWith', 'both'); // 'po2' | 'po3' | 'both'
@@ -11183,7 +11197,7 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
           <ScanLine size={22} style={{ color: T.accent }} /> Scanner de Inventário
         </h2>
         <p style={{ fontSize: 13, color: T.inkMute, marginTop: 6 }}>
-          Lê códigos de barras com a câmara ou digita manualmente. Cada EAN é cruzado com o stock PO2/PO3.
+          Lê códigos de barras com a câmara ou digita manualmente. Cada EAN é cruzado com o stock PO2/PO3. A sessão é <strong>guardada automaticamente</strong> neste dispositivo — podes mudar de menu, fechar e reabrir o browser, que as leituras ficam.
         </p>
       </div>
 
@@ -11279,6 +11293,10 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
             <strong style={{ color: T.green }}>{totalFound}</strong> encontrados ·{' '}
             <strong style={{ color: T.accent }}>{totalNotFound}</strong> não encontrados
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: T.green, fontFamily: 'Geist Mono, monospace' }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: T.green, display: 'inline-block' }} />
+            sessão guardada
+          </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <button onClick={exportXLSX} title="Exporta um Excel com 2 folhas: Histórico (1 linha por leitura) e Resumo por EAN com diferença vs PO2/PO3" style={{
               padding: '6px 12px', background: T.green, color: '#fff',
@@ -11287,11 +11305,17 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
             }}>
               <Download size={12} /> Exportar Excel
             </button>
-            <button onClick={() => setScanned([])} style={{
-              padding: '6px 12px', background: 'transparent', color: T.accent,
-              border: `1px solid ${T.accent}30`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
-            }}>
-              Limpar
+            <button
+              onClick={() => {
+                if (!confirm(`Iniciar nova sessão de inventário?\n\nIsto apaga as ${scanned.length} leituras actuais. Considera exportar para Excel primeiro.`)) return;
+                setScanned([]);
+              }}
+              style={{
+                padding: '6px 12px', background: 'transparent', color: T.accent,
+                border: `1px solid ${T.accent}30`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              }}
+            >
+              Nova sessão
             </button>
           </div>
         </div>
