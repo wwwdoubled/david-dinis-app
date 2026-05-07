@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.1';
-const APP_BUILD_DATE = '2026-05-07T17:30';
+const APP_VERSION = '3.9.2';
+const APP_BUILD_DATE = '2026-05-07T18:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4434,10 +4434,16 @@ function CampaignsView({
     }
   }, [selectedPeriodId, periods, setSelectedPeriodId]);
 
-  // Campaigns scoped to current period (or all if no period selected)
+  // Campaigns scoped to current period (or all if no period selected).
+  // Excludes stock files (PO2/PO3) — those belong to the global Stock view.
   const scopedCampaigns = useMemo(() => {
-    if (!selectedPeriodId) return campaigns;
-    return campaigns.filter(c => c.periodId === selectedPeriodId);
+    const list = !selectedPeriodId ? campaigns : campaigns.filter(c => c.periodId === selectedPeriodId);
+    return list.filter(c => !isStockFile(c));
+  }, [campaigns, selectedPeriodId]);
+
+  // Stock-like files mistakenly attached as campaigns — for the "migrate" notice
+  const misplacedStockFiles = useMemo(() => {
+    return campaigns.filter(c => c.periodId === selectedPeriodId && isStockFile(c));
   }, [campaigns, selectedPeriodId]);
 
   // Lazy row hydration: when user enters a period, fetch rows ONLY for the
@@ -5091,6 +5097,39 @@ function CampaignsView({
 
   return (
     <div className="fade-up">
+      {/* Misplaced stock files banner */}
+      {misplacedStockFiles.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: T.yellow, color: '#1A1A1A',
+          padding: '10px 14px', marginBottom: 12, borderRadius: 6, fontSize: 12, lineHeight: 1.5,
+        }}>
+          <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>
+            <strong>{misplacedStockFiles.length} ficheiro{misplacedStockFiles.length === 1 ? '' : 's'} de stock</strong> aparec{misplacedStockFiles.length === 1 ? 'e' : 'em'} associado{misplacedStockFiles.length === 1 ? '' : 's'} a este período por engano. Os ficheiros PO2/PO3 são <strong>globais</strong> e devem ser carregados na vista <em>Stock</em>.
+          </span>
+          <button
+            onClick={async () => {
+              if (!confirm(`Remover ${misplacedStockFiles.length} ficheiro(s) de stock deste período?\n\nIsto apaga-os do registo de campanhas (não afecta o stock global na vista Stock).`)) return;
+              for (const c of misplacedStockFiles) {
+                addTombstone('campaign', c.id);
+                if (isUUID(String(c.id))) {
+                  try { await cloudDeleteCampaign(c.id); } catch (e) { console.warn('[stock-cleanup] cloud delete failed', e); }
+                }
+              }
+              setCampaigns(cs => cs.filter(c => !misplacedStockFiles.some(s => s.id === c.id)));
+            }}
+            style={{
+              padding: '5px 10px', background: '#1A1A1A', color: '#fff',
+              border: 'none', borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+              flexShrink: 0,
+            }}
+          >
+            Remover deste período
+          </button>
+        </div>
+      )}
+
       {/* Cloud sync error banner */}
       {syncError && (
         <div style={{
@@ -6127,6 +6166,29 @@ function normalizeEAN(v) {
   s = s.replace(/[^\d]/g, '');
   // Strip leading zeros for comparison
   return s.replace(/^0+/, '');
+}
+
+// Detect if a "campaign" record is actually a stock file (PO2/PO3) that
+// shouldn't be listed under a period's campaigns. Stock files are global
+// and uploaded via the Stock view — but historically users may have dropped
+// them on the campaign upload, so they end up in the campaigns table.
+// We detect by filename pattern OR by a stock-style header signature.
+function isStockFile(c) {
+  if (!c) return false;
+  const name = String(c.name || c.key || '').toLowerCase();
+  // Filename patterns common to stock files
+  if (/^\s*stock[\s_]?ponto/i.test(name)) return true;
+  if (/^\s*po[23][\s_-]/i.test(name)) return true;
+  if (/^\s*stock[\s_-]+(?:armaz|loja|aveiro)/i.test(name)) return true;
+  // Header signature: only EAN + Stock (+ Description) columns and no campaign fields
+  const headers = (c.headers || []).map(h => String(h || '').toLowerCase().trim());
+  if (headers.length > 0 && headers.length <= 4) {
+    const hasEan = headers.some(h => /\bean\b|barcode|cód.?barras|cod.?barras/.test(h));
+    const hasStock = headers.some(h => /^stock$|qtd|stock_aveiro|stock_armaz/.test(h));
+    const hasCampaignField = headers.some(h => /pvp|preço|preco|desconto|discount|campanha/.test(h));
+    if (hasEan && hasStock && !hasCampaignField) return true;
+  }
+  return false;
 }
 
 // Filter rows by family: remove rows whose Des_Fam1 is in excludedFamilies (case-insensitive).
