@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.6.0';
-const APP_BUILD_DATE = '2026-05-07T15:00';
+const APP_VERSION = '3.7.0';
+const APP_BUILD_DATE = '2026-05-07T15:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -10183,6 +10183,18 @@ const FLYER_PALETTES = [
   { id: 'fnac-white', label: 'Branco', bg: '#FFFFFF', fg: '#1A1A1A', accent: '#E1251B' },
 ];
 
+// Drag/resize-able element ids in the flyer
+const FLYER_ELEMENTS = [
+  { id: 'title', label: 'Título' },
+  { id: 'specs', label: 'Specs' },
+  { id: 'pvpBase', label: 'PVP riscado' },
+  { id: 'discount', label: 'Badge desconto' },
+  { id: 'price', label: 'Preço' },
+  { id: 'accumulate', label: 'Acumula cartão' },
+  { id: 'logo', label: 'Logo FNAC' },
+  { id: 'footnote', label: 'Rodapé legal' },
+];
+
 // Default content for a fresh flyer
 function defaultFlyerData() {
   return {
@@ -10213,8 +10225,20 @@ function FlyerEditor({ campaigns = [] }) {
   const [data, setData] = useState(defaultFlyerData());
   const [showImport, setShowImport] = useState(false);
   const [busy, setBusy] = useState(null); // 'png' | 'pdf' | null
+  // Per-element layout overrides: { [id]: { dx, dy, scale } } — dx/dy in mm, scale 0.4..2.5
+  const [layoutOverrides, setLayoutOverrides] = useState({});
+  const [selectedEl, setSelectedEl] = useState(null); // selected element id for editing
   const svgRef = useRef();
   const fileInputRef = useRef();
+
+  const setOverride = (id, patch) => setLayoutOverrides(prev => ({
+    ...prev,
+    [id]: { dx: 0, dy: 0, scale: 1, ...(prev[id] || {}), ...patch },
+  }));
+  const resetElement = (id) => setLayoutOverrides(prev => {
+    const next = { ...prev }; delete next[id]; return next;
+  });
+  const resetAllLayout = () => setLayoutOverrides({});
 
   // Keyboard shortcut Esc closes import dialog
   useEffect(() => {
@@ -10371,6 +10395,10 @@ function FlyerEditor({ campaigns = [] }) {
             imageOpacity={imageOpacity}
             displayWidth={pvW}
             displayHeight={pvH}
+            layoutOverrides={layoutOverrides}
+            selectedEl={selectedEl}
+            onSelectEl={setSelectedEl}
+            onDragEl={(id, dxMm, dyMm) => setOverride(id, { dx: dxMm, dy: dyMm })}
           />
         </div>
 
@@ -10471,6 +10499,53 @@ function FlyerEditor({ campaigns = [] }) {
                   </>
                 )}
               </>
+            )}
+          </Section>
+
+          <Section title={`Layout — ${selectedEl ? FLYER_ELEMENTS.find(e => e.id === selectedEl)?.label || selectedEl : 'clica num elemento'}`}>
+            {selectedEl ? (() => {
+              const o = layoutOverrides[selectedEl] || { dx: 0, dy: 0, scale: 1 };
+              return (
+                <>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
+                    <FlyerField label="X (mm)" small value={String(o.dx)} onChange={v => setOverride(selectedEl, { dx: parseFloat(v) || 0 })} />
+                    <FlyerField label="Y (mm)" small value={String(o.dy)} onChange={v => setOverride(selectedEl, { dy: parseFloat(v) || 0 })} />
+                  </div>
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 9, color: T.inkMute, marginBottom: 3, letterSpacing: '0.05em', textTransform: 'uppercase', fontFamily: 'Geist Mono' }}>
+                      Tamanho: {Math.round(o.scale * 100)}%
+                    </div>
+                    <input
+                      type="range" min="0.4" max="2.5" step="0.05"
+                      value={o.scale}
+                      onChange={e => setOverride(selectedEl, { scale: parseFloat(e.target.value) })}
+                      style={{ width: '100%', accentColor: T.accent }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => resetElement(selectedEl)} style={{
+                      flex: 1, padding: '6px 10px', fontSize: 11,
+                      background: 'transparent', color: T.accent,
+                      border: `1px solid ${T.accent}40`, borderRadius: 4, cursor: 'pointer',
+                    }}>Repor este</button>
+                    <button onClick={() => setSelectedEl(null)} style={{
+                      flex: 1, padding: '6px 10px', fontSize: 11,
+                      background: 'transparent', color: T.inkSoft,
+                      border: `1px solid ${T.line}`, borderRadius: 4, cursor: 'pointer',
+                    }}>Desselecionar</button>
+                  </div>
+                </>
+              );
+            })() : (
+              <div style={{ fontSize: 11, color: T.inkMute, lineHeight: 1.5 }}>
+                Clica num elemento do preview para o seleccionar. Depois podes arrastar com o rato ou ajustar X/Y/tamanho aqui.
+                <button onClick={resetAllLayout} style={{
+                  marginTop: 8, padding: '5px 10px', fontSize: 10,
+                  background: 'transparent', color: T.accent,
+                  border: `1px solid ${T.accent}30`, borderRadius: 4, cursor: 'pointer',
+                  display: Object.keys(layoutOverrides).length > 0 ? 'block' : 'none',
+                }}>Repor todo o layout ({Object.keys(layoutOverrides).length})</button>
+              </div>
             )}
           </Section>
 
@@ -10575,7 +10650,58 @@ function FlyerToggle({ label, checked, onChange }) {
 // ─────────────────────────────────────────────────────────────────────────
 // FlyerSVG — adaptive layout that re-arranges blocks based on aspect ratio
 // ─────────────────────────────────────────────────────────────────────────
-function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imageOpacity, displayWidth, displayHeight }) {
+function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imageOpacity, displayWidth, displayHeight, layoutOverrides = {}, selectedEl = null, onSelectEl, onDragEl }) {
+  // Helper: returns a <g transform> wrapper for an element + click/drag handlers
+  const ov = (id) => layoutOverrides[id] || { dx: 0, dy: 0, scale: 1 };
+  // Drag tracking per session — uses screen pixels → mm conversion via viewBox
+  const dragStateRef = useRef(null);
+  const elProps = (id) => {
+    const o = ov(id);
+    const isSel = selectedEl === id;
+    return {
+      transform: `translate(${o.dx} ${o.dy}) scale(${o.scale})`,
+      'data-el': id,
+      style: { cursor: isSel ? 'grabbing' : 'grab', outline: 'none' },
+      onMouseDown: (e) => {
+        e.stopPropagation();
+        if (onSelectEl) onSelectEl(id);
+        const svg = svgRef.current;
+        if (!svg || !onDragEl) return;
+        const rect = svg.getBoundingClientRect();
+        // mm per pixel
+        const mmPerPxX = format.wmm / rect.width;
+        const mmPerPxY = format.hmm / rect.height;
+        const startX = e.clientX, startY = e.clientY;
+        const startDx = o.dx, startDy = o.dy;
+        dragStateRef.current = { id, mmPerPxX, mmPerPxY, startX, startY, startDx, startDy };
+        const onMove = (ev) => {
+          const st = dragStateRef.current;
+          if (!st) return;
+          const dxMm = +(st.startDx + (ev.clientX - st.startX) * st.mmPerPxX).toFixed(2);
+          const dyMm = +(st.startDy + (ev.clientY - st.startY) * st.mmPerPxY).toFixed(2);
+          onDragEl(st.id, dxMm, dyMm);
+        };
+        const onUp = () => {
+          dragStateRef.current = null;
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+      },
+    };
+  };
+  // Selection ring for the currently-selected element
+  const selRing = (id, x, y, w, h) => {
+    if (selectedEl !== id) return null;
+    return (
+      <rect
+        x={x - 1} y={y - 1} width={w + 2} height={h + 2}
+        fill="none" stroke="#1F8FE8" strokeWidth="0.4" strokeDasharray="1.5 1"
+        pointerEvents="none"
+      />
+    );
+  };
   // SVG viewBox uses mm directly so layout reasons in real units
   const W = format.wmm;
   const H = format.hmm;
@@ -10650,21 +10776,25 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
       )}
 
       {/* Title */}
-      {data.title && titleLines.map((line, i) => {
-        const y = cursorY + (i + 1) * titleSize * 0.95;
-        return (
-          <text
-            key={i}
-            x={textX} y={y}
-            className="ft-display"
-            fontSize={titleSize}
-            fill={palette.fg}
-            textLength={isSmall ? undefined : undefined}
-          >
-            {line}
-          </text>
-        );
-      })}
+      {data.title && (
+        <g {...elProps('title')}>
+          {titleLines.map((line, i) => {
+            const y = cursorY + (i + 1) * titleSize * 0.95;
+            return (
+              <text
+                key={i}
+                x={textX} y={y}
+                className="ft-display"
+                fontSize={titleSize}
+                fill={palette.fg}
+              >
+                {line}
+              </text>
+            );
+          })}
+          {selRing('title', textX - 1, cursorY, textW + 2, titleLines.length * titleSize * 0.95)}
+        </g>
+      )}
       {(() => {
         cursorY += titleLines.length * titleSize * 0.95 + (isSmall ? 1 : 4);
         return null;
@@ -10673,15 +10803,18 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
       {/* Specs */}
       {data.specs && !isSmall && (
         <>
-          <text
-            x={textX} y={cursorY + (isWide ? 4 : 6)}
-            className="ft-sans"
-            fontSize={isWide ? 3.2 : 4}
-            fill={palette.fg}
-            opacity="0.95"
-          >
-            {data.specs}
-          </text>
+          <g {...elProps('specs')}>
+            <text
+              x={textX} y={cursorY + (isWide ? 4 : 6)}
+              className="ft-sans"
+              fontSize={isWide ? 3.2 : 4}
+              fill={palette.fg}
+              opacity="0.95"
+            >
+              {data.specs}
+            </text>
+            {selRing('specs', textX - 1, cursorY + 1, textW, isWide ? 5 : 7)}
+          </g>
           {(() => { cursorY += (isWide ? 6 : 10); return null; })()}
         </>
       )}
@@ -10689,32 +10822,65 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
       {/* PVP base (riscado) */}
       {data.pvpBase && !isSmall && (
         <>
-          <text
-            x={textX} y={cursorY + 4}
-            className="ft-sans"
-            fontSize={isWide ? 2.5 : 3.5}
-            fill={palette.fg}
-            opacity="0.85"
-          >
-            {data.pvpBaseLabel}
-          </text>
-          <text
-            x={textX} y={cursorY + (isWide ? 11 : 14)}
-            className="ft-display"
-            fontSize={isWide ? 7 : 11}
-            fill={palette.fg}
-            opacity="0.85"
-            textDecoration="line-through"
-          >
-            {data.pvpBase}
-          </text>
+          <g {...elProps('pvpBase')}>
+            <text
+              x={textX} y={cursorY + 4}
+              className="ft-sans"
+              fontSize={isWide ? 2.5 : 3.5}
+              fill={palette.fg}
+              opacity="0.85"
+            >
+              {data.pvpBaseLabel}
+            </text>
+            <text
+              x={textX} y={cursorY + (isWide ? 11 : 14)}
+              className="ft-display"
+              fontSize={isWide ? 7 : 11}
+              fill={palette.fg}
+              opacity="0.85"
+              textDecoration="line-through"
+            >
+              {data.pvpBase}
+            </text>
+            {selRing('pvpBase', textX - 1, cursorY + 1, 60, isWide ? 12 : 16)}
+          </g>
           {(() => { cursorY += (isWide ? 13 : 18); return null; })()}
         </>
       )}
 
       {/* Discount badge — top-right corner, rotated slightly */}
-      {data.showDiscount && data.discountText && (
-        <g transform={`translate(${W - padding - (isSmall ? 22 : 50)}, ${isSmall ? padding + 4 : (isWide ? padding + 8 : H * 0.35)})`}>
+      {data.showDiscount && data.discountText && (() => {
+        const baseX = W - padding - (isSmall ? 22 : 50);
+        const baseY = isSmall ? padding + 4 : (isWide ? padding + 8 : H * 0.35);
+        const o = ov('discount');
+        return (
+        <g
+          transform={`translate(${baseX + o.dx} ${baseY + o.dy}) scale(${o.scale})`}
+          data-el="discount"
+          style={{ cursor: selectedEl === 'discount' ? 'grabbing' : 'grab' }}
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            if (onSelectEl) onSelectEl('discount');
+            const svg = svgRef.current;
+            if (!svg || !onDragEl) return;
+            const rect = svg.getBoundingClientRect();
+            const mmPerPxX = format.wmm / rect.width;
+            const mmPerPxY = format.hmm / rect.height;
+            const startX = e.clientX, startY = e.clientY;
+            const startDx = o.dx, startDy = o.dy;
+            const onMove = (ev) => {
+              onDragEl('discount',
+                +(startDx + (ev.clientX - startX) * mmPerPxX).toFixed(2),
+                +(startDy + (ev.clientY - startY) * mmPerPxY).toFixed(2));
+            };
+            const onUp = () => {
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          }}
+        >
           <rect
             x="0" y="0"
             width={isSmall ? 22 : 50}
@@ -10743,14 +10909,16 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
               {data.discountSub}
             </text>
           )}
+          {selRing('discount', 0, 0, isSmall ? 22 : 50, isSmall ? 13 : 24)}
         </g>
-      )}
+        );
+      })()}
 
       {/* Main price — biggest element */}
       {data.priceMain && (() => {
         const priceY = isSmall ? H - padding - 6 : (isWide ? H - padding - 8 : H * 0.62);
         return (
-          <g>
+          <g {...elProps('price')}>
             <text
               x={textX} y={priceY + priceSize * 0.85}
               className="ft-display"
@@ -10770,6 +10938,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
                 {data.priceCents}
               </text>
             )}
+            {selRing('price', textX - 1, priceY + priceSize * 0.1, priceSize * 4, priceSize * 0.95)}
           </g>
         );
       })()}
@@ -10777,8 +10946,32 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
       {/* Acumula em cartão FNAC strip */}
       {data.showAccumulate && !isSmall && (() => {
         const stripY = H - padding - (isWide ? 10 : 22);
+        const o = ov('accumulate');
         return (
-          <g transform={`translate(${textX}, ${stripY})`}>
+          <g
+            transform={`translate(${textX + o.dx} ${stripY + o.dy}) scale(${o.scale})`}
+            data-el="accumulate"
+            style={{ cursor: selectedEl === 'accumulate' ? 'grabbing' : 'grab' }}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              if (onSelectEl) onSelectEl('accumulate');
+              const svg = svgRef.current;
+              if (!svg || !onDragEl) return;
+              const rect = svg.getBoundingClientRect();
+              const mmPerPxX = format.wmm / rect.width;
+              const mmPerPxY = format.hmm / rect.height;
+              const startX = e.clientX, startY = e.clientY, startDx = o.dx, startDy = o.dy;
+              const onMove = (ev) => onDragEl('accumulate',
+                +(startDx + (ev.clientX - startX) * mmPerPxX).toFixed(2),
+                +(startDy + (ev.clientY - startY) * mmPerPxY).toFixed(2));
+              const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+              };
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
+          >
             {/* Two stacked card icons */}
             <rect x="0" y="2" width={isWide ? 5 : 8} height={isWide ? 4 : 6} rx="1" fill={palette.accent} />
             <rect x={isWide ? 2 : 3} y="0" width={isWide ? 5 : 8} height={isWide ? 4 : 6} rx="1" fill={palette.fg === '#FFFFFF' ? '#1A1A1A' : palette.fg} />
@@ -10808,38 +11001,71 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
                 {data.accumulateSub}
               </text>
             )}
+            {selRing('accumulate', -1, -1, 50, isWide ? 11 : 18)}
           </g>
         );
       })()}
 
       {/* Logo FNAC — bottom-right */}
-      {data.showLogo && !isSmall && (
-        <g transform={`translate(${W - padding - (isWide ? 14 : 18)}, ${H - padding - (isWide ? 10 : 14)})`}>
-          <rect x="0" y="0" width={isWide ? 14 : 18} height={isWide ? 10 : 14} fill="#FFCB05" rx="1" />
-          <text
-            x={isWide ? 7 : 9}
-            y={isWide ? 7 : 10}
-            className="ft-display"
-            fontSize={isWide ? 5 : 7}
-            fill="#1A1A1A"
-            textAnchor="middle"
+      {data.showLogo && !isSmall && (() => {
+        const baseX = W - padding - (isWide ? 14 : 18);
+        const baseY = H - padding - (isWide ? 10 : 14);
+        const o = ov('logo');
+        return (
+          <g
+            transform={`translate(${baseX + o.dx} ${baseY + o.dy}) scale(${o.scale})`}
+            data-el="logo"
+            style={{ cursor: selectedEl === 'logo' ? 'grabbing' : 'grab' }}
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              if (onSelectEl) onSelectEl('logo');
+              const svg = svgRef.current;
+              if (!svg || !onDragEl) return;
+              const rect = svg.getBoundingClientRect();
+              const mmPerPxX = format.wmm / rect.width;
+              const mmPerPxY = format.hmm / rect.height;
+              const startX = e.clientX, startY = e.clientY, startDx = o.dx, startDy = o.dy;
+              const onMove = (ev) => onDragEl('logo',
+                +(startDx + (ev.clientX - startX) * mmPerPxX).toFixed(2),
+                +(startDy + (ev.clientY - startY) * mmPerPxY).toFixed(2));
+              const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+              };
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
           >
-            fnac
-          </text>
-        </g>
-      )}
+            <rect x="0" y="0" width={isWide ? 14 : 18} height={isWide ? 10 : 14} fill="#FFCB05" rx="1" />
+            <text
+              x={isWide ? 7 : 9}
+              y={isWide ? 7 : 10}
+              className="ft-display"
+              fontSize={isWide ? 5 : 7}
+              fill="#1A1A1A"
+              textAnchor="middle"
+            >
+              fnac
+            </text>
+            {selRing('logo', 0, 0, isWide ? 14 : 18, isWide ? 10 : 14)}
+          </g>
+        );
+      })()}
 
       {/* Footnote */}
       {data.footnote && !isSmall && (
-        <text
-          x={padding} y={H - 1.5}
-          className="ft-sans"
-          fontSize={isWide ? 1.5 : 1.8}
-          fill={palette.fg}
-          opacity="0.6"
-        >
-          {data.footnote}
-        </text>
+        <g {...elProps('footnote')}>
+          <text
+            x={padding} y={H - 1.5}
+            className="ft-sans"
+            fontSize={isWide ? 1.5 : 1.8}
+            fill={palette.fg}
+            opacity="0.6"
+          >
+            {data.footnote}
+          </text>
+          {selRing('footnote', padding - 1, H - 4, W - padding * 2, 3)}
+        </g>
       )}
     </svg>
   );
