@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.4.3';
-const APP_BUILD_DATE = '2026-05-07T13:00';
+const APP_VERSION = '3.4.4';
+const APP_BUILD_DATE = '2026-05-07T13:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -4446,6 +4446,57 @@ function CampaignsView({
     return sorted[0];
   }, [scopedCampaigns]);
 
+  // Merged campaign: combines rows from all active campaigns into a single
+  // virtual campaign for EAN→produto lookup in SlotRow / OutputPreview / etc.
+  // Uses the primary's headers as the canonical column set; rows from other
+  // active campaigns are remapped to those headers when keys differ.
+  const mergedActiveCampaign = useMemo(() => {
+    if (!primaryCampaign) return null;
+    if (activeCampaigns.length <= 1) return primaryCampaign;
+    const filteredPrimary = filterRowsByFamily(primaryCampaign.rows || [], primaryCampaign.headers, excludedFamilies);
+    const seenEans = new Set();
+    const cols = detectColumns(primaryCampaign.headers || []);
+    const eanCol = cols.ean;
+    if (eanCol) {
+      filteredPrimary.forEach(r => {
+        const k = normalizeEAN(r[eanCol]);
+        if (k) seenEans.add(k);
+      });
+    }
+    // Append rows from other active campaigns whose EAN isn't already covered
+    const extraRows = [];
+    for (const c of activeCampaigns) {
+      if (c.id === primaryCampaign.id) continue;
+      const filtered = filterRowsByFamily(c.rows || [], c.headers, excludedFamilies);
+      const otherCols = detectColumns(c.headers || []);
+      if (!otherCols.ean) continue;
+      filtered.forEach(r => {
+        const k = normalizeEAN(r[otherCols.ean]);
+        if (!k || seenEans.has(k)) return;
+        seenEans.add(k);
+        // Remap to primary headers when names match; else keep original keys
+        const remapped = {};
+        for (const h of primaryCampaign.headers || []) {
+          // Try direct match by header name first
+          if (r[h] !== undefined) {
+            remapped[h] = r[h];
+          } else {
+            // Try matching by detected role
+            const roleEntries = Object.entries(otherCols);
+            const roleMatch = roleEntries.find(([role, header]) => cols[role] === h && r[header] !== undefined);
+            if (roleMatch) remapped[h] = r[roleMatch[1]];
+          }
+        }
+        extraRows.push(remapped);
+      });
+    }
+    return {
+      ...primaryCampaign,
+      rows: [...filteredPrimary, ...extraRows],
+      headers: primaryCampaign.headers,
+    };
+  }, [primaryCampaign, activeCampaigns, excludedFamilies]);
+
   // floors for plan editing: primary campaign's floors, or defaultLayout when nothing selected
   const floors = primaryCampaign?.floors || defaultLayout;
 
@@ -5463,7 +5514,7 @@ function CampaignsView({
               key={floor.id}
               floor={floor}
               editZones={editZones}
-              activeCampaign={primaryCampaign ? { ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) } : null}
+              activeCampaign={mergedActiveCampaign}
               candidates={candidates}
               stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
               stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
@@ -5507,7 +5558,7 @@ function CampaignsView({
       ) : (
         <OutputPreview
           floors={combinedFloors}
-          activeCampaign={primaryCampaign ? { ...primaryCampaign, rows: filterRowsByFamily(primaryCampaign.rows, primaryCampaign.headers, excludedFamilies) } : null}
+          activeCampaign={mergedActiveCampaign}
           stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
           stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
         />
