@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.0';
-const APP_BUILD_DATE = '2026-05-07T17:00';
+const APP_VERSION = '3.9.1';
+const APP_BUILD_DATE = '2026-05-07T17:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2854,6 +2854,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // One-time migration (per session): for each period without floors,
   // copy floors from the oldest campaign in that period (legacy plan owned
   // by a campaign → promote to period level).
+  // Uses setPeriods + cloudUpsertPeriod directly (instead of updatePeriod
+  // which is declared later — would cause a TDZ error in the deps array).
   const planMigratedRef = useRef(false);
   useEffect(() => {
     if (!cloudDataLoaded || !user || planMigratedRef.current) return;
@@ -2861,23 +2863,27 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     planMigratedRef.current = true;
     const periodUpdates = [];
     for (const p of periods) {
-      // Skip periods that already have a non-empty plan
       if (p.floors && Array.isArray(p.floors) && countSlots(p.floors) > 0) continue;
       const periodCamps = campaigns.filter(c => c.periodId === p.id);
       if (periodCamps.length === 0) continue;
-      // Find the campaign with the most populated plan
       const sorted = [...periodCamps].sort((a, b) => countSlots(b.floors || []) - countSlots(a.floors || []));
       const donor = sorted[0];
       const slotCount = countSlots(donor.floors || []);
-      if (slotCount === 0) continue; // nothing to migrate
+      if (slotCount === 0) continue;
       console.log('[plan-migrate] promoting floors from campaign', donor.name, '→ period', p.name, '(', slotCount, 'slots)');
       periodUpdates.push({ id: p.id, floors: donor.floors });
     }
     if (periodUpdates.length > 0) {
-      // Update periods one at a time so each writes to cloud + IDB
-      periodUpdates.forEach(({ id, floors }) => updatePeriod(id, { floors }));
+      const byId = new Map(periodUpdates.map(u => [u.id, u.floors]));
+      setPeriods(prev => prev.map(p => {
+        const newFloors = byId.get(p.id);
+        if (!newFloors) return p;
+        const next = { ...p, floors: newFloors, updatedAt: new Date().toISOString() };
+        cloudUpsertPeriod(next, user.id).catch(err => console.warn('[plan-migrate] cloud failed', err));
+        return next;
+      }));
     }
-  }, [cloudDataLoaded, user, periods, campaigns, updatePeriod]);
+  }, [cloudDataLoaded, user, periods, campaigns]);
 
   // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
   // Runs every time campaigns change so cloud-resynced empties are also caught.
