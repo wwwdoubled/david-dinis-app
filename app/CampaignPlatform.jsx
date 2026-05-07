@@ -508,13 +508,14 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.3.1';
-const APP_BUILD_DATE = '2026-05-07T10:30';
+const APP_VERSION = '3.3.2';
+const APP_BUILD_DATE = '2026-05-07T11:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
 const DEFAULT_EXCLUDED_FAMILIES = [
-  'JOGOS', 'PAPELARIA', 'DISCOS', 'VÍDEOS', 'INSTRUMENTOS MUSICAIS', 'LIVROS', 'SERVIÇOS',
+  'JOGOS', 'PAPELARIA', 'DISCOS', 'VÍDEOS', 'VIDEO', 'VIDEOS', 'VÍDEO',
+  'INSTRUMENTOS MUSICAIS', 'LIVROS', 'SERVIÇOS',
 ];
 
 const APP_CHANGELOG = [
@@ -2410,6 +2411,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return Array.isArray(cfg) ? cfg : DEFAULT_EXCLUDED_FAMILIES;
   }, [uiConfig]);
 
+  // Campaigns with rows pre-filtered by excluded families.
+  // Used by ALL views (dashboard, sales, changes, inventory, campaigns, calendar)
+  // to ensure excluded families never appear unless admin explicitly re-enables.
+  // Admin views still receive the raw `campaigns`.
+  const filteredCampaigns = useMemo(() => {
+    if (!excludedFamilies || excludedFamilies.length === 0) return campaigns;
+    return campaigns.map(c => ({
+      ...c,
+      rows: filterRowsByFamily(c.rows || [], c.headers || [], excludedFamilies),
+    }));
+  }, [campaigns, excludedFamilies]);
+
   // ─── Posters / poster zones / notifications ───────────────────────────
   const [posters, setPosters] = useState([]);
   const [posterZones, setPosterZones] = useState([]);
@@ -3495,7 +3508,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               }}
             />
           )}
-          {view === 'dashboard' && <Dashboard campaigns={campaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={periods} posters={posters} notifications={notifications} />}
+          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={periods} posters={posters} notifications={notifications} />}
           {view === 'campaigns' && <CampaignsView
             campaigns={campaigns} setCampaigns={setCampaigns}
             periods={periods}
@@ -3513,7 +3526,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             excludedFamilies={excludedFamilies}
             syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
           />}
-          {view === 'calendar' && <CalendarView periods={periods} campaigns={campaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
+          {view === 'calendar' && <CalendarView periods={periods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
           {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
@@ -3523,7 +3536,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             onUploadStock={uploadStockSnapshot}
             onActivateSnapshot={activateStockSnapshot}
             user={user} isAdmin={isAdmin}
-            campaigns={campaigns}
+            campaigns={filteredCampaigns}
             stockMapPO2={stockMapPO2} setStockMapPO2={setStockMapPO2}
             stockMapPO3={stockMapPO3} setStockMapPO3={setStockMapPO3}
             excludedFamilies={excludedFamilies}
@@ -3531,10 +3544,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'inventory' && <InventoryView
             stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3}
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
-            campaigns={campaigns}
+            campaigns={filteredCampaigns}
             excludedFamilies={excludedFamilies}
           />}
-          {view === 'images' && <FlyerEditor campaigns={campaigns} />}
+          {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
           {view === 'admin' && isAdmin && (
