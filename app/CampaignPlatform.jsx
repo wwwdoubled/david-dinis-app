@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.3.2';
-const APP_BUILD_DATE = '2026-05-07T11:00';
+const APP_VERSION = '3.4.0';
+const APP_BUILD_DATE = '2026-05-07T11:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2813,6 +2813,48 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   });
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
 
+  // One-time migration: for each period, ensure the OLDEST campaign has the
+  // richest floors. If the oldest has empty floors but a sibling has them filled,
+  // promote those floors to the oldest. Runs once per session.
+  const planMigratedRef = useRef(false);
+  useEffect(() => {
+    if (!cloudDataLoaded || !user || planMigratedRef.current) return;
+    if (!campaigns || campaigns.length === 0) return;
+    planMigratedRef.current = true;
+    const byPeriod = new Map();
+    for (const c of campaigns) {
+      if (!c.periodId) continue;
+      if (!byPeriod.has(c.periodId)) byPeriod.set(c.periodId, []);
+      byPeriod.get(c.periodId).push(c);
+    }
+    const updates = []; // { id, floors }
+    for (const [pid, list] of byPeriod) {
+      if (list.length < 2) continue;
+      const sorted = [...list].sort((a, b) => {
+        const sa = a.sortOrder ?? Infinity, sb = b.sortOrder ?? Infinity;
+        if (sa !== sb) return sa - sb;
+        const ua = a.uploaded ? new Date(a.uploaded).getTime() : 0;
+        const ub = b.uploaded ? new Date(b.uploaded).getTime() : 0;
+        return ua - ub;
+      });
+      const primary = sorted[0];
+      const primaryHasSlots = countSlots(primary.floors || []) > 0;
+      if (primaryHasSlots) continue; // primary already has the plan, leave alone
+      // Find any sibling with a non-empty plan and copy
+      const donor = sorted.slice(1).find(c => countSlots(c.floors || []) > 0);
+      if (donor) {
+        console.log('[plan-migrate] promoting floors from', donor.name, '→', primary.name);
+        updates.push({ id: primary.id, floors: donor.floors });
+      }
+    }
+    if (updates.length > 0) {
+      setCampaigns(cs => cs.map(c => {
+        const u = updates.find(x => x.id === c.id);
+        return u ? { ...c, floors: u.floors, updatedAt: new Date().toISOString() } : c;
+      }));
+    }
+  }, [cloudDataLoaded, user, campaigns]);
+
   // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
   // Runs every time campaigns change so cloud-resynced empties are also caught.
   // Uses a ref to avoid re-firing for the same set of ids.
@@ -4368,12 +4410,15 @@ function CampaignsView({
     return campaigns.filter(c => c.periodId === selectedPeriodId);
   }, [campaigns, selectedPeriodId]);
 
-  // Auto-select most recent loaded campaign if none selected (within scope)
+  // Auto-activate ALL campaigns in the period by default (single shared plan)
   useEffect(() => {
-    if (activeIds.length === 0 && scopedCampaigns.length > 0) {
-      setActiveIds([scopedCampaigns[0].id]);
-    }
-  }, [scopedCampaigns, activeIds]);
+    if (scopedCampaigns.length === 0) return;
+    setActiveIds(prev => {
+      // If user has activated some, keep their choice. Otherwise activate everything.
+      if (prev.length > 0 && prev.some(id => scopedCampaigns.some(c => c.id === id))) return prev;
+      return scopedCampaigns.map(c => c.id);
+    });
+  }, [scopedCampaigns]);
 
   // Drop active IDs that no longer exist or are out of scope (period changed)
   useEffect(() => {
@@ -4384,7 +4429,22 @@ function CampaignsView({
     () => activeIds.map(id => scopedCampaigns.find(c => c.id === id)).filter(Boolean),
     [activeIds, scopedCampaigns]
   );
-  const primaryCampaign = activeCampaigns[0] || null;
+  // PRIMARY CAMPAIGN = oldest campaign in the period (by sortOrder or uploaded date).
+  // Its `floors` field is the single source of truth for the period's plan.
+  // This is DETERMINISTIC (not user-selectable) so the plan never changes when
+  // the user toggles which Excels are active in the listing.
+  const primaryCampaign = useMemo(() => {
+    if (scopedCampaigns.length === 0) return null;
+    const sorted = [...scopedCampaigns].sort((a, b) => {
+      const sa = a.sortOrder ?? Infinity;
+      const sb = b.sortOrder ?? Infinity;
+      if (sa !== sb) return sa - sb;
+      const ua = a.uploaded ? new Date(a.uploaded).getTime() : 0;
+      const ub = b.uploaded ? new Date(b.uploaded).getTime() : 0;
+      return ua - ub; // oldest first
+    });
+    return sorted[0];
+  }, [scopedCampaigns]);
 
   // floors for plan editing: primary campaign's floors, or defaultLayout when nothing selected
   const floors = primaryCampaign?.floors || defaultLayout;
@@ -5269,8 +5329,8 @@ function CampaignsView({
                           onDoubleClick={e => { e.preventDefault(); setRenamingId(c.id); setRenameValue(c.name); }}
                           style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: T.ink, fontWeight: isPrimary ? 500 : 400 }}
                         >
-                          {isPrimary && isActive && scopedCampaigns.filter(x => activeIds.includes(x.id)).length > 1 && (
-                            <span style={{ fontSize: 8, fontWeight: 700, color: T.accent, marginRight: 4, letterSpacing: '0.05em' }}>PRIMÁRIO</span>
+                          {isPrimary && scopedCampaigns.length > 1 && (
+                            <span title="Plano partilhado é definido por este Excel (o mais antigo do período)" style={{ fontSize: 8, fontWeight: 700, color: T.accent, marginRight: 4, letterSpacing: '0.05em' }}>PLANO BASE</span>
                           )}
                           {c.name}
                         </span>
@@ -5322,7 +5382,7 @@ function CampaignsView({
             });
             return (
               <div style={{ marginTop: 8, padding: '7px 10px', fontSize: 10, color: T.accent, background: T.accentSoft, borderRadius: 4, lineHeight: 1.5 }}>
-                <strong>{activeScoped.length} Excels activos.</strong> Listagem combinada — o primeiro na lista tem prioridade em EANs duplicados. Edições de plano aplicam-se a <em>{primaryCampaign?.name?.slice(0, 24) || '—'}</em>.
+                <strong>{activeScoped.length} Excels activos.</strong> Os produtos ficam combinados na listagem. O plano (zonas/móveis) e a saída são <strong>partilhados pelo período</strong> — vêm do Excel <em>{primaryCampaign?.name?.slice(0, 24) || '—'}</em> (o mais antigo). Sem sobreposição.
                 {dupCount > 0 && <span style={{ marginLeft: 6, color: T.inkSoft }}>· {dupCount} EAN{dupCount !== 1 ? 's' : ''} duplicado{dupCount !== 1 ? 's' : ''} ignorado{dupCount !== 1 ? 's' : ''}.</span>}
               </div>
             );
@@ -11762,19 +11822,18 @@ function BPZone({ zone, floorColor, expanded, onToggleExpand }) {
         </div>
       </button>
 
-      {/* Mini preview — first 3 products always visible */}
+      {/* Mini preview — first 4 products always visible (now showing EAN + name) */}
       {count > 0 && !expanded && (
-        <div style={{ padding: '0 12px 10px', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {zone.slots.slice(0, 3).map((s, i) => (
+        <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {zone.slots.slice(0, 4).map((s, i) => (
             <BPSlotMini key={i} slot={s} />
           ))}
-          {count > 3 && (
+          {count > 4 && (
             <div style={{
-              padding: '4px 8px', fontSize: 9, fontFamily: 'Geist Mono',
-              background: T.lineSoft, color: T.inkSoft, borderRadius: 3, fontWeight: 600,
-              display: 'flex', alignItems: 'center',
+              padding: '3px 8px', fontSize: 10, fontFamily: 'Geist Mono',
+              color: T.inkMute, fontStyle: 'italic',
             }}>
-              +{count - 3}
+              + {count - 4} {count - 4 === 1 ? 'artigo' : 'artigos'}…
             </div>
           )}
         </div>
@@ -11799,21 +11858,40 @@ function BPZone({ zone, floorColor, expanded, onToggleExpand }) {
 // Tiny inline product card — used for the always-visible preview
 function BPSlotMini({ slot }) {
   const p = slot.product;
-  const letter = (p?.description || slot.ref || '?').charAt(0).toUpperCase();
   const color = hashColor(p?.eanKey || slot.ref);
-  const hasImage = p?.imageUrl && /^https?:\/\//.test(p.imageUrl);
+  const ean = String(slot.ref || '').trim();
+  const eanShort = ean.length > 13 ? ean.slice(-13) : ean;
+  const name = p?.description || '';
+  const nameShort = name.length > 30 ? name.slice(0, 30) + '…' : name;
   return (
-    <div title={`${p?.description || slot.ref || 'Sem descrição'} · ${slot.ref}`} style={{
-      width: 28, height: 28, borderRadius: 4,
-      background: hasImage ? T.lineSoft : color,
-      color: '#fff', fontSize: 11, fontWeight: 700,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontFamily: 'Geist Mono',
-      backgroundImage: hasImage ? `url(${p.imageUrl})` : 'none',
-      backgroundSize: 'cover', backgroundPosition: 'center',
-      border: `1px solid ${T.line}`,
-    }}>
-      {!hasImage && letter}
+    <div
+      title={`${name || 'Sem descrição'} · ${ean}`}
+      style={{
+        display: 'flex', flexDirection: 'column',
+        padding: '4px 8px', borderRadius: 4,
+        background: T.paper,
+        border: `1px solid ${T.lineSoft}`,
+        borderLeft: `3px solid ${color}`,
+        fontFamily: 'Geist Mono, monospace',
+        fontSize: 10, lineHeight: 1.3,
+        minWidth: 0, maxWidth: 240,
+        gap: 1,
+      }}
+    >
+      <span style={{
+        color: T.ink, fontWeight: 500, fontFamily: 'Geist, sans-serif',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        fontSize: 11,
+      }}>
+        {nameShort || <span style={{ color: T.inkMute, fontStyle: 'italic' }}>sem dados</span>}
+      </span>
+      <span style={{
+        color: T.inkMute, fontSize: 9,
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      }}>
+        {eanShort || '—'}
+        {p?.isStar && <Star size={8} fill={T.yellow} stroke="none" style={{ marginLeft: 4, verticalAlign: 'middle' }} />}
+      </span>
     </div>
   );
 }
