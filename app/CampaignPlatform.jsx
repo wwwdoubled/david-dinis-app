@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.7.1';
-const APP_BUILD_DATE = '2026-05-07T16:00';
+const APP_VERSION = '3.8.0';
+const APP_BUILD_DATE = '2026-05-07T16:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1113,6 +1113,36 @@ function escapeHtml(s) {
 // ─────────────────────────────────────────────────────────────────────────
 // Shared periods (cloud-backed) — read by everyone, write by owner/admin
 // ─────────────────────────────────────────────────────────────────────────
+// ─── Period notes JSON envelope ────────────────────────────────────────
+// We piggy-back on the existing `notes` text column in Supabase to also
+// store the period's `floors` (the plan). Backward compatible: legacy
+// plain-text notes still work.
+function decodePeriodNotes(raw) {
+  if (!raw) return { userNotes: '', floors: null };
+  if (typeof raw !== 'string') return { userNotes: '', floors: null };
+  // Detect JSON envelope (starts with `{` and has the version marker)
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object' && '__dd_v' in parsed) {
+        return {
+          userNotes: typeof parsed.userNotes === 'string' ? parsed.userNotes : '',
+          floors: Array.isArray(parsed.floors) ? parsed.floors : null,
+        };
+      }
+    } catch {}
+  }
+  return { userNotes: raw, floors: null };
+}
+function encodePeriodNotes({ userNotes, floors }) {
+  // If no floors and userNotes is plain, store as plain text for readability
+  if (!floors && (!userNotes || !userNotes.trim().startsWith('{'))) {
+    return userNotes || '';
+  }
+  return JSON.stringify({ __dd_v: 1, userNotes: userNotes || '', floors: floors || null });
+}
+
 async function cloudFetchAllPeriods() {
   if (!supabase) return [];
   const { data, error } = await supabase
@@ -1123,24 +1153,26 @@ async function cloudFetchAllPeriods() {
     console.warn('cloudFetchAllPeriods failed:', error.message);
     return [];
   }
-  // Normalize: map snake_case columns from DB to camelCase used in UI
-  return (data || []).map(p => ({
-    id: p.id,
-    name: p.name,
-    startDate: p.start_date,
-    endDate: p.end_date,
-    notes: p.notes || '',
-    // Only set statusOverride for explicit user choices ('active'/'finished').
-    // 'planned' from the DB was written as a default fallback (bug), not an intentional override.
-    // Leaving it as null lets periodStatus() compute the correct status from the dates.
-    statusOverride: (p.status && p.status !== 'planned') ? p.status : null,
-    has_posters: p.has_posters || false,
-    hidden: p.hidden || false,
-    user_id: p.user_id,
-    created_by: p.created_by || p.user_id,
-    createdAt: p.created_at,
-    updatedAt: p.updated_at,
-  }));
+  // Normalize: map snake_case columns from DB to camelCase used in UI.
+  // Also decode the JSON envelope in `notes` to extract `floors` (the period plan).
+  return (data || []).map(p => {
+    const { userNotes, floors } = decodePeriodNotes(p.notes);
+    return {
+      id: p.id,
+      name: p.name,
+      startDate: p.start_date,
+      endDate: p.end_date,
+      notes: userNotes,
+      floors: floors, // null if not yet set — falls back to defaultLayout / migrate from oldest campaign
+      statusOverride: (p.status && p.status !== 'planned') ? p.status : null,
+      has_posters: p.has_posters || false,
+      hidden: p.hidden || false,
+      user_id: p.user_id,
+      created_by: p.created_by || p.user_id,
+      createdAt: p.created_at,
+      updatedAt: p.updated_at,
+    };
+  });
 }
 
 async function cloudUpsertPeriod(period, userId) {
@@ -1156,7 +1188,8 @@ async function cloudUpsertPeriod(period, userId) {
     name: period.name,
     start_date: period.startDate || null,
     end_date: period.endDate || null,
-    notes: period.notes || '',
+    // Encode user notes + floors plan together so we don't need a schema change.
+    notes: encodePeriodNotes({ userNotes: period.notes || '', floors: period.floors || null }),
     status: period.statusOverride || null,
     has_posters: period.has_posters || false,
     hidden: period.hidden || false,
@@ -2813,47 +2846,33 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   });
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
 
-  // One-time migration: for each period, ensure the OLDEST campaign has the
-  // richest floors. If the oldest has empty floors but a sibling has them filled,
-  // promote those floors to the oldest. Runs once per session.
+  // One-time migration (per session): for each period without floors,
+  // copy floors from the oldest campaign in that period (legacy plan owned
+  // by a campaign → promote to period level).
   const planMigratedRef = useRef(false);
   useEffect(() => {
     if (!cloudDataLoaded || !user || planMigratedRef.current) return;
-    if (!campaigns || campaigns.length === 0) return;
+    if (!periods || periods.length === 0) return;
     planMigratedRef.current = true;
-    const byPeriod = new Map();
-    for (const c of campaigns) {
-      if (!c.periodId) continue;
-      if (!byPeriod.has(c.periodId)) byPeriod.set(c.periodId, []);
-      byPeriod.get(c.periodId).push(c);
+    const periodUpdates = [];
+    for (const p of periods) {
+      // Skip periods that already have a non-empty plan
+      if (p.floors && Array.isArray(p.floors) && countSlots(p.floors) > 0) continue;
+      const periodCamps = campaigns.filter(c => c.periodId === p.id);
+      if (periodCamps.length === 0) continue;
+      // Find the campaign with the most populated plan
+      const sorted = [...periodCamps].sort((a, b) => countSlots(b.floors || []) - countSlots(a.floors || []));
+      const donor = sorted[0];
+      const slotCount = countSlots(donor.floors || []);
+      if (slotCount === 0) continue; // nothing to migrate
+      console.log('[plan-migrate] promoting floors from campaign', donor.name, '→ period', p.name, '(', slotCount, 'slots)');
+      periodUpdates.push({ id: p.id, floors: donor.floors });
     }
-    const updates = []; // { id, floors }
-    for (const [pid, list] of byPeriod) {
-      if (list.length < 2) continue;
-      const sorted = [...list].sort((a, b) => {
-        const sa = a.sortOrder ?? Infinity, sb = b.sortOrder ?? Infinity;
-        if (sa !== sb) return sa - sb;
-        const ua = a.uploaded ? new Date(a.uploaded).getTime() : 0;
-        const ub = b.uploaded ? new Date(b.uploaded).getTime() : 0;
-        return ua - ub;
-      });
-      const primary = sorted[0];
-      const primaryHasSlots = countSlots(primary.floors || []) > 0;
-      if (primaryHasSlots) continue; // primary already has the plan, leave alone
-      // Find any sibling with a non-empty plan and copy
-      const donor = sorted.slice(1).find(c => countSlots(c.floors || []) > 0);
-      if (donor) {
-        console.log('[plan-migrate] promoting floors from', donor.name, '→', primary.name);
-        updates.push({ id: primary.id, floors: donor.floors });
-      }
+    if (periodUpdates.length > 0) {
+      // Update periods one at a time so each writes to cloud + IDB
+      periodUpdates.forEach(({ id, floors }) => updatePeriod(id, { floors }));
     }
-    if (updates.length > 0) {
-      setCampaigns(cs => cs.map(c => {
-        const u = updates.find(x => x.id === c.id);
-        return u ? { ...c, floors: u.floors, updatedAt: new Date().toISOString() } : c;
-      }));
-    }
-  }, [cloudDataLoaded, user, campaigns]);
+  }, [cloudDataLoaded, user, periods, campaigns, updatePeriod]);
 
   // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
   // Runs every time campaigns change so cloud-resynced empties are also caught.
@@ -4497,46 +4516,34 @@ function CampaignsView({
     };
   }, [primaryCampaign, activeCampaigns, excludedFamilies]);
 
-  // floors for plan editing: primary campaign's floors, or defaultLayout when nothing selected
-  const floors = primaryCampaign?.floors || defaultLayout;
+  // ─── PLAN OWNERSHIP: PERIOD ─────────────────────────────────────────
+  // The plan (floors) lives on the PERIOD, not on any specific Excel.
+  // Falls back to: oldest campaign's floors (legacy data) → defaultLayout.
+  // This means uploading/deleting Excels never breaks the plan.
+  const floors = useMemo(() => {
+    if (selectedPeriod?.floors && Array.isArray(selectedPeriod.floors) && selectedPeriod.floors.length > 0) {
+      return selectedPeriod.floors;
+    }
+    // Legacy fallback: use oldest campaign's floors (for periods that haven't migrated yet)
+    if (primaryCampaign?.floors && Array.isArray(primaryCampaign.floors) && primaryCampaign.floors.length > 0) {
+      return primaryCampaign.floors;
+    }
+    return defaultLayout;
+  }, [selectedPeriod?.floors, primaryCampaign?.floors, defaultLayout]);
 
-  // Combined floors for output preview / cross-reference: merge slots from all active campaigns
-  const combinedFloors = useMemo(() => {
-    if (activeCampaigns.length <= 1) return floors;
-    // Merge by zone id, concatenating slots
-    const base = (primaryCampaign?.floors || defaultLayout).map(f => ({
-      ...f,
-      zones: f.zones.map(z => ({ ...z, slots: [...z.slots] })),
-    }));
-    activeCampaigns.slice(1).forEach(c => {
-      if (!c.floors) return;
-      c.floors.forEach(f => {
-        const baseFloor = base.find(bf => bf.id === f.id);
-        if (!baseFloor) return;
-        f.zones.forEach(z => {
-          const baseZone = baseFloor.zones.find(bz => bz.id === z.id);
-          if (!baseZone) return;
-          z.slots.forEach(s => {
-            if (!baseZone.slots.some(bs => normalizeEAN(bs.ref) === normalizeEAN(s.ref))) {
-              baseZone.slots.push({ ...s, _source: c.name });
-            }
-          });
-        });
-      });
-    });
-    return base;
-  }, [activeCampaigns, primaryCampaign, defaultLayout, floors]);
+  // Output uses the same period-level plan (no merging of multiple campaign plans)
+  const combinedFloors = floors;
 
-  // setFloors operates on PRIMARY campaign (or defaultLayout if none)
+  // setFloors writes to the PERIOD (cloud + IDB via onUpdatePeriod).
+  // If no period is selected, fall back to defaultLayout (global).
   const setFloors = useCallback((updater) => {
-    if (!primaryCampaign) {
+    if (!selectedPeriod) {
       setDefaultLayout(prev => typeof updater === 'function' ? updater(prev) : updater);
       return;
     }
-    setCampaigns(cs => cs.map(c => c.id === primaryCampaign.id
-      ? { ...c, floors: typeof updater === 'function' ? updater(c.floors || defaultLayout) : updater }
-      : c));
-  }, [primaryCampaign, setCampaigns, setDefaultLayout, defaultLayout]);
+    const next = typeof updater === 'function' ? updater(floors) : updater;
+    onUpdatePeriod && onUpdatePeriod(selectedPeriod.id, { floors: next });
+  }, [selectedPeriod, floors, onUpdatePeriod, setDefaultLayout]);
 
   const setOverride = (campaignId, field, header) => {
     setColumnOverrides(o => ({
@@ -5381,9 +5388,6 @@ function CampaignsView({
                           onDoubleClick={e => { e.preventDefault(); setRenamingId(c.id); setRenameValue(c.name); }}
                           style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, color: T.ink, fontWeight: isPrimary ? 500 : 400 }}
                         >
-                          {isPrimary && scopedCampaigns.length > 1 && (
-                            <span title="Plano partilhado é definido por este Excel (o mais antigo do período)" style={{ fontSize: 8, fontWeight: 700, color: T.accent, marginRight: 4, letterSpacing: '0.05em' }}>PLANO BASE</span>
-                          )}
                           {c.name}
                         </span>
                       )}
