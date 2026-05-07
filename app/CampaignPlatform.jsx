@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.4.4';
-const APP_BUILD_DATE = '2026-05-07T13:30';
+const APP_VERSION = '3.5.0';
+const APP_BUILD_DATE = '2026-05-07T14:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -10993,6 +10993,7 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const [scanned, setScanned] = useState([]); // [{ ean, descr, family, subfamily, po2, po3, ts, idx }]
   const [cameraError, setCameraError] = useState(null);
   const [mode, setMode] = useState('manual'); // 'camera' | 'manual'
+  const [compareWith, setCompareWith] = useStoredState('inventory.compareWith', 'both'); // 'po2' | 'po3' | 'both'
 
   // Build lookup indexes
   const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
@@ -11058,6 +11059,15 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
       osc.start(); osc.stop(ctx.currentTime + 0.15);
     } catch {}
+
+    // Haptic feedback on mobile (Android Chrome / Samsung Internet support
+    // navigator.vibrate; iOS Safari does NOT support it. iOS uses Web Vibration
+    // API only inside Web App, not Safari. Best-effort.)
+    try {
+      if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+        navigator.vibrate(product ? [60] : [40, 60, 40]);
+      }
+    } catch {}
   }, [productIndex, stockIdxPO2, stockIdxPO3]);
 
   // Start camera scanner
@@ -11110,21 +11120,56 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
     inputRef.current?.focus();
   };
 
-  const exportCSV = () => {
-    const rows = [['EAN', 'Descrição', 'Família', 'Sub-família', 'Preço', 'Desc%', 'Stock PO2', 'Stock PO3', 'Hora']];
-    for (const s of [...scanned].reverse()) {
-      rows.push([s.ean, s.descr, s.family, s.subfamily,
-        s.price > 0 ? s.price.toFixed(2) : '',
-        s.discount > 0 ? Math.round(s.discount) : '',
-        s.po2 ?? '', s.po3 ?? '',
-        s.ts.toLocaleTimeString('pt-PT')]);
+  // Export to Excel (.xlsx) — one row per scan = 1 unit counted.
+  // Sheet 1: Histórico (every scan as its own line, 1 unit each — for audit trail)
+  // Sheet 2: Resumo (aggregated by EAN with total units counted — for inventory balance)
+  const exportXLSX = () => {
+    if (scanned.length === 0) return;
+    // Sheet 1: full history, oldest first, 1 unit per line
+    const histRows = [...scanned].reverse().map(s => ({
+      EAN: s.ean,
+      'Descrição': s.descr || '',
+      'Família': s.family || '',
+      'Sub-família': s.subfamily || '',
+      'Unidade': 1,
+      'Stock PO2': s.po2 ?? '',
+      'Stock PO3': s.po3 ?? '',
+      'Hora': s.ts.toLocaleString('pt-PT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      'Encontrado': s.found ? 'sim' : 'não',
+    }));
+    // Sheet 2: aggregated by EAN
+    const aggMap = new Map();
+    for (const s of scanned) {
+      if (!aggMap.has(s.ean)) {
+        aggMap.set(s.ean, {
+          EAN: s.ean,
+          'Descrição': s.descr || '',
+          'Família': s.family || '',
+          'Sub-família': s.subfamily || '',
+          'Unidades contadas': 0,
+          'Stock PO2': s.po2 ?? '',
+          'Stock PO3': s.po3 ?? '',
+        });
+      }
+      aggMap.get(s.ean)['Unidades contadas']++;
     }
-    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url;
-    a.download = `inventario_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click(); URL.revokeObjectURL(url);
+    const summaryRows = [...aggMap.values()];
+    // Add diff columns for comparison
+    summaryRows.forEach(r => {
+      const cnt = r['Unidades contadas'];
+      const po2 = typeof r['Stock PO2'] === 'number' ? r['Stock PO2'] : (parseInt(r['Stock PO2']) || 0);
+      const po3 = typeof r['Stock PO3'] === 'number' ? r['Stock PO3'] : (parseInt(r['Stock PO3']) || 0);
+      r['Diferença vs PO2'] = cnt - po2;
+      r['Diferença vs PO3'] = cnt - po3;
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.json_to_sheet(histRows);
+    const ws2 = XLSX.utils.json_to_sheet(summaryRows);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Histórico');
+    XLSX.utils.book_append_sheet(wb, ws2, 'Resumo por EAN');
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
+    XLSX.writeFile(wb, `inventario_${stamp}.xlsx`);
   };
 
   const totalFound = scanned.filter(s => s.found).length;
@@ -11152,6 +11197,24 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
           }}>
             <Icon size={14} /> {label}
           </button>
+        ))}
+      </div>
+
+      {/* Compare-with toggle (PO2 / PO3 / both) */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono, monospace', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Comparar com:</span>
+        {[
+          { v: 'po2', label: 'PO2 (Armazém)' },
+          { v: 'po3', label: 'PO3 (Loja Aveiro)' },
+          { v: 'both', label: 'Ambos' },
+        ].map(({ v, label }) => (
+          <button key={v} onClick={() => setCompareWith(v)} style={{
+            padding: '5px 12px', borderRadius: 4,
+            border: `1px solid ${compareWith === v ? T.cyan : T.line}`,
+            background: compareWith === v ? T.cyan : 'transparent',
+            color: compareWith === v ? T.ink : T.inkSoft,
+            fontSize: 11, fontWeight: 500, cursor: 'pointer',
+          }}>{label}</button>
         ))}
       </div>
 
@@ -11217,12 +11280,12 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
             <strong style={{ color: T.accent }}>{totalNotFound}</strong> não encontrados
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <button onClick={exportCSV} style={{
-              padding: '6px 12px', background: 'transparent', color: T.inkSoft,
-              border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+            <button onClick={exportXLSX} title="Exporta um Excel com 2 folhas: Histórico (1 linha por leitura) e Resumo por EAN com diferença vs PO2/PO3" style={{
+              padding: '6px 12px', background: T.green, color: '#fff',
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
               display: 'flex', alignItems: 'center', gap: 5,
             }}>
-              <Download size={12} /> Exportar CSV
+              <Download size={12} /> Exportar Excel
             </button>
             <button onClick={() => setScanned([])} style={{
               padding: '6px 12px', background: 'transparent', color: T.accent,
@@ -11241,47 +11304,62 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
           <div>Nenhum artigo lido ainda.</div>
         </div>
       ) : (
-        <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
-          {/* Table header */}
-          <div style={{
-            display: 'grid', gridTemplateColumns: '140px 1fr 120px 70px 70px 70px',
-            gap: 8, padding: '8px 12px', background: T.bgEl,
-            borderBottom: `1px solid ${T.line}`, fontSize: 11, fontWeight: 600,
-            color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.04em',
-          }}>
-            <div>EAN</div>
-            <div>Descrição / Família</div>
-            <div>Hora</div>
-            <div style={{ textAlign: 'right', color: T.cyan }}>PO2</div>
-            <div style={{ textAlign: 'right', color: T.cyan }}>PO3</div>
-            <div style={{ textAlign: 'right' }}>Desc%</div>
-          </div>
-          {scanned.map((s, i) => (
-            <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '140px 1fr 120px 70px 70px 70px',
-              gap: 8, padding: '9px 12px', alignItems: 'center',
-              borderBottom: i < scanned.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
-              background: !s.found ? `${T.accent}08` : i === 0 ? `${T.green}08` : 'transparent',
-              borderLeft: `3px solid ${!s.found ? T.accent : T.green}`,
-            }}>
-              <div style={{ fontSize: 12, fontFamily: 'Geist Mono, monospace', color: T.ink }}>{s.ean}</div>
-              <div>
-                {s.descr ? (
-                  <>
-                    <div style={{ fontSize: 12, color: T.ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.descr}</div>
-                    <div style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>{[s.family, s.subfamily].filter(Boolean).join(' › ')}{s.price > 0 ? ` · ${s.price.toFixed(2)}€` : ''}</div>
-                  </>
-                ) : (
-                  <div style={{ fontSize: 12, color: T.accent, fontStyle: 'italic' }}>Não encontrado nas campanhas</div>
-                )}
+        (() => {
+          const showPO2 = compareWith === 'po2' || compareWith === 'both';
+          const showPO3 = compareWith === 'po3' || compareWith === 'both';
+          // Build column template: EAN | Descrição | Unidade | [PO2] | [PO3] | Hora
+          const cols = ['140px', '1fr', '60px'];
+          if (showPO2) cols.push('70px');
+          if (showPO3) cols.push('70px');
+          cols.push('100px');
+          const gridTemplate = cols.join(' ');
+          return (
+            <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+              {/* Table header */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: gridTemplate,
+                gap: 8, padding: '8px 12px', background: T.bgEl,
+                borderBottom: `1px solid ${T.line}`, fontSize: 11, fontWeight: 600,
+                color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.04em',
+              }}>
+                <div>EAN</div>
+                <div>Descrição</div>
+                <div style={{ textAlign: 'center' }}>Unidade</div>
+                {showPO2 && <div style={{ textAlign: 'right', color: T.cyan }}>PO2</div>}
+                {showPO3 && <div style={{ textAlign: 'right', color: T.cyan }}>PO3</div>}
+                <div style={{ textAlign: 'right' }}>Hora</div>
               </div>
-              <div style={{ fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.ts.toLocaleTimeString('pt-PT')}</div>
-              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po2 ? 700 : 400, color: s.po2 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po2 ?? '—'}</div>
-              <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po3 ? 700 : 400, color: s.po3 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po3 ?? '—'}</div>
-              <div style={{ textAlign: 'right', fontSize: 12, color: s.discount >= 30 ? T.green : (s.discount > 0 ? T.ink : T.inkMute), fontFamily: 'Geist Mono, monospace' }}>{s.discount > 0 ? `-${Math.round(s.discount)}%` : '—'}</div>
+              {scanned.map((s, i) => (
+                <div key={i} style={{
+                  display: 'grid', gridTemplateColumns: gridTemplate,
+                  gap: 8, padding: '9px 12px', alignItems: 'center',
+                  borderBottom: i < scanned.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
+                  background: !s.found ? `${T.accent}08` : i === 0 ? `${T.green}08` : 'transparent',
+                  borderLeft: `3px solid ${!s.found ? T.accent : T.green}`,
+                }}>
+                  <div style={{ fontSize: 12, fontFamily: 'Geist Mono, monospace', color: T.ink }}>{s.ean}</div>
+                  <div>
+                    {s.descr ? (
+                      <>
+                        <div style={{ fontSize: 12, color: T.ink, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.descr}</div>
+                        <div style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>{[s.family, s.subfamily].filter(Boolean).join(' › ')}</div>
+                      </>
+                    ) : (
+                      <div style={{ fontSize: 12, color: T.accent, fontStyle: 'italic' }}>Não encontrado</div>
+                    )}
+                  </div>
+                  <div style={{
+                    textAlign: 'center', fontSize: 14, fontWeight: 700,
+                    color: T.green, fontFamily: 'Geist Mono, monospace',
+                  }}>+1</div>
+                  {showPO2 && <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po2 ? 700 : 400, color: s.po2 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po2 ?? '—'}</div>}
+                  {showPO3 && <div style={{ textAlign: 'right', fontSize: 13, fontWeight: s.po3 ? 700 : 400, color: s.po3 ? T.ink : T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.po3 ?? '—'}</div>}
+                  <div style={{ textAlign: 'right', fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{s.ts.toLocaleTimeString('pt-PT')}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          );
+        })()
       )}
     </div>
   );
