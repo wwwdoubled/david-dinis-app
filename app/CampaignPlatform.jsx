@@ -61,6 +61,14 @@ if (typeof window !== 'undefined' && !window.__ddErrorWired) {
 
 
 // ─────────────────────────────────────────────────────────────────────────
+// CLOUD-ONLY MODE
+// ─────────────────────────────────────────────────────────────────────────
+// When true, all data is stored in Supabase. Local IndexedDB is bypassed
+// (writes are no-ops, reads return empty). localStorage retains only UI
+// preferences (theme, last-selected period, filter states).
+const CLOUD_ONLY = true;
+
+// ─────────────────────────────────────────────────────────────────────────
 // Tokens
 // ─────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────
@@ -347,6 +355,7 @@ function idbOpen() {
 }
 
 async function idbPut(item) {
+  if (CLOUD_ONLY) return; // skip IDB writes in cloud-only mode
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE, 'readwrite');
@@ -357,6 +366,7 @@ async function idbPut(item) {
 }
 
 async function idbGetAll() {
+  if (CLOUD_ONLY) return [];
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE, 'readonly');
@@ -376,6 +386,7 @@ async function idbClear() {
 }
 
 async function idbDelete(key) {
+  if (CLOUD_ONLY) return;
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE, 'readwrite');
@@ -387,6 +398,7 @@ async function idbDelete(key) {
 
 // ─── Periods store (campaign planning entities) ─────────────────────────
 async function idbPutPeriod(p) {
+  if (CLOUD_ONLY) return;
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_PERIODS, 'readwrite');
@@ -397,6 +409,7 @@ async function idbPutPeriod(p) {
 }
 
 async function idbGetAllPeriods() {
+  if (CLOUD_ONLY) return [];
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_PERIODS, 'readonly');
@@ -407,6 +420,7 @@ async function idbGetAllPeriods() {
 }
 
 async function idbDeletePeriod(id) {
+  if (CLOUD_ONLY) return;
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_PERIODS, 'readwrite');
@@ -419,6 +433,7 @@ async function idbDeletePeriod(id) {
 // ─── Zone memory store (EAN → last assigned zone) ──────────────────────
 // Records: { ean, zoneId, zoneName, floorId, floorName, lastSeen, timesUsed }
 async function idbPutMemory(item) {
+  if (CLOUD_ONLY) return;
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_MEMORY, 'readwrite');
@@ -429,6 +444,7 @@ async function idbPutMemory(item) {
 }
 
 async function idbGetAllMemory() {
+  if (CLOUD_ONLY) return [];
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_MEMORY, 'readonly');
@@ -439,6 +455,7 @@ async function idbGetAllMemory() {
 }
 
 async function idbBulkPutMemory(items) {
+  if (CLOUD_ONLY) return;
   if (!items || !items.length) return;
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
@@ -508,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.8.0';
-const APP_BUILD_DATE = '2026-05-07T16:30';
+const APP_VERSION = '3.9.0';
+const APP_BUILD_DATE = '2026-05-07T17:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -2671,22 +2688,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
-      // 2b. Phase 2: fetch rows for campaigns that still need hydration.
-      // Condition: _needsRows flag OR rows are empty but itemCount > 0 (can happen when
-      // mergeCampaigns overwrites local rows with cloud meta's empty rows before restoreRows fix)
-      const needsRows = earlyMergedCampaigns.filter(c =>
-        c._needsRows || (!c.rows?.length && (c.itemCount > 0 || c.itemCount === -1))
-      );
-      if (needsRows.length > 0) {
-        cloudFetchCampaignRows(needsRows.map(c => c.id)).then(hydrated => {
-          if (cancelled) return;
-          const rowsById = new Map(hydrated.map(h => [h.id, h]));
-          setCampaigns(prev => prev.map(c => {
-            const r = rowsById.get(c.id);
-            return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
-          }));
-        }).catch(() => {});
-      }
+      // 2b. Phase 2: lazy row hydration is now PER-PERIOD (see effect in
+      // CampaignsView). Não pré-carregamos rows de TODAS as campanhas no
+      // startup — só do período que o utilizador abrir. Isto torna o
+      // arranque ~10x mais rápido.
 
       // 3. Detect local-only items that need to be uploaded (migration, background)
       const cloudPeriodIds = new Set(cloudPeriods.map(p => p.id));
@@ -4429,6 +4434,31 @@ function CampaignsView({
     return campaigns.filter(c => c.periodId === selectedPeriodId);
   }, [campaigns, selectedPeriodId]);
 
+  // Lazy row hydration: when user enters a period, fetch rows ONLY for the
+  // campaigns of that period (not all campaigns globally). This is what
+  // makes the startup fast in cloud-only mode.
+  const hydratedPeriodsRef = useRef(new Set());
+  const [hydratingPeriod, setHydratingPeriod] = useState(false);
+  useEffect(() => {
+    if (!selectedPeriodId) return;
+    if (hydratedPeriodsRef.current.has(selectedPeriodId)) return;
+    const needRows = scopedCampaigns.filter(c => c.id && (c._needsRows || !c.rows?.length));
+    if (needRows.length === 0) {
+      hydratedPeriodsRef.current.add(selectedPeriodId);
+      return;
+    }
+    setHydratingPeriod(true);
+    cloudFetchCampaignRows(needRows.map(c => c.id)).then(hydrated => {
+      const rowsById = new Map(hydrated.map(h => [h.id, h]));
+      setCampaigns(prev => prev.map(c => {
+        const r = rowsById.get(c.id);
+        return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+      }));
+      hydratedPeriodsRef.current.add(selectedPeriodId);
+    }).catch(err => console.warn('[lazy-hydrate] failed', err))
+      .finally(() => setHydratingPeriod(false));
+  }, [selectedPeriodId, scopedCampaigns, setCampaigns]);
+
   // Auto-activate ALL campaigns in the period by default (single shared plan)
   useEffect(() => {
     if (scopedCampaigns.length === 0) return;
@@ -5068,6 +5098,16 @@ function CampaignsView({
             background: 'transparent', border: '1px solid rgba(255,255,255,0.4)',
             color: '#fff', borderRadius: 4, padding: '2px 8px', fontSize: 11, cursor: 'pointer',
           }}>Dispensar</button>
+        </div>
+      )}
+      {/* Loading indicator while lazy-hydrating period rows */}
+      {hydratingPeriod && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 11, color: T.inkSoft, marginBottom: 8,
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: T.cyan, display: 'inline-block', animation: 'pulse 1s infinite' }} />
+          A carregar artigos da campanha…
         </div>
       )}
       {/* Saving indicator */}
