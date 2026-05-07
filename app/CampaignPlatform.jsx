@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.5.1';
-const APP_BUILD_DATE = '2026-05-07T14:30';
+const APP_VERSION = '3.6.0';
+const APP_BUILD_DATE = '2026-05-07T15:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -5213,6 +5213,7 @@ function CampaignsView({
               { id: 'list', l: 'Listagem', icon: ListTree },
               { id: 'plan', l: 'Plano', icon: Layers },
               { id: 'output', l: 'Saída', icon: Eye },
+              { id: 'pedido', l: 'Pedido GU', icon: Warehouse },
             ].map(m => {
               const Icon = m.icon;
               const active = mode === m.id;
@@ -5555,12 +5556,24 @@ function CampaignsView({
             </div>
           </div>
         )
-      ) : (
+      ) : mode === 'output' ? (
         <OutputPreview
           floors={combinedFloors}
           activeCampaign={mergedActiveCampaign}
           stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
           stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
+        />
+      ) : (
+        <PedidoGUView
+          floors={combinedFloors}
+          activeCampaign={mergedActiveCampaign}
+          stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
+          stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
+          onUpdateSlot={(zoneId, slotId, patch) => {
+            const floorId = floors.find(f => f.zones.some(z => z.id === zoneId))?.id;
+            if (floorId) updateSlot(floorId, zoneId, slotId, patch);
+          }}
+          campaignName={primaryCampaign?.name || selectedPeriod?.name || 'Campanha'}
         />
       )}
 
@@ -8305,6 +8318,296 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
 // ─────────────────────────────────────────────────────────────────────────
 // Output Preview — print-friendly structured view (matches spreadsheet)
 // ─────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────
+// PedidoGUView — calcula e exporta unidades a pedir ao armazém (PO2)
+// para preencher cada zona/móvel. GU = Garantia de Unidades = qtd a pedir.
+// ─────────────────────────────────────────────────────────────────────────
+function PedidoGUView({ floors, activeCampaign, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onUpdateSlot, campaignName }) {
+  // Default target qty per slot (configurable globally; can be overridden per zone via zoneTargets)
+  const [defaultTarget, setDefaultTarget] = useStoredState('pedido.defaultTarget', 1);
+  // Map: zoneId → target qty (overrides defaultTarget for that zone)
+  const [zoneTargets, setZoneTargets] = useStoredState('pedido.zoneTargets', {});
+
+  const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
+  const { index: idxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+
+  const productIdx = useMemo(() => {
+    const map = new Map();
+    if (!activeCampaign) return map;
+    const cols = detectColumns(activeCampaign.headers || []);
+    if (!cols.ean) return map;
+    for (const r of (activeCampaign.rows || [])) {
+      const key = normalizeEAN(r[cols.ean]);
+      if (!key || map.has(key)) continue;
+      map.set(key, {
+        name: cols.description ? String(r[cols.description] ?? '').trim() : '',
+        family: cols.family ? String(r[cols.family] ?? '').trim() : '',
+      });
+    }
+    return map;
+  }, [activeCampaign]);
+
+  const targetForZone = (zoneId) => zoneTargets[zoneId] ?? defaultTarget;
+
+  // Build list of {floor, zone, slot, ean, name, po2, po3, target, suggestedPedido, currentPedido}
+  const allRows = useMemo(() => {
+    const out = [];
+    for (const floor of (floors || [])) {
+      for (const zone of (floor.zones || [])) {
+        const target = targetForZone(zone.id);
+        for (const slot of (zone.slots || [])) {
+          const ean = String(slot.ref || '').trim();
+          const eanKey = normalizeEAN(ean);
+          if (!ean) continue;
+          const po2 = eanKey ? Number(idxPO2.get(eanKey) ?? 0) : 0;
+          const po3 = eanKey ? Number(idxPO3.get(eanKey) ?? 0) : 0;
+          const product = eanKey ? productIdx.get(eanKey) : null;
+          const name = slot.name || product?.name || '';
+          const family = slot.family || product?.family || '';
+          // Suggested = max(0, target - PO3), capped at PO2 available
+          const suggested = Math.max(0, Math.min(po2, target - po3));
+          const current = slot.pedidoGU !== '' && slot.pedidoGU != null ? Number(slot.pedidoGU) : suggested;
+          out.push({
+            floorId: floor.id, floorName: floor.name, floorColor: floor.color,
+            zoneId: zone.id, zoneName: zone.name,
+            slotId: slot.id,
+            ean, name, family,
+            po2, po3, target,
+            suggested,
+            current: isNaN(current) ? suggested : current,
+          });
+        }
+      }
+    }
+    return out;
+  }, [floors, idxPO2, idxPO3, productIdx, zoneTargets, defaultTarget]);
+
+  // Group by zone
+  const zonesGrouped = useMemo(() => {
+    const groups = new Map();
+    for (const r of allRows) {
+      const key = `${r.floorId}|${r.zoneId}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          floorName: r.floorName, floorColor: r.floorColor,
+          zoneId: r.zoneId, zoneName: r.zoneName, target: r.target, slots: [],
+        });
+      }
+      groups.get(key).slots.push(r);
+    }
+    return [...groups.values()];
+  }, [allRows]);
+
+  // Aggregated per-EAN totals (the export's main view)
+  const aggregated = useMemo(() => {
+    const map = new Map();
+    for (const r of allRows) {
+      if (!map.has(r.ean)) {
+        map.set(r.ean, { ean: r.ean, name: r.name, family: r.family, po2: r.po2, po3: r.po3, units: 0 });
+      }
+      map.get(r.ean).units += (r.current || 0);
+    }
+    return [...map.values()].filter(r => r.units > 0).sort((a, b) => b.units - a.units);
+  }, [allRows]);
+
+  const totalUnits = aggregated.reduce((s, r) => s + r.units, 0);
+  const totalDistinct = aggregated.length;
+
+  const applyAllSuggested = () => {
+    if (!confirm(`Substituir todos os pedidos GU pelos valores sugeridos (target − PO3, limitado pelo PO2)?\n\n${allRows.length} slots serão actualizados.`)) return;
+    for (const r of allRows) {
+      onUpdateSlot && onUpdateSlot(r.zoneId, r.slotId, { pedidoGU: String(r.suggested) });
+    }
+  };
+
+  const setSlotPedido = (zoneId, slotId, value) => {
+    const v = String(value).replace(/[^\d]/g, '');
+    onUpdateSlot && onUpdateSlot(zoneId, slotId, { pedidoGU: v });
+  };
+
+  const setZoneTarget = (zoneId, value) => {
+    const n = Math.max(0, parseInt(value, 10) || 0);
+    setZoneTargets({ ...zoneTargets, [zoneId]: n });
+  };
+
+  const exportXLSX = () => {
+    const wb = XLSX.utils.book_new();
+    // Sheet 1: aggregated (EAN, Descrição, Unidades) — the user's main request
+    const ws1 = XLSX.utils.json_to_sheet(aggregated.map(r => ({
+      EAN: r.ean,
+      'Descrição': r.name,
+      'Família': r.family,
+      'Unidades': r.units,
+      'Stock PO2 (armazém)': r.po2,
+      'Stock PO3 (loja)': r.po3,
+    })));
+    // Sheet 2: detalhe por slot (audit trail)
+    const ws2 = XLSX.utils.json_to_sheet(allRows.filter(r => r.current > 0).map(r => ({
+      Piso: r.floorName,
+      'Móvel/Zona': r.zoneName,
+      EAN: r.ean,
+      'Descrição': r.name,
+      'Target/slot': r.target,
+      'Stock PO2': r.po2,
+      'Stock PO3': r.po3,
+      'Sugerido': r.suggested,
+      'Pedido': r.current,
+    })));
+    XLSX.utils.book_append_sheet(wb, ws1, 'Pedido (resumo)');
+    XLSX.utils.book_append_sheet(wb, ws2, 'Detalhe por móvel');
+    const stamp = new Date().toISOString().slice(0, 10);
+    const safeName = (campaignName || 'campanha').replace(/[^\w\d-_]/g, '_').slice(0, 40);
+    XLSX.writeFile(wb, `pedido_${safeName}_${stamp}.xlsx`);
+  };
+
+  if (allRows.length === 0) {
+    return (
+      <div style={{ padding: '60px 20px', textAlign: 'center', color: T.inkMute }}>
+        <Warehouse size={32} style={{ opacity: 0.3, marginBottom: 12 }} />
+        <div style={{ fontSize: 14, color: T.ink, fontWeight: 500 }}>Nenhum slot atribuído ainda.</div>
+        <div style={{ fontSize: 12, marginTop: 6 }}>Adiciona produtos às zonas no Plano para calcular o pedido ao armazém.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fade-up">
+      {/* Header */}
+      <div style={{ marginBottom: 20 }}>
+        <h2 style={{ fontSize: 22, fontWeight: 700, color: T.ink, margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Warehouse size={22} style={{ color: T.accent }} /> Pedido ao Armazém (GU)
+        </h2>
+        <p style={{ fontSize: 12, color: T.inkMute, marginTop: 6, lineHeight: 1.5, maxWidth: 720 }}>
+          Calcula as unidades a pedir ao armazém (PO2) para preencher cada móvel da campanha. Por defeito sugere
+          <strong> target − stock PO3 actual</strong>, limitado pelas unidades disponíveis em PO2. Podes ajustar
+          manualmente cada slot ou redefinir o target por zona.
+        </p>
+      </div>
+
+      {/* Top controls */}
+      <div style={{
+        display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap',
+        padding: '12px 16px', marginBottom: 16, background: T.bgEl,
+        border: `1px solid ${T.line}`, borderRadius: 8,
+      }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: T.inkSoft }}>
+          Target por slot (default):
+          <input
+            type="number" min="0" max="999"
+            value={defaultTarget}
+            onChange={e => setDefaultTarget(Math.max(0, parseInt(e.target.value, 10) || 0))}
+            style={{
+              width: 60, padding: '5px 8px', fontSize: 13, fontFamily: 'Geist Mono, monospace',
+              background: T.paper, border: `1px solid ${T.line}`, borderRadius: 4, color: T.ink,
+            }}
+          />
+        </label>
+        <button onClick={applyAllSuggested} title="Sobrescreve os pedidos GU manuais" style={{
+          padding: '6px 12px', background: T.ink, color: T.bg, border: 'none',
+          borderRadius: 5, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+          display: 'flex', alignItems: 'center', gap: 5,
+        }}>
+          <Sparkles size={12} /> Aplicar sugestões a todos
+        </button>
+        <div style={{ marginLeft: 'auto', fontSize: 12, color: T.inkSoft, display: 'flex', gap: 16 }}>
+          <span><strong style={{ color: T.ink }}>{totalDistinct}</strong> EANs · <strong style={{ color: T.accent }}>{totalUnits}</strong> unidades</span>
+        </div>
+        <button onClick={exportXLSX} disabled={totalUnits === 0} style={{
+          padding: '6px 12px', background: totalUnits > 0 ? T.green : T.line,
+          color: '#fff', border: 'none', borderRadius: 5, fontSize: 12, fontWeight: 500,
+          cursor: totalUnits > 0 ? 'pointer' : 'not-allowed',
+          display: 'flex', alignItems: 'center', gap: 5,
+        }}>
+          <Download size={12} /> Exportar Pedido (Excel)
+        </button>
+      </div>
+
+      {/* Per-zone tables */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {zonesGrouped.map(zone => {
+          const zoneTotal = zone.slots.reduce((s, r) => s + (r.current || 0), 0);
+          return (
+            <div key={zone.zoneId} style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden', background: T.paper }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '10px 14px', background: zone.floorColor, color: '#fff',
+              }}>
+                <strong style={{ fontSize: 13 }}>{zone.zoneName}</strong>
+                <span style={{ fontSize: 10, opacity: 0.85, fontFamily: 'Geist Mono, monospace' }}>
+                  {zone.floorName} · {zone.slots.length} slots
+                </span>
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label style={{ fontSize: 10, opacity: 0.85 }}>target:</label>
+                  <input
+                    type="number" min="0" max="999"
+                    value={zone.target}
+                    onChange={e => setZoneTarget(zone.zoneId, e.target.value)}
+                    style={{
+                      width: 50, padding: '3px 6px', fontSize: 11, fontFamily: 'Geist Mono, monospace',
+                      background: 'rgba(255,255,255,0.18)', border: `1px solid rgba(255,255,255,0.3)`,
+                      borderRadius: 3, color: '#fff', textAlign: 'center',
+                    }}
+                  />
+                  <span style={{ fontSize: 11, fontFamily: 'Geist Mono, monospace', fontWeight: 700, marginLeft: 8 }}>
+                    pedido total: {zoneTotal}
+                  </span>
+                </div>
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                <thead>
+                  <tr style={{ background: T.bgEl }}>
+                    <th style={pthStyle}>EAN</th>
+                    <th style={pthStyle}>DESCRIÇÃO</th>
+                    <th style={{ ...pthStyle, textAlign: 'right', background: T.cyan }}>PO3</th>
+                    <th style={{ ...pthStyle, textAlign: 'right', background: T.cyan }}>PO2</th>
+                    <th style={{ ...pthStyle, textAlign: 'right' }}>SUGERIDO</th>
+                    <th style={{ ...pthStyle, textAlign: 'right', background: T.yellow }}>PEDIDO GU</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {zone.slots.map(r => {
+                    const overSuggested = r.current > r.po2;
+                    return (
+                      <tr key={r.slotId} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                        <td style={{ ...ptdStyle, fontFamily: 'Geist Mono, monospace', background: T.cyan, fontSize: 10 }}>{r.ean || '—'}</td>
+                        <td style={ptdStyle}>
+                          <div style={{ fontWeight: 500, fontSize: 11 }}>{r.name || <span style={{ color: T.inkMute, fontStyle: 'italic' }}>—</span>}</div>
+                          {r.family && <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{r.family}</div>}
+                        </td>
+                        <td style={{ ...ptdStyle, textAlign: 'right', fontFamily: 'Geist Mono, monospace', fontWeight: r.po3 > 0 ? 600 : 400 }}>{r.po3}</td>
+                        <td style={{ ...ptdStyle, textAlign: 'right', fontFamily: 'Geist Mono, monospace', fontWeight: r.po2 > 0 ? 600 : 400 }}>{r.po2}</td>
+                        <td style={{ ...ptdStyle, textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: r.suggested > 0 ? T.accent : T.inkMute, fontWeight: r.suggested > 0 ? 600 : 400 }}>{r.suggested}</td>
+                        <td style={{ ...ptdStyle, textAlign: 'right', background: T.yellow }}>
+                          <input
+                            type="number" min="0" max="9999"
+                            value={r.current}
+                            onChange={e => setSlotPedido(r.zoneId, r.slotId, e.target.value)}
+                            title={overSuggested ? `Atenção: pedido (${r.current}) > stock PO2 disponível (${r.po2})` : ''}
+                            style={{
+                              width: 60, padding: '4px 6px', fontSize: 12,
+                              fontFamily: 'Geist Mono, monospace', fontWeight: 700,
+                              background: overSuggested ? '#FFE4D9' : '#fff',
+                              border: `1px solid ${overSuggested ? T.accent : T.line}`,
+                              borderRadius: 3, color: T.ink, textAlign: 'right',
+                            }}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const pthStyle = { padding: '8px 10px', fontSize: 10, fontWeight: 600, color: T.inkSoft, letterSpacing: '0.04em', textTransform: 'uppercase', borderBottom: `1px solid ${T.line}`, textAlign: 'left' };
+const ptdStyle = { padding: '8px 10px', fontSize: 11, color: T.ink, verticalAlign: 'middle' };
+
 function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
   // Build stock indexes once for EAN lookup
   const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
