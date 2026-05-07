@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.4.1';
-const APP_BUILD_DATE = '2026-05-07T12:00';
+const APP_VERSION = '3.4.2';
+const APP_BUILD_DATE = '2026-05-07T12:30';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -6966,15 +6966,36 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
 
   const [pageSize, setPageSize] = useState(100);
 
+  // Products que passam todos os filtros EXCEPTO filterFamily.
+  // Os chips de família ficam dinâmicos — clicar "Com stock" actualiza counts.
+  const productsExcludingFamilyFilter = useMemo(() => {
+    return products.filter(p => {
+      if (search) {
+        const q = search.toLowerCase();
+        if (!p.description.toLowerCase().includes(q) &&
+            !p.ean.toLowerCase().includes(q) &&
+            !p.family.toLowerCase().includes(q)) return false;
+      }
+      if (filterStar && !p.isStar) return false;
+      if (filterAssign === 'assigned' && !p.assigned) return false;
+      if (filterAssign === 'unassigned' && p.assigned) return false;
+      if (filterStock === 'total' && p.stockTotal <= 0) return false;
+      if (filterStock === 'po2' && p.stockPO2 <= 0) return false;
+      if (filterStock === 'po3' && p.stockPO3 <= 0) return false;
+      if (filterCampaign !== 'all' && p.sourceCampaignId !== filterCampaign) return false;
+      return true;
+    });
+  }, [products, search, filterStar, filterAssign, filterStock, filterCampaign]);
+
   const families = useMemo(() => {
     const counts = new Map();
-    for (const p of products) {
+    for (const p of productsExcludingFamilyFilter) {
       if (p.family) counts.set(p.family, (counts.get(p.family) || 0) + 1);
     }
     return [...counts.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([name, count]) => ({ name, count }));
-  }, [products]);
+  }, [productsExcludingFamilyFilter]);
 
   const filtered = useMemo(() => {
     let r = products.filter(p => {
@@ -7183,7 +7204,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
           families={families}
           selected={filterFamily}
           onSelect={setFilterFamily}
-          totalProducts={products.length}
+          totalProducts={productsExcludingFamilyFilter.length}
         />
       )}
       </div>{/* end no-print controls */}
@@ -8680,24 +8701,41 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     return { added, removed, changed, unchanged };
   }, [snapshot, compareWith, stockIndexPO2, stockIndexPO3, excludedFamilies]);
 
-  // All unique families across all diff categories WITH counts (for FamilyChips)
-  const allFamilies = useMemo(() => {
+  // Items que passam TODOS os filtros excepto o filtro de família.
+  // Usado para alimentar os chips com contagens dinâmicas — quando o utilizador
+  // selecciona "Aveiro" ou "Novos", os chips reflectem só esse subset.
+  const itemsExcludingFamilyFilter = useMemo(() => {
     if (!diff) return [];
+    let items = [];
+    if (filter === 'all' || filter === 'added') items = items.concat(diff.added);
+    if (filter === 'all' || filter === 'changed') items = items.concat(diff.changed);
+    if (filter === 'all' || filter === 'removed') items = items.concat(diff.removed);
+    if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged);
+    if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
+    if (search) {
+      const q = search.toLowerCase();
+      items = items.filter(p =>
+        (p.description || '').toLowerCase().includes(q) ||
+        String(p.ean || '').toLowerCase().includes(q) ||
+        (p.family || '').toLowerCase().includes(q)
+      );
+    }
+    return items;
+  }, [diff, filter, filterAveiro, search]);
+
+  const allFamilies = useMemo(() => {
     const counts = new Map();
-    [...diff.added, ...diff.changed, ...diff.removed, ...diff.unchanged].forEach(p => {
+    for (const p of itemsExcludingFamilyFilter) {
       const fam = p.family || '';
-      if (!fam) return;
+      if (!fam) continue;
       counts.set(fam, (counts.get(fam) || 0) + 1);
-    });
+    }
     return Array.from(counts.entries())
       .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count); // most populated first
-  }, [diff]);
-  // Total products across all categories — used for "Todas" chip count
-  const totalDiffProducts = useMemo(() => {
-    if (!diff) return 0;
-    return diff.added.length + diff.changed.length + diff.removed.length + diff.unchanged.length;
-  }, [diff]);
+      .sort((a, b) => b.count - a.count);
+  }, [itemsExcludingFamilyFilter]);
+
+  const totalDiffProducts = itemsExcludingFamilyFilter.length;
 
   const filteredItems = useMemo(() => {
     if (!diff) return [];
