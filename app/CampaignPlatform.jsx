@@ -508,8 +508,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.7.0';
-const APP_BUILD_DATE = '2026-05-07T15:30';
+const APP_VERSION = '3.7.1';
+const APP_BUILD_DATE = '2026-05-07T16:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -10731,8 +10731,24 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
   // Price big number sizing
   const priceSize = isSmall ? 18 : (isWide ? 28 : Math.min(textW / 4, H / 6));
 
-  // Layout cursor
-  let cursorY = padding + (isSmall ? 2 : 4);
+  // ─── Anchored layout positions (fixed % of canvas — match FNAC mockups) ───
+  // Title is anchored to top-padding; everything else uses fixed Y anchors so
+  // the layout stays consistent regardless of how many lines the title has.
+  const titleY = padding + (isSmall ? 2 : 4);
+  const titleBlockH = titleLines.length * titleSize * 0.95;
+  // For small/wide flyers, keep the cursor-style layout below title.
+  // For normal portrait/landscape, anchor to fixed % of H.
+  const specsY  = isSmall ? titleY + titleBlockH + 2
+                : isWide  ? titleY + titleBlockH + 3
+                          : H * 0.55;
+  const pvpY    = isSmall ? specsY + 5
+                : isWide  ? specsY + 5
+                          : H * 0.62;
+  const priceY  = isSmall ? H - padding - 6
+                : isWide  ? H - padding - 8
+                          : H * 0.74;
+  // Layout cursor kept for any leftover code paths
+  let cursorY = titleY;
 
   return (
     <svg
@@ -10800,58 +10816,53 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         return null;
       })()}
 
-      {/* Specs */}
+      {/* Specs — anchored at fixed Y */}
       {data.specs && !isSmall && (
-        <>
-          <g {...elProps('specs')}>
-            <text
-              x={textX} y={cursorY + (isWide ? 4 : 6)}
-              className="ft-sans"
-              fontSize={isWide ? 3.2 : 4}
-              fill={palette.fg}
-              opacity="0.95"
-            >
-              {data.specs}
-            </text>
-            {selRing('specs', textX - 1, cursorY + 1, textW, isWide ? 5 : 7)}
-          </g>
-          {(() => { cursorY += (isWide ? 6 : 10); return null; })()}
-        </>
+        <g {...elProps('specs')}>
+          <text
+            x={textX} y={specsY}
+            className="ft-sans"
+            fontSize={isWide ? 3.2 : 4}
+            fill={palette.fg}
+            opacity="0.95"
+          >
+            {data.specs}
+          </text>
+          {selRing('specs', textX - 1, specsY - 4, textW, isWide ? 5 : 7)}
+        </g>
       )}
 
-      {/* PVP base (riscado) */}
+      {/* PVP base (riscado) — anchored at fixed Y */}
       {data.pvpBase && !isSmall && (
-        <>
-          <g {...elProps('pvpBase')}>
-            <text
-              x={textX} y={cursorY + 4}
-              className="ft-sans"
-              fontSize={isWide ? 2.5 : 3.5}
-              fill={palette.fg}
-              opacity="0.85"
-            >
-              {data.pvpBaseLabel}
-            </text>
-            <text
-              x={textX} y={cursorY + (isWide ? 11 : 14)}
-              className="ft-display"
-              fontSize={isWide ? 7 : 11}
-              fill={palette.fg}
-              opacity="0.85"
-              textDecoration="line-through"
-            >
-              {data.pvpBase}
-            </text>
-            {selRing('pvpBase', textX - 1, cursorY + 1, 60, isWide ? 12 : 16)}
-          </g>
-          {(() => { cursorY += (isWide ? 13 : 18); return null; })()}
-        </>
+        <g {...elProps('pvpBase')}>
+          <text
+            x={textX} y={pvpY}
+            className="ft-sans"
+            fontSize={isWide ? 2.5 : 3.5}
+            fill={palette.fg}
+            opacity="0.85"
+          >
+            {data.pvpBaseLabel}
+          </text>
+          <text
+            x={textX} y={pvpY + (isWide ? 7 : 10)}
+            className="ft-display"
+            fontSize={isWide ? 7 : 11}
+            fill={palette.fg}
+            opacity="0.85"
+            textDecoration="line-through"
+          >
+            {data.pvpBase}
+          </text>
+          {selRing('pvpBase', textX - 1, pvpY - 3, 60, isWide ? 12 : 16)}
+        </g>
       )}
 
-      {/* Discount badge — top-right corner, rotated slightly */}
+      {/* Discount badge — positioned next to the PVP riscado, like FNAC mockups */}
       {data.showDiscount && data.discountText && (() => {
         const baseX = W - padding - (isSmall ? 22 : 50);
-        const baseY = isSmall ? padding + 4 : (isWide ? padding + 8 : H * 0.35);
+        // Anchor near PVP base (~60% Y) for portrait/landscape; top for small/wide
+        const baseY = isSmall ? padding + 4 : (isWide ? padding + 8 : pvpY - 4);
         const o = ov('discount');
         return (
         <g
@@ -10914,13 +10925,18 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         );
       })()}
 
-      {/* Main price — biggest element */}
+      {/* Main price — biggest element. Anchored at priceY computed above. */}
       {data.priceMain && (() => {
-        const priceY = isSmall ? H - padding - 6 : (isWide ? H - padding - 8 : H * 0.62);
+        // Arial Black numerals are ~0.62 em wide each; safer than 0.55
+        const integerW = (data.priceMain || '').length * priceSize * 0.62;
+        const centsSize = priceSize * 0.42;
+        const integerBaselineY = priceY + priceSize * 0.85;
+        // Cents baseline aligns with top of the integer (cap-height area)
+        const centsBaselineY = priceY + priceSize * 0.40;
         return (
           <g {...elProps('price')}>
             <text
-              x={textX} y={priceY + priceSize * 0.85}
+              x={textX} y={integerBaselineY}
               className="ft-display"
               fontSize={priceSize}
               fill={palette.fg}
@@ -10929,16 +10945,16 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
             </text>
             {data.priceCents && (
               <text
-                x={textX + (data.priceMain.length * priceSize * 0.55)}
-                y={priceY + priceSize * 0.45}
+                x={textX + integerW + 1}
+                y={centsBaselineY}
                 className="ft-display"
-                fontSize={priceSize * 0.4}
+                fontSize={centsSize}
                 fill={palette.fg}
               >
                 {data.priceCents}
               </text>
             )}
-            {selRing('price', textX - 1, priceY + priceSize * 0.1, priceSize * 4, priceSize * 0.95)}
+            {selRing('price', textX - 1, priceY + priceSize * 0.05, integerW + centsSize * 4, priceSize * 0.95)}
           </g>
         );
       })()}
