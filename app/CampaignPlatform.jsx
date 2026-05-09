@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.5';
-const APP_BUILD_DATE = '2026-05-09T17:22'; // Europe/Lisbon
+const APP_VERSION = '3.10.6';
+const APP_BUILD_DATE = '2026-05-09T17:26'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.6', date: '2026-05-09', summary: 'Visão geral: 4 novas secções num grid 2x2 — Top Famílias do Plano (com barras), Próximas Campanhas (badge HOJE/AMANHÃ/+Xd), Cartazes Pendentes (em períodos terminados), Últimas Alterações (activity log)' },
   { version: '3.10.5', date: '2026-05-09', summary: 'Visão geral redesenhada: stats correctos (Períodos Ativos / A Terminar / Produtos Atribuídos lê dos floors do PERÍODO / Stock); secção "Atenção" para items urgentes; "Acesso rápido" com 6 atalhos no lugar do "Fluxo recomendado"' },
   { version: '3.10.4', date: '2026-05-09', summary: 'Blueprint: slots cujo EAN não existe em nenhuma campanha são omitidos (deixaram de aparecer como "sem dados" no resumo)' },
   { version: '3.10.3', date: '2026-05-09', summary: 'Fix: Blueprint agora lê os slots dos floors do PERÍODO (não só das campanhas) — refletindo o plano que o utilizador definiu' },
@@ -4217,6 +4218,83 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
 
   const showAttention = endingSoon.some(i => i.days <= 2) || periodsWithoutPlan.length > 0;
 
+  // ─── Próximas campanhas: planeadas com startDate futura, ordenadas asc ──
+  const upcomingPeriods = useMemo(() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return (periods || [])
+      .filter(p => {
+        if (periodStatus(p) !== 'planned') return false;
+        if (!p.startDate) return false;
+        const start = new Date(p.startDate); start.setHours(0, 0, 0, 0);
+        return start >= today;
+      })
+      .sort((a, b) => new Date(a.startDate) - new Date(b.startDate))
+      .slice(0, 5);
+  }, [periods]);
+
+  // ─── Top famílias do plano: agrega EANs nos slots e cruza com cols.family ─
+  const topFamilies = useMemo(() => {
+    // Build EAN → family map
+    const eanFamily = new Map();
+    campaigns.forEach(c => {
+      if (!c.rows) return;
+      const cols = detectColumns(c.headers || []);
+      if (!cols.ean || !cols.family) return;
+      c.rows.forEach(r => {
+        const k = normalizeEAN(r[cols.ean]);
+        if (k && !eanFamily.has(k)) {
+          eanFamily.set(k, String(r[cols.family] || '').trim());
+        }
+      });
+    });
+    // Count families across all period slots
+    const counts = new Map();
+    let totalSlots = 0;
+    (periods || []).forEach(p => {
+      const floors = Array.isArray(p.floors) ? p.floors : [];
+      floors.forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
+        const k = normalizeEAN(s.ref);
+        const fam = eanFamily.get(k) || 'Sem família';
+        counts.set(fam, (counts.get(fam) || 0) + 1);
+        totalSlots++;
+      })));
+    });
+    const list = Array.from(counts.entries())
+      .map(([name, count]) => ({ name, count, pct: totalSlots ? (count / totalSlots) * 100 : 0 }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+    return { list, total: totalSlots };
+  }, [campaigns, periods]);
+
+  // ─── Cartazes pendentes: posters activos em períodos já terminados ──
+  const pendingPosters = useMemo(() => {
+    if (!posters || posters.length === 0) return [];
+    const periodById = new Map((periods || []).map(p => [p.id, p]));
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const groups = new Map();
+    posters.forEach(po => {
+      if (po.status === 'removed') return;
+      const p = periodById.get(po.period_id);
+      if (!p || !p.endDate) return;
+      const end = new Date(p.endDate); end.setHours(0, 0, 0, 0);
+      if (end >= today) return; // not finished yet
+      const key = p.id;
+      if (!groups.has(key)) groups.set(key, { period: p, count: 0, daysOverdue: Math.round((today - end) / 86400000) });
+      groups.get(key).count += (po.quantity || 1);
+    });
+    return Array.from(groups.values()).sort((a, b) => b.daysOverdue - a.daysOverdue).slice(0, 5);
+  }, [posters, periods]);
+
+  // ─── Últimas alterações: fetch activity log ──
+  const [recentActivity, setRecentActivity] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchActivityLog({ limit: 8, sinceDays: 14 }).then(items => {
+      if (!cancelled) setRecentActivity(items || []);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [periods, campaigns]); // refresh occasionally when state changes
+
   return (
     <div className="fade-up">
       <Header eyebrow="Início" title="Visão geral" subtitle="Carrega ficheiros, analisa vendas, distribui produtos pelas zonas da loja e gera os materiais finais." />
@@ -4346,6 +4424,201 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
           ))}
         </div>
       </div>
+
+      {/* Insights grid — 2x2 of useful sections */}
+      <div style={{ marginTop: 32, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 16 }}>
+        {/* Top famílias do plano */}
+        <DashboardCard
+          title="Top Famílias do Plano"
+          icon={Tag}
+          empty={topFamilies.list.length === 0 ? 'Sem produtos atribuídos ainda' : null}
+          footer={topFamilies.total > 0 ? `${topFamilies.total} slots no total` : null}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {topFamilies.list.map((f, i) => (
+              <div key={f.name}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12 }}>
+                  <span style={{ color: T.ink, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>{f.name}</span>
+                  <span className="mono" style={{ color: T.inkMute, marginLeft: 8 }}>{f.count} · {f.pct.toFixed(0)}%</span>
+                </div>
+                <div style={{ height: 5, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${f.pct}%`, height: '100%',
+                    background: i === 0 ? T.accent : i === 1 ? T.green : i === 2 ? '#0ea5e9' : T.inkMute,
+                    transition: 'width 0.4s',
+                  }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </DashboardCard>
+
+        {/* Próximas campanhas */}
+        <DashboardCard
+          title="Próximas Campanhas"
+          icon={CalendarDays}
+          empty={upcomingPeriods.length === 0 ? 'Sem campanhas planeadas' : null}
+          action={periods?.some(p => periodStatus(p) === 'planned') ? { label: 'Ver todas', onClick: () => setView('campaigns') } : null}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {upcomingPeriods.map(p => {
+              const today = new Date(); today.setHours(0, 0, 0, 0);
+              const start = new Date(p.startDate); start.setHours(0, 0, 0, 0);
+              const days = Math.round((start - today) / 86400000);
+              const dateStr = start.toLocaleDateString('pt-PT', { day: '2-digit', month: 'short' });
+              return (
+                <button key={p.id}
+                  onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', p.id); window.location.reload(); }}
+                  style={{
+                    padding: '8px 10px', background: T.bgEl, border: `1px solid ${T.lineSoft}`,
+                    borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    transition: 'all 0.12s',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = T.accent; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = T.lineSoft; }}
+                >
+                  <div className="mono" style={{
+                    fontSize: 10, padding: '3px 6px', background: T.bg,
+                    color: days === 0 ? T.green : days <= 7 ? T.accent : T.inkSoft,
+                    borderRadius: 3, fontWeight: 600, letterSpacing: '0.04em',
+                    minWidth: 56, textAlign: 'center', flexShrink: 0,
+                  }}>
+                    {days === 0 ? 'HOJE' : days === 1 ? 'AMANHÃ' : `+${days}d`}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>
+                      {p.name}
+                    </div>
+                    <div style={{ fontSize: 10, color: T.inkMute }}>{dateStr}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </DashboardCard>
+
+        {/* Cartazes pendentes */}
+        <DashboardCard
+          title="Cartazes Pendentes"
+          icon={ImageIcon}
+          empty={pendingPosters.length === 0 ? 'Sem cartazes por remover' : null}
+          action={pendingPosters.length > 0 ? { label: 'Ver cartazes', onClick: () => setView('images') } : null}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {pendingPosters.map(({ period, count, daysOverdue }) => (
+              <div key={period.id}
+                style={{
+                  padding: '8px 10px', background: '#fef2f2', border: `1px solid #fecaca`,
+                  borderRadius: 6, display: 'flex', alignItems: 'center', gap: 10,
+                }}
+              >
+                <div className="mono" style={{
+                  fontSize: 10, padding: '3px 6px', background: T.red,
+                  color: '#fff', borderRadius: 3, fontWeight: 700, letterSpacing: '0.04em',
+                  minWidth: 56, textAlign: 'center', flexShrink: 0,
+                }}>
+                  −{daysOverdue}d
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={period.name}>
+                    {period.name}
+                  </div>
+                  <div style={{ fontSize: 10, color: '#991b1b' }}>{count} {count === 1 ? 'cartaz por remover' : 'cartazes por remover'}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </DashboardCard>
+
+        {/* Últimas alterações */}
+        <DashboardCard
+          title="Últimas Alterações"
+          icon={Activity}
+          empty={recentActivity.length === 0 ? 'Sem actividade recente' : null}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {recentActivity.slice(0, 6).map(a => {
+              const when = a.created_at ? new Date(a.created_at) : null;
+              const dateStr = when ? (() => {
+                const diffMs = Date.now() - when.getTime();
+                const mins = Math.floor(diffMs / 60000);
+                if (mins < 1) return 'agora';
+                if (mins < 60) return `há ${mins}m`;
+                const hrs = Math.floor(mins / 60);
+                if (hrs < 24) return `há ${hrs}h`;
+                const days = Math.floor(hrs / 24);
+                if (days < 7) return `há ${days}d`;
+                return when.toLocaleDateString('pt-PT', { day: '2-digit', month: 'short' });
+              })() : '';
+              const actionLabels = {
+                'create': 'criou', 'update': 'editou', 'delete': 'apagou',
+                'upload': 'carregou', 'login': 'entrou', 'logout': 'saiu',
+              };
+              const verb = actionLabels[a.action] || a.action || 'modificou';
+              const resourceLabel = a.resource_type === 'period' ? 'período'
+                : a.resource_type === 'campaign' ? 'campanha'
+                : a.resource_type === 'poster' ? 'cartaz'
+                : a.resource_type || '';
+              const who = a.user_email ? a.user_email.split('@')[0] : 'alguém';
+              return (
+                <div key={a.id} style={{
+                  padding: '8px 10px', background: T.bgEl, border: `1px solid ${T.lineSoft}`,
+                  borderRadius: 6, display: 'flex', alignItems: 'flex-start', gap: 10,
+                  fontSize: 12,
+                }}>
+                  <div style={{ width: 24, height: 24, borderRadius: '50%', background: T.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, fontSize: 10, fontWeight: 600, color: T.inkSoft, textTransform: 'uppercase' }}>
+                    {who.charAt(0)}
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <strong style={{ fontWeight: 500 }}>{who}</strong>{' '}
+                      <span style={{ color: T.inkSoft }}>{verb} {resourceLabel}</span>
+                      {a.resource_name && <span style={{ color: T.ink }}> "{a.resource_name}"</span>}
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>{dateStr}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </DashboardCard>
+      </div>
+    </div>
+  );
+}
+
+// Reusable card component for the dashboard insights section
+function DashboardCard({ title, icon: Icon, children, empty, footer, action }) {
+  return (
+    <div style={{
+      padding: 18, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        {Icon && <Icon size={14} style={{ color: T.accent }} />}
+        <h3 className="mono" style={{ margin: 0, fontSize: 11, letterSpacing: '0.15em', color: T.inkSoft, textTransform: 'uppercase', flex: 1 }}>
+          {title}
+        </h3>
+        {action && (
+          <button onClick={action.onClick} style={{
+            background: 'transparent', border: 'none', color: T.inkSoft,
+            fontSize: 10, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 3,
+            fontFamily: 'inherit',
+          }}>
+            {action.label} <ArrowRight size={10} />
+          </button>
+        )}
+      </div>
+      {empty ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', color: T.inkMute, fontSize: 12 }}>
+          {empty}
+        </div>
+      ) : children}
+      {footer && (
+        <div className="mono" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.lineSoft}`, fontSize: 10, color: T.inkMute, letterSpacing: '0.05em' }}>
+          {footer}
+        </div>
+      )}
     </div>
   );
 }
