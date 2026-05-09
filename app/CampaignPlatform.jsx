@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.11.2';
-const APP_BUILD_DATE = '2026-05-09T22:29'; // Europe/Lisbon
+const APP_VERSION = '3.11.3';
+const APP_BUILD_DATE = '2026-05-09T22:33'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.11.3', date: '2026-05-09', summary: 'periodStatus explicíto: campanha fica ATIVA até às 23:59:59 do dia de fim (antes a comparação era a meia-noite, o comportamento já era esse implicitamente; agora está documentado e à prova de bugs)' },
   { version: '3.11.2', date: '2026-05-09', summary: 'Visão geral: secção "Atenção" deduplicada (mesmo período já não aparece como urgente E sem plano); label "Sem plano definido" → "Sem produtos no plano" (mais claro — não confundir com datas)' },
   { version: '3.11.1', date: '2026-05-09', summary: 'Alterações: re-introduzido o filtro por dia (dropdown "Todas as datas") como sub-componente isolado <ChangesDateFilter/>. O bug anterior (ReferenceError) era porque a JSX vivia dentro de <ChangesReport/> mas as variáveis estavam só em ChangesView e não eram passadas como props.' },
   { version: '3.11.0', date: '2026-05-09', summary: 'Mobile UX refresh: botões compactos com text-overflow ellipsis (não saem da div), filter rows com scroll horizontal touch (não wrap), inputs/selects 36-38px de altura, headers 24/20px, padding interno reduzido em todos os cards/containers, tabelas com min-width 480px e scroll. Mantém o tema actual.' },
@@ -1799,10 +1800,11 @@ function campaignKeyFromFilename(name) {
 function periodStatus(period) {
   if (!period) return 'planned';
   if (period.statusOverride) return period.statusOverride;
-  const now = new Date();
-  now.setHours(0, 0, 0, 0);
+  const now = new Date(); // hora actual (não meia-noite!)
   const start = period.startDate ? new Date(period.startDate) : null;
+  if (start) start.setHours(0, 0, 0, 0); // começa à meia-noite do dia de início
   const end = period.endDate ? new Date(period.endDate) : null;
+  if (end) end.setHours(23, 59, 59, 999); // termina às 23:59:59 do dia de fim
   if (start && now < start) return 'planned';
   if (end && now > end) return 'finished';
   if (start && now >= start && (!end || now <= end)) return 'active';
