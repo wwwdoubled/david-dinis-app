@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.7';
-const APP_BUILD_DATE = '2026-05-09T00:00';
+const APP_VERSION = '3.9.8';
+const APP_BUILD_DATE = '2026-05-09T12:51'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.8', date: '2026-05-09', summary: 'Fix: merge não sobrepõe rows locais não-vazios com rows vazios da cloud (evita perda durante poll de 30s)' },
   { version: '3.9.7', date: '2026-05-09', summary: 'CRITICAL: desactivado auto-cleanup que apagava campanhas com rows ainda em hydration; eager hydration não sobrepõe rows locais não-vazios' },
   { version: '3.9.6', date: '2026-05-09', summary: 'Fix: rows de campanhas carregadas eagerly na startup (como PO2/PO3); erros de upload visíveis na UI' },
   { version: '3.9.5', date: '2026-05-09', summary: 'Fix: Excel de campanhas guardado imediatamente na cloud após upload; fix hydration de rows ao abrir período em novo dispositivo' },
@@ -1457,9 +1458,16 @@ function mergeCampaigns(localList, cloudList) {
   for (const cc of filteredCloud) {
     const k = keyOf(cc);
     const local = map.get(k);
-    // Helper: given a merged object, restore rows/itemCount from local when cloud has none
+    // Helper: given a merged object, restore rows/itemCount from local when
+    // cloud has none. Cloud rows can be empty in two scenarios:
+    //   (a) meta-only fetch (_needsRows: true)
+    //   (b) full fetch but the upload to cloud hasn't completed yet (rows: [])
+    // In BOTH cases we should keep local rows if they exist — otherwise data
+    // gets silently wiped during 30s polling. (v3.9.8)
     const restoreRows = (merged, src) => {
-      if (merged._needsRows && src.rows && src.rows.length > 0) {
+      const cloudHasRows = Array.isArray(merged.rows) && merged.rows.length > 0;
+      const localHasRows = src && Array.isArray(src.rows) && src.rows.length > 0;
+      if (!cloudHasRows && localHasRows) {
         merged.rows = src.rows;
         merged.itemCount = src.itemCount ?? src.rows.length;
         merged._needsRows = false;
