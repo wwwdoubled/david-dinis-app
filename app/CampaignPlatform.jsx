@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.2';
-const APP_BUILD_DATE = '2026-05-07T18:00';
+const APP_VERSION = '3.9.3';
+const APP_BUILD_DATE = '2026-05-09T00:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário carrega descrições dos produtos (hidratação lazy das rows); skeleton no carregamento de campanhas' },
   { version: '3.1.0', date: '2026-05-06', summary: 'Fix: carregamento de campanhas em 2 fases reais (SELECT sem rows + fetch separado); novo Inventário com leitura de códigos de barras por câmara ou leitor' },
   { version: '3.0.3', date: '2026-05-06', summary: 'Plano/Saída: PO2 e PO3 preenchidos automaticamente por EAN; Saída usa lookup dinâmico de stock; auto-preenchimento também grava PO2/PO3' },
   { version: '3.0.2', date: '2026-05-06', summary: 'Fix: famílias excluídas aplicadas também no auto-preenchimento, listagem de zonas, alterações de preço e stock' },
@@ -3597,6 +3598,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             onExport={exportSession} onImport={importSession}
             excludedFamilies={excludedFamilies}
             syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
+            cloudDataLoaded={cloudDataLoaded}
           />}
           {view === 'calendar' && <CalendarView periods={periods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
@@ -3617,6 +3619,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3}
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
             campaigns={filteredCampaigns}
+            setCampaigns={setCampaigns}
             excludedFamilies={excludedFamilies}
           />}
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
@@ -4399,6 +4402,7 @@ function CampaignsView({
   onExport, onImport,
   excludedFamilies = [],
   syncError = null, syncing = false, onClearSyncError,
+  cloudDataLoaded = true,
 }) {
   // Selected period (null = show periods overview / no period entered)
   const [selectedPeriodId, setSelectedPeriodId] = useStoredState('campaigns.selectedPeriodId', null);
@@ -5200,6 +5204,7 @@ function CampaignsView({
           onEdit={(p) => setPeriodDialog({ mode: 'edit', period: p })}
           onDelete={onDeletePeriod}
           onToggleHidden={onToggleHidden}
+          cloudDataLoaded={cloudDataLoaded}
         />
       ) : (
       <>
@@ -6569,7 +6574,7 @@ function formatDate(v) {
 // ─────────────────────────────────────────────────────────────────────────
 // PeriodsOverview — landing screen for Campanhas: shows period cards
 // ─────────────────────────────────────────────────────────────────────────
-function PeriodsOverview({ periods, campaigns, isAdmin, currentUserId, onEnterPeriod, onCreate, onEdit, onDelete, onToggleHidden }) {
+function PeriodsOverview({ periods, campaigns, isAdmin, currentUserId, onEnterPeriod, onCreate, onEdit, onDelete, onToggleHidden, cloudDataLoaded = true }) {
   // Compute counts per period
   const periodStats = useMemo(() => {
     const stats = {};
@@ -6595,6 +6600,24 @@ function PeriodsOverview({ periods, campaigns, isAdmin, currentUserId, onEnterPe
     });
     return out;
   }, [periods]);
+
+  // Show skeleton while cloud data is still loading to avoid "1 campaign then all" flash
+  if (!cloudDataLoaded) {
+    return (
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
+          <div style={{ width: 160, height: 28, background: T.lineSoft, borderRadius: 6, animation: 'pulse 1.4s ease-in-out infinite' }} />
+          <div style={{ width: 120, height: 32, background: T.lineSoft, borderRadius: 6, animation: 'pulse 1.4s ease-in-out infinite' }} />
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {[1,2,3,4].map(i => (
+            <div key={i} style={{ width: 220, height: 140, background: T.lineSoft, borderRadius: 10, animation: 'pulse 1.4s ease-in-out infinite', animationDelay: `${i * 0.1}s` }} />
+          ))}
+        </div>
+        <style>{`@keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:.9} }`}</style>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -11636,7 +11659,7 @@ function toolBtn(disabled = false, danger = false) {
 // ─────────────────────────────────────────────────────────────────────────
 // Inventory Scanner View
 // ─────────────────────────────────────────────────────────────────────────
-function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [] }) {
+function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, setCampaigns, excludedFamilies = [] }) {
   const videoRef = useRef(null);
   const inputRef = useRef(null);
   const streamRef = useRef(null);
@@ -11644,6 +11667,21 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const rafRef = useRef(null);
   const lastEanRef = useRef(null);
   const lastEanTimeRef = useRef(0);
+
+  // Hydrate campaigns that still need rows — so productIndex has descriptions
+  useEffect(() => {
+    if (!setCampaigns || !supabase) return;
+    const needRows = campaigns.filter(c => c.id && (c._needsRows || !c.rows?.length));
+    if (needRows.length === 0) return;
+    cloudFetchCampaignRows(needRows.map(c => c.id)).then(hydrated => {
+      if (!hydrated.length) return;
+      const rowsById = new Map(hydrated.map(h => [h.id, h]));
+      setCampaigns(prev => prev.map(c => {
+        const r = rowsById.get(c.id);
+        return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+      }));
+    }).catch(err => console.warn('[inventory-hydrate]', err));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [scanning, setScanning] = useState(false);
   const [manualEan, setManualEan] = useState('');
@@ -11665,6 +11703,9 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const [cameraError, setCameraError] = useState(null);
   const [mode, setMode] = useState('manual'); // 'camera' | 'manual'
   const [compareWith, setCompareWith] = useStoredState('inventory.compareWith', 'both'); // 'po2' | 'po3' | 'both'
+  const [listView, setListView] = useStoredState('inventory.listView', 'detail'); // 'detail' | 'summary'
+  const [filterFamily, setFilterFamily] = useStoredState('inventory.filterFamily', '');
+  const [filterSubfamily, setFilterSubfamily] = useStoredState('inventory.filterSubfamily', '');
 
   // Build lookup indexes
   const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
@@ -11693,6 +11734,31 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
     }
     return map;
   }, [campaigns, excludedFamilies]);
+
+  // Extract available families and subfamilies from productIndex
+  const { availableFamilies, subfamiliesFor } = useMemo(() => {
+    const famSet = new Set();
+    const subMap = new Map(); // family → Set<subfamily>
+    for (const info of productIndex.values()) {
+      if (info.family) {
+        famSet.add(info.family);
+        if (info.subfamily) {
+          if (!subMap.has(info.family)) subMap.set(info.family, new Set());
+          subMap.get(info.family).add(info.subfamily);
+        }
+      }
+    }
+    return {
+      availableFamilies: [...famSet].sort(),
+      subfamiliesFor: Object.fromEntries([...subMap.entries()].map(([f, s]) => [f, [...s].sort()])),
+    };
+  }, [productIndex]);
+
+  // Reset subfamily filter when family changes
+  const handleFamilyChange = (fam) => {
+    setFilterFamily(fam);
+    setFilterSubfamily('');
+  };
 
   const processEan = useCallback((rawEan) => {
     const ean = normalizeEAN(rawEan);
