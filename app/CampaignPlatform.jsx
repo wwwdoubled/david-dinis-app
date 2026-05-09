@@ -525,7 +525,7 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.4';
+const APP_VERSION = '3.9.5';
 const APP_BUILD_DATE = '2026-05-09T00:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.5', date: '2026-05-09', summary: 'Fix: Excel de campanhas guardado imediatamente na cloud após upload; fix hydration de rows ao abrir período em novo dispositivo' },
   { version: '3.9.4', date: '2026-05-09', summary: 'Admin: separador Cloud para ver e apagar campanhas, snapshots PO2/PO3 e períodos da cloud' },
   { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário lê descrição/família directamente do PO2/PO3; skeleton no carregamento de campanhas' },
   { version: '3.1.0', date: '2026-05-06', summary: 'Fix: carregamento de campanhas em 2 fases reais (SELECT sem rows + fetch separado); novo Inventário com leitura de códigos de barras por câmara ou leitor' },
@@ -4489,12 +4490,25 @@ function CampaignsView({
   // makes the startup fast in cloud-only mode.
   const hydratedPeriodsRef = useRef(new Set());
   const [hydratingPeriod, setHydratingPeriod] = useState(false);
+
+  // When cloud data arrives, clear the hydration cache so rows are re-fetched
+  // for any period that was marked "done" before the cloud data loaded.
+  const prevCloudDataLoadedRef = useRef(false);
+  useEffect(() => {
+    if (cloudDataLoaded && !prevCloudDataLoadedRef.current) {
+      hydratedPeriodsRef.current.clear();
+    }
+    prevCloudDataLoadedRef.current = cloudDataLoaded;
+  }, [cloudDataLoaded]);
+
   useEffect(() => {
     if (!selectedPeriodId) return;
     if (hydratedPeriodsRef.current.has(selectedPeriodId)) return;
     const needRows = scopedCampaigns.filter(c => c.id && (c._needsRows || !c.rows?.length));
     if (needRows.length === 0) {
-      hydratedPeriodsRef.current.add(selectedPeriodId);
+      // Only mark as done when we're sure cloud data is loaded; otherwise a later
+      // cloud fetch could bring in campaigns that still need rows.
+      if (cloudDataLoaded) hydratedPeriodsRef.current.add(selectedPeriodId);
       return;
     }
     setHydratingPeriod(true);
@@ -4507,7 +4521,7 @@ function CampaignsView({
       hydratedPeriodsRef.current.add(selectedPeriodId);
     }).catch(err => console.warn('[lazy-hydrate] failed', err))
       .finally(() => setHydratingPeriod(false));
-  }, [selectedPeriodId, scopedCampaigns, setCampaigns]);
+  }, [selectedPeriodId, scopedCampaigns, setCampaigns, cloudDataLoaded]);
 
   // Auto-activate ALL campaigns in the period by default (single shared plan)
   useEffect(() => {
@@ -4689,6 +4703,16 @@ function CampaignsView({
       };
       setCampaigns(cs => cs.map(c => c.id === existingInSession.id ? updated : c));
       setActiveIds(ids => ids.includes(existingInSession.id) ? ids : [...ids, existingInSession.id]);
+      // Immediate cloud push so rows persist across devices (Option A)
+      if (user && supabase) {
+        cloudUpsertCampaign({ ...updated, user_id: updated.user_id || user.id }, user.id).then(res => {
+          if (res?.data?.id && !isUUID(String(updated.id))) {
+            setCampaigns(prev => prev.map(x =>
+              x.id === updated.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x
+            ));
+          }
+        }).catch(e => console.warn('[handleFile] cloud push failed (existing)', e));
+      }
       setUploadStatus({
         kind: 'success',
         message: movedFromOtherPeriod
@@ -4764,6 +4788,16 @@ function CampaignsView({
       setActiveIds(ids => [c.id, ...ids]);
       setUploadStatus({ kind: 'success', message: `"${file.name}" carregado — ${rows.length} produtos. A guardar na cloud…` });
       setTimeout(() => setUploadStatus(null), 4000);
+      // Immediate cloud push so rows persist across devices (Option A)
+      if (user && supabase) {
+        cloudUpsertCampaign({ ...c, user_id: user.id }, user.id).then(res => {
+          if (res?.data?.id && !isUUID(String(c.id))) {
+            setCampaigns(prev => prev.map(x =>
+              x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x
+            ));
+          }
+        }).catch(e => console.warn('[handleFile] cloud push failed (new)', e));
+      }
       if (memoryHits > 0) {
         setTimeout(() => alert(`A memória de zonas pré-atribuiu ${memoryHits} ${memoryHits === 1 ? 'produto' : 'produtos'} com base em campanhas anteriores. Confirma na vista "Plano".`), 200);
       }
@@ -4776,6 +4810,16 @@ function CampaignsView({
     setCampaigns(p => [c, ...p]);
     setActiveIds(ids => [c.id, ...ids]);
     setRestoreInfo(null);
+    // Immediate cloud push so rows persist across devices (Option A)
+    if (user && supabase) {
+      cloudUpsertCampaign({ ...c, user_id: user.id }, user.id).then(res => {
+        if (res?.data?.id && !isUUID(String(c.id))) {
+          setCampaigns(prev => prev.map(x =>
+            x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x
+          ));
+        }
+      }).catch(e => console.warn('[handleFile] cloud push failed (restore)', e));
+    }
   };
 
   // Zone management — operate on primary campaign's floors (or defaultLayout)
