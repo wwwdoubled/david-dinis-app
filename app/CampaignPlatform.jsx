@@ -525,7 +525,7 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.6';
+const APP_VERSION = '3.9.7';
 const APP_BUILD_DATE = '2026-05-09T00:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.7', date: '2026-05-09', summary: 'CRITICAL: desactivado auto-cleanup que apagava campanhas com rows ainda em hydration; eager hydration não sobrepõe rows locais não-vazios' },
   { version: '3.9.6', date: '2026-05-09', summary: 'Fix: rows de campanhas carregadas eagerly na startup (como PO2/PO3); erros de upload visíveis na UI' },
   { version: '3.9.5', date: '2026-05-09', summary: 'Fix: Excel de campanhas guardado imediatamente na cloud após upload; fix hydration de rows ao abrir período em novo dispositivo' },
   { version: '3.9.4', date: '2026-05-09', summary: 'Admin: separador Cloud para ver e apagar campanhas, snapshots PO2/PO3 e períodos da cloud' },
@@ -2742,7 +2743,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           const rowsById = new Map(hydrated.map(h => [h.id, h]));
           setCampaigns(prev => prev.map(c => {
             const r = rowsById.get(c.id);
-            return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+            if (!r) return c;
+            // Don't overwrite local rows if cloud returned empty — keep what we have
+            if ((!r.rows || r.rows.length === 0) && Array.isArray(c.rows) && c.rows.length > 0) {
+              return { ...c, _needsRows: false };
+            }
+            return { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false };
           }));
           console.log(`[startup] eager hydration done`);
         } catch (e) {
@@ -2947,34 +2953,11 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     }
   }, [cloudDataLoaded, user, periods, campaigns]);
 
-  // Auto-cleanup: remove campaigns confirmed empty (rows = [] AND not waiting for hydration).
-  // Runs every time campaigns change so cloud-resynced empties are also caught.
-  // Uses a ref to avoid re-firing for the same set of ids.
-  const lastCleanedRef = useRef(new Set());
-  useEffect(() => {
-    if (!cloudDataLoaded || !user) return;
-    const emptyIds = campaigns
-      .filter(c =>
-        c.id &&
-        !c._needsRows &&
-        !c._rowsCompressed &&
-        Array.isArray(c.rows) && c.rows.length === 0 &&
-        (c.itemCount === 0 || c.itemCount == null)
-      )
-      .map(c => c.id);
-    if (emptyIds.length === 0) return;
-    // Skip if we already cleaned exactly these
-    const key = emptyIds.sort().join(',');
-    if (lastCleanedRef.current.has(key)) return;
-    lastCleanedRef.current.add(key);
-    console.log('[cleanup] removing', emptyIds.length, 'empty campaigns:', emptyIds);
-    emptyIds.forEach(id => addTombstone('campaign', id));
-    setCampaigns(cs => cs.filter(c => !emptyIds.includes(c.id)));
-    emptyIds.forEach(id => {
-      idbDelete(id).catch(() => {});
-      if (isUUID(String(id))) cloudDeleteCampaign(id).catch(() => {});
-    });
-  }, [campaigns, cloudDataLoaded, user]);
+  // Auto-cleanup DISABLED (v3.9.6) — it was incorrectly removing campaigns whose
+  // rows hadn't been hydrated yet (race with cloud meta fetch returning rows:[]
+  // and itemCount:-1 before lazy/eager hydration had a chance to fill them).
+  // If the user wants to delete a campaign they can do so manually from the UI.
+  const lastCleanedRef = useRef(new Set()); // kept for back-compat (unused now)
 
   // Persist campaigns to IndexedDB — but ONLY the fields that change frequently
   // (floors, periodId, name) and ONLY campaigns that actually changed.
