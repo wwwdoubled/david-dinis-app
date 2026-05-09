@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.11.0';
-const APP_BUILD_DATE = '2026-05-09T18:13'; // Europe/Lisbon
+const APP_VERSION = '3.11.1';
+const APP_BUILD_DATE = '2026-05-09T18:19'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.11.1', date: '2026-05-09', summary: 'Alterações: re-introduzido o filtro por dia (dropdown "Todas as datas") como sub-componente isolado <ChangesDateFilter/>. O bug anterior (ReferenceError) era porque a JSX vivia dentro de <ChangesReport/> mas as variáveis estavam só em ChangesView e não eram passadas como props.' },
   { version: '3.11.0', date: '2026-05-09', summary: 'Mobile UX refresh: botões compactos com text-overflow ellipsis (não saem da div), filter rows com scroll horizontal touch (não wrap), inputs/selects 36-38px de altura, headers 24/20px, padding interno reduzido em todos os cards/containers, tabelas com min-width 480px e scroll. Mantém o tema actual.' },
   { version: '3.10.10', date: '2026-05-09', summary: 'Mobile: widget de sessão removido COMPLETAMENTE do DOM em mobile (matchMedia + render condicional) — em vez de só escondido via CSS — para evitar sobreposição persistente em alguns browsers' },
   { version: '3.10.9', date: '2026-05-09', summary: 'Mobile fixes: widget de sessão (utilizador/sync/tema) escondido no bottom-nav em mobile (causava sobreposição); FABs (blueprint/notas/notificações) levantados para 80/132/184px em mobile e mais pequenos (42px) para libertar o nav inferior' },
@@ -9883,6 +9884,39 @@ function buildPeriodCompareWith(periodId, campaigns, periods, excludedFamilies =
   };
 }
 
+// Standalone dropdown for filtering Alterações by change-date.
+// Extracted to its own component so the SWC minifier can rename internal
+// identifiers consistently (the previous inline version inside ChangesView
+// was triggering a "ReferenceError: ... is not defined" in production builds).
+function ChangesDateFilter(props) {
+  const dates = props.dates || [];
+  const value = props.value || '';
+  const onChange = props.onChange;
+  if (dates.length === 0) return null;
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange && onChange(e.target.value)}
+      title="Filtrar por dia da alteração (coluna Data Início)"
+      style={{
+        padding: '6px 10px', fontSize: 11, fontWeight: 500, borderRadius: 6,
+        border: `1px solid ${value ? T.accent : T.line}`,
+        background: value ? (T.accentSoft || '#eef2ff') : T.bgEl,
+        color: value ? T.accent : T.inkSoft,
+        cursor: 'pointer', fontFamily: 'inherit',
+      }}
+    >
+      <option value="">Todas as datas</option>
+      {dates.map((d) => {
+        const parts = d.date.split('-');
+        const y = parts[0]; const m = parts[1]; const day = parts[2];
+        const label = day + '/' + m + '/' + y.slice(2) + ' (' + d.count + ')';
+        return <option key={d.date} value={d.date}>{label}</option>;
+      })}
+    </select>
+  );
+}
+
 function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, user, excludedFamilies = [] }) {
   // ── "Novo" side (left) ───────────────────────────────────────────────────
   const [newSource, setNewSource] = useStoredState('changes.newSource', 'period'); // 'period'|'campaign'|'upload'
@@ -9901,7 +9935,8 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [search, setSearch] = useStoredState('changes.search', '');
   const [filterAveiro, setFilterAveiro] = useStoredState('changes.filterAveiro', false);
   const [filterFamily, setFilterFamily] = useStoredState('changes.filterFamily', '');
-  // (date filter dropdown removed — caused a bundler issue; column "Data" still shows in the table.) v3.10.7
+  // Date filter (re-added in v3.11.1 as standalone <ChangesDateFilter/> component)
+  const [dayFilter, setDayFilter] = useState('');
 
   // Load last uploaded snapshot from cloud (only relevant when source='upload')
   useEffect(() => {
@@ -10143,6 +10178,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged.map(p => ({ ...p, kind: 'unchanged' })));
     if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
     if (filterFamily && filterFamily !== 'all') items = items.filter(p => p.family === filterFamily);
+    if (dayFilter) items = items.filter(p => p.changeDate === dayFilter);
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -10152,7 +10188,23 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
       );
     }
     return items;
-  }, [diff, filter, filterAveiro, filterFamily, search]);
+  }, [diff, filter, filterAveiro, filterFamily, dayFilter, search]);
+
+  // Distinct change-dates for the dropdown filter (grouped by day with counts).
+  const changeDateOptions = useMemo(() => {
+    if (!diff) return [];
+    const counts = new Map();
+    const all = (diff.added || []).concat(diff.changed || []).concat(diff.removed || []).concat(diff.unchanged || []);
+    for (let i = 0; i < all.length; i++) {
+      const d = all[i].changeDate;
+      if (!d) continue;
+      counts.set(d, (counts.get(d) || 0) + 1);
+    }
+    const list = [];
+    counts.forEach((count, date) => list.push({ date, count }));
+    list.sort((a, b) => b.date.localeCompare(a.date));
+    return list;
+  }, [diff]);
 
   const exportDiff = () => {
     if (!diff) return;
@@ -10355,6 +10407,9 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               search={search}
               setSearch={setSearch}
               filteredItems={filteredItems}
+              dayFilter={dayFilter}
+              setDayFilter={setDayFilter}
+              changeDateOptions={changeDateOptions}
               onClear={handleClear}
               onExport={exportDiff}
               stockRowsPO3={stockRowsPO3}
@@ -10366,7 +10421,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, onClear, onExport, stockRowsPO3 }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3 }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
@@ -10444,6 +10499,8 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             }}>{f.l}</button>
           ))}
         </div>
+        {/* Filtro por dia da alteração (re-added v3.11.1) */}
+        <ChangesDateFilter dates={changeDateOptions} value={dayFilter} onChange={setDayFilter} />
         {/* Stock Aveiro (PO3) filter — só aparece se houver dados de stock */}
         {(stockRowsPO3?.length > 0) && (
           <button
