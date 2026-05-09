@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.9';
-const APP_BUILD_DATE = '2026-05-09T18:04'; // Europe/Lisbon
+const APP_VERSION = '3.10.10';
+const APP_BUILD_DATE = '2026-05-09T18:07'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.10', date: '2026-05-09', summary: 'Mobile: widget de sessão removido COMPLETAMENTE do DOM em mobile (matchMedia + render condicional) — em vez de só escondido via CSS — para evitar sobreposição persistente em alguns browsers' },
   { version: '3.10.9', date: '2026-05-09', summary: 'Mobile fixes: widget de sessão (utilizador/sync/tema) escondido no bottom-nav em mobile (causava sobreposição); FABs (blueprint/notas/notificações) levantados para 80/132/184px em mobile e mais pequenos (42px) para libertar o nav inferior' },
   { version: '3.10.8', date: '2026-05-09', summary: 'Layout mobile redesenhado: bottom-nav fixo com ícones+labels verticais, grids fixos colapsam para 1-2 colunas em tablet/telemóvel, FABs (blueprint/notas/notificações) afastados do nav inferior, modais full-screen, paddings reduzidos' },
   { version: '3.10.7', date: '2026-05-09', summary: 'Fix: dropdown de filtro por data nas Alterações removido (causava ReferenceError no build). A coluna "Data" continua na tabela e a data continua no CSV exportado.' },
@@ -3598,8 +3599,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           }
           aside.no-print nav { flex-direction: row !important; gap: 2px !important; flex: 1 !important; flex-wrap: nowrap !important; }
           aside.no-print h1, aside.no-print .display { display: none !important; }
-          /* Hide the absolute-positioned session widget in bottom-nav mode */
-          .sidebar-session-widget { display: none !important; }
+          /* Hide the absolute-positioned session widget in bottom-nav mode.
+             Multiple selectors for max specificity over inline styles. */
+          aside.no-print .sidebar-session-widget,
+          aside.no-print > .sidebar-session-widget,
+          aside.no-print div.sidebar-session-widget {
+            display: none !important;
+            visibility: hidden !important;
+            position: absolute !important;
+            top: -9999px !important;
+            left: -9999px !important;
+            width: 0 !important;
+            height: 0 !important;
+            overflow: hidden !important;
+            pointer-events: none !important;
+          }
           aside.no-print button {
             padding: 6px 8px !important; font-size: 9px !important;
             flex-shrink: 0 !important; min-width: 52px !important; min-height: 48px !important;
@@ -3973,6 +3987,17 @@ function SyncIndicator({ status, isOnline }) {
 function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme }) {
   const userRole = userProfile?.role || 'user';
   const notifCount = (notifications || []).length;
+  // Detect mobile viewport — used to render-skip the absolute session widget
+  // (was overlapping the bottom-nav even with display:none in some browsers).
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(max-width: 900px)');
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener ? mq.addEventListener('change', update) : mq.addListener(update);
+    return () => { mq.removeEventListener ? mq.removeEventListener('change', update) : mq.removeListener(update); };
+  }, []);
   const allItems = [
     { id: 'dashboard', label: 'Visão Geral', icon: LayoutDashboard },
     { id: 'sales', label: 'Análise de Vendas', icon: BarChart3, badge: candidates.length || null },
@@ -4056,6 +4081,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
         })}
       </nav>
 
+      {!isMobile && (
       <div className="sidebar-session-widget" style={{ position: 'absolute', bottom: 32, left: 24, right: 24 }}>
         <div style={{ padding: 16, background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8 }}>
           <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 6 }}>
@@ -4098,6 +4124,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
         {/* App version footer */}
         <VersionFooter />
       </div>
+      )}
     </aside>
   );
 }
