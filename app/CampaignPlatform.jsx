@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.8';
-const APP_BUILD_DATE = '2026-05-09T12:51'; // Europe/Lisbon
+const APP_VERSION = '3.9.9';
+const APP_BUILD_DATE = '2026-05-09T13:08'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.9', date: '2026-05-09', summary: 'UI: indicador visual de urgência nos cards das campanhas — badge "HOJE" pulsante, "−Xd" para terminadas há pouco, "Xd" para 1–5 dias até ao fim, tinta vermelha no fundo quando crítica' },
   { version: '3.9.8', date: '2026-05-09', summary: 'Fix: merge não sobrepõe rows locais não-vazios com rows vazios da cloud (evita perda durante poll de 30s)' },
   { version: '3.9.7', date: '2026-05-09', summary: 'CRITICAL: desactivado auto-cleanup que apagava campanhas com rows ainda em hydration; eager hydration não sobrepõe rows locais não-vazios' },
   { version: '3.9.6', date: '2026-05-09', summary: 'Fix: rows de campanhas carregadas eagerly na startup (como PO2/PO3); erros de upload visíveis na UI' },
@@ -6823,6 +6824,29 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
   const isOwner = period.created_by === currentUserId || period.user_id === currentUserId;
   const canEdit = isOwner || isAdmin;
 
+  // Compute "ending soon" state for visual urgency indicators (v3.9.9)
+  // Tier 1 (today/overdue): red pulsing badge + red border + bg tint
+  // Tier 2 (1–2 days):       amber badge + amber border-left
+  // Tier 3 (3–5 days):       subtle yellow indicator
+  const urgency = useMemo(() => {
+    if (!period.endDate || status === 'finished') return null;
+    if (status !== 'active') return null;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const end = new Date(period.endDate); end.setHours(0, 0, 0, 0);
+    const days = Math.round((end - today) / 86400000);
+    if (days < 0) return { tier: 'overdue', days, label: `Terminou há ${Math.abs(days)} ${Math.abs(days) === 1 ? 'dia' : 'dias'}`, color: T.red };
+    if (days === 0) return { tier: 'today', days, label: 'TERMINA HOJE', color: T.red };
+    if (days <= 2) return { tier: 'soon', days, label: `Termina em ${days} ${days === 1 ? 'dia' : 'dias'}`, color: '#d97706' };
+    if (days <= 5) return { tier: 'upcoming', days, label: `Termina em ${days} dias`, color: '#ca8a04' };
+    return null;
+  }, [period.endDate, status]);
+
+  // Override the left-border colour with urgency colour when applicable
+  const leftBorderColor = period.hidden ? T.inkMute : (urgency ? urgency.color : statusColor);
+  const cardBg = (urgency && (urgency.tier === 'today' || urgency.tier === 'overdue'))
+    ? '#fef2f2'
+    : (period.hidden ? T.bgEl : T.paper);
+
   const handleDelete = (e) => {
     e.stopPropagation();
     if (!confirm(`Eliminar a campanha "${period.name}"?\n\nOs Excels dentro ficam disponíveis mas sem campanha associada.`)) return;
@@ -6844,17 +6868,37 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
     <div
       onClick={onEnter}
       style={{
-        padding: 18, background: period.hidden ? T.bgEl : T.paper,
-        border: `1px solid ${period.hidden ? T.line : T.line}`,
-        borderLeft: `3px solid ${period.hidden ? T.inkMute : statusColor}`,
+        padding: 18, background: cardBg,
+        border: `1px solid ${T.line}`,
+        borderLeft: `3px solid ${leftBorderColor}`,
         borderRadius: 8, cursor: 'pointer',
         opacity: dimmed ? 0.65 : 1,
         transition: 'all 0.15s',
         position: 'relative',
+        boxShadow: urgency?.tier === 'today' || urgency?.tier === 'overdue' ? `0 0 0 1px ${urgency.color}33` : 'none',
       }}
       onMouseEnter={e => { e.currentTarget.style.borderColor = T.ink; }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = T.line; }}
     >
+      {/* Urgency badge — top-right, replaces "escondida" position priority */}
+      {urgency && !period.hidden && (
+        <span
+          className="mono"
+          style={{
+            position: 'absolute', top: 10, right: 10,
+            fontSize: 9, padding: '3px 7px',
+            background: urgency.color, color: '#fff',
+            borderRadius: 4, fontWeight: 700, letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            display: 'flex', alignItems: 'center', gap: 4,
+            animation: urgency.tier === 'today' ? 'urgencyPulse 1.4s ease-in-out infinite' : 'none',
+            boxShadow: urgency.tier === 'today' ? `0 0 0 0 ${urgency.color}` : 'none',
+          }}
+        >
+          <Clock size={9} strokeWidth={2.5} />
+          {urgency.tier === 'today' ? 'HOJE' : urgency.tier === 'overdue' ? `−${Math.abs(urgency.days)}d` : `${urgency.days}d`}
+        </span>
+      )}
       {period.hidden && isAdmin && (
         <span style={{
           position: 'absolute', top: 10, right: 10,
@@ -6863,6 +6907,16 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
           fontFamily: 'Geist Mono', textTransform: 'uppercase',
         }}>ESCONDIDA</span>
       )}
+      <style>{`
+        @keyframes urgencyPulse {
+          0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+          50% { box-shadow: 0 0 0 6px transparent; opacity: 0.85; }
+        }
+        @keyframes urgencyDot {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.4); opacity: 0.6; }
+        }
+      `}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 8 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="mono" style={{ fontSize: 9, letterSpacing: '0.12em', color: statusColor, textTransform: 'uppercase', marginBottom: 4, fontWeight: 600 }}>
@@ -6874,6 +6928,21 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
           <div style={{ fontSize: 11, color: T.inkSoft }}>
             {formatPeriodDates(period)}
           </div>
+          {urgency && (
+            <div className="mono" style={{
+              marginTop: 8,
+              fontSize: 10, fontWeight: 700, color: urgency.color,
+              letterSpacing: '0.05em',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: urgency.color,
+                animation: urgency.tier === 'today' ? 'urgencyDot 1.2s ease-in-out infinite' : 'none',
+              }} />
+              {urgency.label}
+            </div>
+          )}
         </div>
         {canEdit && (
           <div style={{ display: 'flex', gap: 4 }}>
