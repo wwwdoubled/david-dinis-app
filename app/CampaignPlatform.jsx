@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.10';
-const APP_BUILD_DATE = '2026-05-09T18:07'; // Europe/Lisbon
+const APP_VERSION = '3.11.0';
+const APP_BUILD_DATE = '2026-05-09T18:13'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.11.0', date: '2026-05-09', summary: 'Mobile UX refresh: botões compactos com text-overflow ellipsis (não saem da div), filter rows com scroll horizontal touch (não wrap), inputs/selects 36-38px de altura, headers 24/20px, padding interno reduzido em todos os cards/containers, tabelas com min-width 480px e scroll. Mantém o tema actual.' },
   { version: '3.10.10', date: '2026-05-09', summary: 'Mobile: widget de sessão removido COMPLETAMENTE do DOM em mobile (matchMedia + render condicional) — em vez de só escondido via CSS — para evitar sobreposição persistente em alguns browsers' },
   { version: '3.10.9', date: '2026-05-09', summary: 'Mobile fixes: widget de sessão (utilizador/sync/tema) escondido no bottom-nav em mobile (causava sobreposição); FABs (blueprint/notas/notificações) levantados para 80/132/184px em mobile e mais pequenos (42px) para libertar o nav inferior' },
   { version: '3.10.8', date: '2026-05-09', summary: 'Layout mobile redesenhado: bottom-nav fixo com ícones+labels verticais, grids fixos colapsam para 1-2 colunas em tablet/telemóvel, FABs (blueprint/notas/notificações) afastados do nav inferior, modais full-screen, paddings reduzidos' },
@@ -3573,8 +3574,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           .print-area .fade-up { animation: none !important; }
         }
 
-        /* ─── Mobile responsive (v3.10.8) ─── */
-        /* Tablet & phone: collapse sidebar to bottom nav, simplify layout */
+        /* ─── Mobile responsive (v3.11.0) — comprehensive UX refresh ─── */
+        /* Strategy: minimalist, single column, compact controls, horizontal
+           scroll for filter rows, ellipsis for long button labels, no overflow. */
         @media (max-width: 900px) {
           aside.no-print {
             position: fixed !important;
@@ -3674,6 +3676,92 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           }
           /* Allow horizontal scroll for any grid that doesn't fit */
           [style*="overflow-x"] { -webkit-overflow-scrolling: touch; }
+
+          /* ── Botões de conteúdo (FORA do bottom-nav) ──
+             Ficam compactos, com texto truncado em vez de overflow e min-height
+             confortável para toque. */
+          main button {
+            font-size: 12px !important;
+            padding: 8px 10px !important;
+            min-height: 36px !important;
+            max-width: 100% !important;
+            white-space: nowrap !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+          }
+          main button[style*="font-size: 9"], main button[style*="fontSize:9"],
+          main button[style*="font-size: 10"], main button[style*="fontSize:10"],
+          main button[style*="font-size: 11"], main button[style*="fontSize:11"] {
+            padding: 6px 8px !important;
+            font-size: 11px !important;
+          }
+          /* Inputs / selects compactos com texto legível para toque */
+          main input, main select, main textarea {
+            font-size: 14px !important;
+            padding: 8px 10px !important;
+            min-height: 36px !important;
+            box-sizing: border-box !important;
+          }
+
+          /* ── Linhas de filtros: scroll horizontal sem wrap ──
+             Quando há muitos filtros (Alterações, listagem) deslizam em vez de
+             quebrarem para a próxima linha e sobrepoõem-se. */
+          [style*="flexWrap: 'wrap'"][style*="display: 'flex'"],
+          [style*="flex-wrap: wrap"][style*="display: flex"] {
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch !important;
+            padding-bottom: 4px !important;
+            scrollbar-width: thin !important;
+          }
+          /* Containers de chips/filters mantêm padding interno fluído */
+          main [style*="gap: 8"] > button,
+          main [style*="gap: 6"] > button,
+          main [style*="gap: 4"] > button {
+            flex-shrink: 0 !important;
+          }
+
+          /* ── Headers (Header component) ──
+             Menos padding em altura, título em duas linhas se necessário. */
+          main > div > div:first-child h1,
+          main > div > div:first-child h2 {
+            font-size: 24px !important;
+            line-height: 1.15 !important;
+            margin-bottom: 4px !important;
+          }
+          /* Subtítulo legível em mobile sem ocupar muito espaço */
+          main p { font-size: 13px !important; line-height: 1.4 !important; }
+
+          /* ── ChangesView específicos ──
+             O painel de fontes (Período/Campanha/Upload) com 3 tabs e os
+             chips de filtros (Todos/Novos/Alterados/...). */
+          /* Tabs de fonte: scroll horizontal */
+          [style*="display: 'flex'"][style*="gap: 4"] > button,
+          [style*="display:flex"][style*="gap:4"] > button {
+            flex-shrink: 0 !important;
+          }
+          /* Cartões de stats — padding mais pequeno em mobile */
+          [style*="padding: '24px 20px'"], [style*="padding: '40px 32px'"] {
+            padding: 16px !important;
+          }
+          [style*="padding: '32px'"] {
+            padding: 18px !important;
+          }
+          /* Display fonts (números grandes nos cards) — reduz */
+          .display { font-size: 28px !important; }
+          /* Header eyebrow (label cinzento por cima do título) */
+          [style*="letterSpacing: '0.15em'"][style*="textTransform: 'uppercase'"] {
+            font-size: 9px !important;
+          }
+
+          /* ── Tabelas: padding menor para caber mais info ── */
+          table th, table td { padding: 6px 8px !important; }
+
+          /* ── Cards genéricos: garantir que não vão além do viewport ── */
+          main [style*="border-radius"], main [style*="borderRadius"] {
+            box-sizing: border-box !important;
+            max-width: 100% !important;
+          }
         }
 
         @media (max-width: 600px) {
@@ -3687,19 +3775,39 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             grid-template-columns: 1fr !important;
           }
           .phone-hide { display: none !important; }
-          /* Larger touch targets */
-          input, select, button { font-size: 14px !important; }
-          button { min-height: 36px; }
-          /* Reduce display font further */
-          h1, h2, .display { font-size: 20px !important; }
-          /* Header subtitle truncate */
+          /* Headers ainda mais pequenos */
+          main > div > div:first-child h1,
+          main > div > div:first-child h2,
+          h1, h2 { font-size: 20px !important; }
+          .display { font-size: 24px !important; }
+          /* Padding lateral compacto */
           main { padding: 16px 12px 84px !important; }
+          /* Botões de conteúdo: ainda mais compactos */
+          main button {
+            font-size: 11px !important;
+            padding: 7px 9px !important;
+            min-height: 34px !important;
+          }
+          /* Inputs com altura confortável para teclado mobile */
+          main input, main select, main textarea {
+            font-size: 14px !important;
+            padding: 8px !important;
+            min-height: 38px !important;
+          }
           /* Bottom-nav buttons: tighter on small screens */
           aside.no-print button {
             min-width: 46px !important; padding: 5px 6px !important;
             font-size: 8px !important;
           }
           aside.no-print button span { font-size: 8px !important; }
+          /* Tabelas: scroll horizontal em containers */
+          table { font-size: 11px !important; min-width: 480px !important; }
+          /* Cards de stats — menos padding ainda */
+          [style*="padding: '24px 20px'"],
+          [style*="padding: '20px'"] { padding: 14px !important; }
+          /* Padding interno de qualquer "container" rounded */
+          main [style*="padding: 32"],
+          main [style*="padding: 40"] { padding: 16px !important; }
         }
       `}</style>
 
