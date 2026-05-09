@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.8';
-const APP_BUILD_DATE = '2026-05-09T17:53'; // Europe/Lisbon
+const APP_VERSION = '3.10.9';
+const APP_BUILD_DATE = '2026-05-09T18:04'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.9', date: '2026-05-09', summary: 'Mobile fixes: widget de sessão (utilizador/sync/tema) escondido no bottom-nav em mobile (causava sobreposição); FABs (blueprint/notas/notificações) levantados para 80/132/184px em mobile e mais pequenos (42px) para libertar o nav inferior' },
   { version: '3.10.8', date: '2026-05-09', summary: 'Layout mobile redesenhado: bottom-nav fixo com ícones+labels verticais, grids fixos colapsam para 1-2 colunas em tablet/telemóvel, FABs (blueprint/notas/notificações) afastados do nav inferior, modais full-screen, paddings reduzidos' },
   { version: '3.10.7', date: '2026-05-09', summary: 'Fix: dropdown de filtro por data nas Alterações removido (causava ReferenceError no build). A coluna "Data" continua na tabela e a data continua no CSV exportado.' },
   { version: '3.10.6', date: '2026-05-09', summary: 'Visão geral: 4 novas secções num grid 2x2 — Top Famílias do Plano (com barras), Próximas Campanhas (badge HOJE/AMANHÃ/+Xd), Cartazes Pendentes (em períodos terminados), Últimas Alterações (activity log)' },
@@ -3597,6 +3598,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           }
           aside.no-print nav { flex-direction: row !important; gap: 2px !important; flex: 1 !important; flex-wrap: nowrap !important; }
           aside.no-print h1, aside.no-print .display { display: none !important; }
+          /* Hide the absolute-positioned session widget in bottom-nav mode */
+          .sidebar-session-widget { display: none !important; }
           aside.no-print button {
             padding: 6px 8px !important; font-size: 9px !important;
             flex-shrink: 0 !important; min-width: 52px !important; min-height: 48px !important;
@@ -3640,10 +3643,20 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           .period-grid { grid-template-columns: 1fr !important; }
 
           /* Floating action buttons — push higher to clear bottom nav (64px) */
-          button[title="Vista da loja (blueprint)"],
-          button[title="Notas"],
+          button[title="Vista da loja (blueprint)"] {
+            right: 14px !important;
+            bottom: 80px !important;
+            width: 42px !important; height: 42px !important;
+          }
+          button[title="Notas"] {
+            right: 14px !important;
+            bottom: 132px !important;
+            width: 42px !important; height: 42px !important;
+          }
           button[title="Notificações"] {
             right: 14px !important;
+            bottom: 184px !important;
+            width: 42px !important; height: 42px !important;
           }
           /* Allow horizontal scroll for any grid that doesn't fit */
           [style*="overflow-x"] { -webkit-overflow-scrolling: touch; }
@@ -4043,7 +4056,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
         })}
       </nav>
 
-      <div style={{ position: 'absolute', bottom: 32, left: 24, right: 24 }}>
+      <div className="sidebar-session-widget" style={{ position: 'absolute', bottom: 32, left: 24, right: 24 }}>
         <div style={{ padding: 16, background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8 }}>
           <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 6 }}>
             {user ? 'Sessão' : 'Workspace'}
