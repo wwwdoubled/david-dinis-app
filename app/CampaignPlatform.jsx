@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.9';
-const APP_BUILD_DATE = '2026-05-09T13:08'; // Europe/Lisbon
+const APP_VERSION = '3.10.0';
+const APP_BUILD_DATE = '2026-05-09T13:17'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.0', date: '2026-05-09', summary: 'UI: badge de urgência ao lado dos botões (sem sobrepor); hover suave (scale + tint) nos botões editar/esconder/eliminar; countdown HH:MM:SS no último dia; auto-tick para passar a "Terminadas" quando o relógio bate 00:00' },
   { version: '3.9.9', date: '2026-05-09', summary: 'UI: indicador visual de urgência nos cards das campanhas — badge "HOJE" pulsante, "−Xd" para terminadas há pouco, "Xd" para 1–5 dias até ao fim, tinta vermelha no fundo quando crítica' },
   { version: '3.9.8', date: '2026-05-09', summary: 'Fix: merge não sobrepõe rows locais não-vazios com rows vazios da cloud (evita perda durante poll de 30s)' },
   { version: '3.9.7', date: '2026-05-09', summary: 'CRITICAL: desactivado auto-cleanup que apagava campanhas com rows ainda em hydration; eager hydration não sobrepõe rows locais não-vazios' },
@@ -6824,22 +6825,47 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
   const isOwner = period.created_by === currentUserId || period.user_id === currentUserId;
   const canEdit = isOwner || isAdmin;
 
+  // Re-render every second when on last day (for countdown), every minute otherwise.
+  // This also makes the card auto-transition to "Terminadas" when the clock hits 00:00.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!period.endDate) return;
+    // Determine cadence based on whether today is the last day
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const end = new Date(period.endDate); end.setHours(0, 0, 0, 0);
+    const isLastDay = today.getTime() === end.getTime();
+    const cadence = isLastDay ? 1000 : 60000;
+    const id = setInterval(() => setTick(t => t + 1), cadence);
+    return () => clearInterval(id);
+  }, [period.endDate]);
+
   // Compute "ending soon" state for visual urgency indicators (v3.9.9)
-  // Tier 1 (today/overdue): red pulsing badge + red border + bg tint
+  // Tier 1 (today/overdue): red pulsing badge + red border + bg tint, with HH:MM:SS countdown on last day
   // Tier 2 (1–2 days):       amber badge + amber border-left
   // Tier 3 (3–5 days):       subtle yellow indicator
   const urgency = useMemo(() => {
     if (!period.endDate || status === 'finished') return null;
     if (status !== 'active') return null;
+    const now = new Date();
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const end = new Date(period.endDate); end.setHours(0, 0, 0, 0);
     const days = Math.round((end - today) / 86400000);
-    if (days < 0) return { tier: 'overdue', days, label: `Terminou há ${Math.abs(days)} ${Math.abs(days) === 1 ? 'dia' : 'dias'}`, color: T.red };
-    if (days === 0) return { tier: 'today', days, label: 'TERMINA HOJE', color: T.red };
-    if (days <= 2) return { tier: 'soon', days, label: `Termina em ${days} ${days === 1 ? 'dia' : 'dias'}`, color: '#d97706' };
-    if (days <= 5) return { tier: 'upcoming', days, label: `Termina em ${days} dias`, color: '#ca8a04' };
+    if (days < 0) return { tier: 'overdue', days, label: `Terminou há ${Math.abs(days)} ${Math.abs(days) === 1 ? 'dia' : 'dias'}`, color: T.red, badge: `−${Math.abs(days)}d` };
+    if (days === 0) {
+      // Last day — show HH:MM:SS until 23:59:59 on the end date
+      const endOfDay = new Date(period.endDate); endOfDay.setHours(23, 59, 59, 999);
+      const ms = endOfDay - now;
+      const hh = Math.max(0, Math.floor(ms / 3600000));
+      const mm = Math.max(0, Math.floor((ms % 3600000) / 60000));
+      const ss = Math.max(0, Math.floor((ms % 60000) / 1000));
+      const cd = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+      return { tier: 'today', days, label: `Termina em ${cd}`, color: T.red, badge: cd };
+    }
+    if (days <= 2) return { tier: 'soon', days, label: `Termina em ${days} ${days === 1 ? 'dia' : 'dias'}`, color: '#d97706', badge: `${days}d` };
+    if (days <= 5) return { tier: 'upcoming', days, label: `Termina em ${days} dias`, color: '#ca8a04', badge: `${days}d` };
     return null;
-  }, [period.endDate, status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period.endDate, status, tick]);
 
   // Override the left-border colour with urgency colour when applicable
   const leftBorderColor = period.hidden ? T.inkMute : (urgency ? urgency.color : statusColor);
@@ -6880,25 +6906,6 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
       onMouseEnter={e => { e.currentTarget.style.borderColor = T.ink; }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = T.line; }}
     >
-      {/* Urgency badge — top-right, replaces "escondida" position priority */}
-      {urgency && !period.hidden && (
-        <span
-          className="mono"
-          style={{
-            position: 'absolute', top: 10, right: 10,
-            fontSize: 9, padding: '3px 7px',
-            background: urgency.color, color: '#fff',
-            borderRadius: 4, fontWeight: 700, letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-            display: 'flex', alignItems: 'center', gap: 4,
-            animation: urgency.tier === 'today' ? 'urgencyPulse 1.4s ease-in-out infinite' : 'none',
-            boxShadow: urgency.tier === 'today' ? `0 0 0 0 ${urgency.color}` : 'none',
-          }}
-        >
-          <Clock size={9} strokeWidth={2.5} />
-          {urgency.tier === 'today' ? 'HOJE' : urgency.tier === 'overdue' ? `−${Math.abs(urgency.days)}d` : `${urgency.days}d`}
-        </span>
-      )}
       {period.hidden && isAdmin && (
         <span style={{
           position: 'absolute', top: 10, right: 10,
@@ -6944,21 +6951,43 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
             </div>
           )}
         </div>
-        {canEdit && (
-          <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {/* Urgency badge — sits next to icon buttons (not overlapping) */}
+          {urgency && !period.hidden && (
+            <span
+              className="mono"
+              style={{
+                fontSize: 9, padding: '3px 7px',
+                background: urgency.color, color: '#fff',
+                borderRadius: 4, fontWeight: 700, letterSpacing: urgency.tier === 'today' ? '0.04em' : '0.08em',
+                textTransform: 'uppercase',
+                display: 'flex', alignItems: 'center', gap: 4,
+                fontVariantNumeric: 'tabular-nums',
+                animation: urgency.tier === 'today' ? 'urgencyPulse 1.4s ease-in-out infinite' : 'none',
+                whiteSpace: 'nowrap',
+              }}
+              title={urgency.label}
+            >
+              <Clock size={9} strokeWidth={2.5} />
+              {urgency.badge}
+            </span>
+          )}
+          {canEdit && (
+            <div style={{ display: 'flex', gap: 2 }} onClick={(e) => e.stopPropagation()}>
             {isAdmin && onToggleHidden && (
-              <button onClick={handleToggleHidden} title={period.hidden ? 'Mostrar para todos' : 'Esconder para utilizadores normais'} style={iconBtnStyle()}>
+              <PeriodIconButton onClick={handleToggleHidden} title={period.hidden ? 'Mostrar para todos' : 'Esconder para utilizadores normais'}>
                 {period.hidden ? <Eye size={12} /> : <ShieldOff size={12} />}
-              </button>
+              </PeriodIconButton>
             )}
-            <button onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Editar" style={iconBtnStyle()}>
+            <PeriodIconButton onClick={(e) => { e.stopPropagation(); onEdit(); }} title="Editar">
               <Pencil size={12} />
-            </button>
-            <button onClick={handleDelete} title="Eliminar" style={iconBtnStyle(T.red)}>
+            </PeriodIconButton>
+            <PeriodIconButton onClick={handleDelete} title="Eliminar" hoverColor={T.red}>
               <Trash2 size={12} />
-            </button>
-          </div>
-        )}
+            </PeriodIconButton>
+            </div>
+          )}
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 12, marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.lineSoft}`, fontSize: 11 }}>
@@ -7000,7 +7029,34 @@ function iconBtnStyle(hoverColor) {
     padding: 6, background: 'transparent', color: T.inkMute,
     border: 'none', borderRadius: 4, cursor: 'pointer',
     display: 'flex', alignItems: 'center', flexShrink: 0,
+    transition: 'background 0.15s, color 0.15s',
+    '--hoverColor': hoverColor || T.ink,
   };
+}
+
+// Hover-aware icon button used inside PeriodCard (replaces inline iconBtnStyle for cards)
+function PeriodIconButton({ onClick, title, hoverColor, children, ariaLabel }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={title}
+      aria-label={ariaLabel || title}
+      style={{
+        padding: 6,
+        background: hover ? (hoverColor ? `${hoverColor}14` : T.bgEl) : 'transparent',
+        color: hover ? (hoverColor || T.ink) : T.inkMute,
+        border: 'none', borderRadius: 4, cursor: 'pointer',
+        display: 'flex', alignItems: 'center', flexShrink: 0,
+        transition: 'background 0.15s, color 0.15s, transform 0.15s',
+        transform: hover ? 'scale(1.1)' : 'scale(1)',
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
