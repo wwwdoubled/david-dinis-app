@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.1';
-const APP_BUILD_DATE = '2026-05-09T13:24'; // Europe/Lisbon
+const APP_VERSION = '3.10.2';
+const APP_BUILD_DATE = '2026-05-09T13:29'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.2', date: '2026-05-09', summary: 'CRITICAL: cloudUpsertCampaign nunca sobrescreve rows da cloud com vazios — só inclui rows/rows_compressed no payload quando há rows reais (protege contra ciclos de polling/floor-sync que apagavam dados)' },
   { version: '3.10.1', date: '2026-05-09', summary: 'Alterações: nova coluna "Data" (lida da Data Início do ficheiro carregado) + dropdown "Todas as datas" com contagem por dia, permitindo filtrar adições/alterações/remoções de um dia específico. Data também incluída no CSV exportado.' },
   { version: '3.10.0', date: '2026-05-09', summary: 'UI: badge de urgência ao lado dos botões (sem sobrepor); hover suave (scale + tint) nos botões editar/esconder/eliminar; countdown HH:MM:SS no último dia; auto-tick para passar a "Terminadas" quando o relógio bate 00:00' },
   { version: '3.9.9', date: '2026-05-09', summary: 'UI: indicador visual de urgência nos cards das campanhas — badge "HOJE" pulsante, "−Xd" para terminadas há pouco, "Xd" para 1–5 dias até ao fim, tinta vermelha no fundo quando crítica' },
@@ -1337,21 +1338,27 @@ async function cloudUpsertCampaign(campaign, userId) {
     console.log(`[campaign-upload] ${campaign.name}: rows ${(rowsJson.length / 1024).toFixed(0)} KB${compressRows ? ` → ${(rowsCompressed.compressedLength / 1024).toFixed(0)} KB compressed` : ''}, floors ${(floorsJson.length / 1024).toFixed(0)} KB${compressFloors ? ` → compressed` : ''}`);
   }
 
+  // Build payload WITHOUT the rows fields by default — we'll add them only
+  // when we actually have non-empty rows to write. This protects against
+  // background flows (poll/eager-hydrate failure) that might call upsert with
+  // an empty rows array and silently nuke real cloud data. (v3.10.2)
   const payload = {
     user_id: campaign.user_id || userId,
     period_id: periodId,
     campaign_key: campaign.key,
     name: campaign.name,
     headers: campaign.headers || [],
-    // If compressed, send empty array in original column to save space
-    rows: compressRows ? [] : rows,
-    rows_compressed: rowsCompressed,
     floors: compressFloors ? null : campaign.floors,
     floors_compressed: floorsCompressed,
     uploaded_at: campaign.uploaded ? campaign.uploaded.toISOString() : new Date().toISOString(),
     updated_at: new Date().toISOString(),
     updated_by: userId,
   };
+  const hasRows = rows.length > 0;
+  if (hasRows) {
+    payload.rows = compressRows ? [] : rows;
+    payload.rows_compressed = rowsCompressed;
+  }
   // If campaign already has a UUID id (was previously synced from cloud), use it
   if (campaign.id && isUUID(campaign.id)) {
     payload.id = campaign.id;
@@ -1369,7 +1376,10 @@ async function cloudUpsertCampaign(campaign, userId) {
       .eq('id', payload.id)
       .select()
       .maybeSingle();
-    if (!updErr && updData) return { ok: true, data: updData };
+    if (!updErr && updData) {
+      if (!hasRows) console.log(`[campaign-upload] ${campaign.name}: metadata-only update (rows preserved)`);
+      return { ok: true, data: updData };
+    }
   }
 
   // Try update by (user_id, campaign_key)
@@ -1388,10 +1398,17 @@ async function cloudUpsertCampaign(campaign, userId) {
       .eq('id', existingByKey.id)
       .select()
       .maybeSingle();
+    if (!error && !hasRows) console.log(`[campaign-upload] ${campaign.name}: metadata-only update (rows preserved)`);
     return { ok: !error, data, error: error?.message };
   }
 
-  // Insert
+  // Insert — this branch only fires for genuinely new records. If we got here
+  // without rows (eg. a background flow on a meta-only state), refuse rather
+  // than create an orphan empty record that would later be re-fetched as 0.
+  if (!hasRows) {
+    console.warn(`[campaign-upload] ${campaign.name}: refusing to insert empty record (no rows in local state)`);
+    return { ok: false, error: 'refused empty insert', skipped: true };
+  }
   const insertPayload = { ...payload };
   if (!insertPayload.id) delete insertPayload.id; // let DB generate UUID
   const { data, error } = await supabase
