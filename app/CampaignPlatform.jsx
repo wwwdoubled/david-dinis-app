@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.3';
-const APP_BUILD_DATE = '2026-05-09T13:32'; // Europe/Lisbon
+const APP_VERSION = '3.10.4';
+const APP_BUILD_DATE = '2026-05-09T13:37'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.4', date: '2026-05-09', summary: 'Blueprint: slots cujo EAN não existe em nenhuma campanha são omitidos (deixaram de aparecer como "sem dados" no resumo)' },
   { version: '3.10.3', date: '2026-05-09', summary: 'Fix: Blueprint agora lê os slots dos floors do PERÍODO (não só das campanhas) — refletindo o plano que o utilizador definiu' },
   { version: '3.10.2', date: '2026-05-09', summary: 'CRITICAL: cloudUpsertCampaign nunca sobrescreve rows da cloud com vazios — só inclui rows/rows_compressed no payload quando há rows reais (protege contra ciclos de polling/floor-sync que apagavam dados)' },
   { version: '3.10.1', date: '2026-05-09', summary: 'Alterações: nova coluna "Data" (lida da Data Início do ficheiro carregado) + dropdown "Todas as datas" com contagem por dia, permitindo filtrar adições/alterações/remoções de um dia específico. Data também incluída no CSV exportado.' },
@@ -12783,7 +12784,10 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
     });
   });
 
-  // Helper: aggregate slots from a floors structure into base
+  // Helper: aggregate slots from a floors structure into base. Slots whose EAN
+  // is NOT present in any campaign's rows are skipped — these are stale
+  // assignments left behind after re-uploads/deletions and would otherwise
+  // appear as "sem dados" entries that mislead the user. (v3.10.4)
   const ingestFloors = (floors, sourceLabel) => {
     if (!Array.isArray(floors)) return;
     floors.forEach(f => {
@@ -12795,8 +12799,9 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
         (z.slots || []).forEach(s => {
           const refKey = normalizeEAN(s.ref);
           if (!refKey) return;
-          if (baseZone.slots.some(bs => normalizeEAN(bs.ref) === refKey)) return;
           const product = productsByEan.get(refKey);
+          if (!product) return; // EAN not in any campaign — skip
+          if (baseZone.slots.some(bs => normalizeEAN(bs.ref) === refKey)) return;
           baseZone.slots.push({ ...s, product, sourceCampaign: sourceLabel });
         });
       });
