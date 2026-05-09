@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.2';
-const APP_BUILD_DATE = '2026-05-09T13:29'; // Europe/Lisbon
+const APP_VERSION = '3.10.3';
+const APP_BUILD_DATE = '2026-05-09T13:32'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.3', date: '2026-05-09', summary: 'Fix: Blueprint agora lê os slots dos floors do PERÍODO (não só das campanhas) — refletindo o plano que o utilizador definiu' },
   { version: '3.10.2', date: '2026-05-09', summary: 'CRITICAL: cloudUpsertCampaign nunca sobrescreve rows da cloud com vazios — só inclui rows/rows_compressed no payload quando há rows reais (protege contra ciclos de polling/floor-sync que apagavam dados)' },
   { version: '3.10.1', date: '2026-05-09', summary: 'Alterações: nova coluna "Data" (lida da Data Início do ficheiro carregado) + dropdown "Todas as datas" com contagem por dia, permitindo filtrar adições/alterações/remoções de um dia específico. Data também incluída no CSV exportado.' },
   { version: '3.10.0', date: '2026-05-09', summary: 'UI: badge de urgência ao lado dos botões (sem sobrepor); hover suave (scale + tint) nos botões editar/esconder/eliminar; countdown HH:MM:SS no último dia; auto-tick para passar a "Terminadas" quando o relógio bate 00:00' },
@@ -3824,6 +3825,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {blueprintOpen && (
         <BlueprintPanel
           campaigns={campaigns}
+          periods={periods}
           defaultLayout={defaultLayout}
           onClose={() => setBlueprintOpen(false)}
         />
@@ -12748,7 +12750,7 @@ function findImageColumn(headers) {
 
 // Compute combined floors with all assigned slots from all campaigns
 // Returns: [{ floor, zones: [{ zone, slots, productInfo: [...] }] }]
-function buildBlueprint(campaigns, defaultLayout) {
+function buildBlueprint(campaigns, defaultLayout, periods) {
   // Start with defaultLayout structure (zones)
   const base = (defaultLayout || []).map(f => ({
     ...f,
@@ -12781,34 +12783,42 @@ function buildBlueprint(campaigns, defaultLayout) {
     });
   });
 
-  // Aggregate slots from all campaigns into the base layout (using campaigns' floors)
-  campaigns.forEach(camp => {
-    if (!camp.floors) return;
-    camp.floors.forEach(f => {
+  // Helper: aggregate slots from a floors structure into base
+  const ingestFloors = (floors, sourceLabel) => {
+    if (!Array.isArray(floors)) return;
+    floors.forEach(f => {
       const baseFloor = base.find(bf => bf.id === f.id);
       if (!baseFloor) return;
-      f.zones.forEach(z => {
+      (f.zones || []).forEach(z => {
         const baseZone = baseFloor.zones.find(bz => bz.id === z.id);
         if (!baseZone) return;
-        z.slots.forEach(s => {
+        (z.slots || []).forEach(s => {
           const refKey = normalizeEAN(s.ref);
           if (!refKey) return;
           if (baseZone.slots.some(bs => normalizeEAN(bs.ref) === refKey)) return;
           const product = productsByEan.get(refKey);
-          baseZone.slots.push({
-            ...s,
-            product,
-            sourceCampaign: camp.name,
-          });
+          baseZone.slots.push({ ...s, product, sourceCampaign: sourceLabel });
         });
       });
     });
+  };
+
+  // Plan ownership lives on the PERIOD now (v3.x). Aggregate slots from every
+  // period's floors first; legacy campaign-level floors are kept as fallback
+  // so that older data still appears.
+  (periods || []).forEach(p => {
+    if (p.hidden) return;
+    if (p.floors && Array.isArray(p.floors)) ingestFloors(p.floors, p.name || 'Período');
+  });
+  campaigns.forEach(camp => {
+    if (!camp.floors) return;
+    ingestFloors(camp.floors, camp.name);
   });
 
   return base;
 }
 
-function BlueprintPanel({ campaigns, defaultLayout, onClose }) {
+function BlueprintPanel({ campaigns, defaultLayout, periods, onClose }) {
   const [expandedZone, setExpandedZone] = useState(null); // zoneId of detail open
   const [filterFloor, setFilterFloor] = useStoredState('blueprint.filterFloor', 'all');
   const [filterStatus, setFilterStatus] = useStoredState('blueprint.filterStatus', 'all'); // all | filled | empty | partial
@@ -12820,8 +12830,8 @@ function BlueprintPanel({ campaigns, defaultLayout, onClose }) {
   }, [onClose]);
 
   const blueprint = useMemo(
-    () => buildBlueprint(campaigns, defaultLayout),
-    [campaigns, defaultLayout]
+    () => buildBlueprint(campaigns, defaultLayout, periods),
+    [campaigns, defaultLayout, periods]
   );
 
   // Compute global stats
