@@ -536,7 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
-  { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário carrega descrições dos produtos (hidratação lazy das rows); skeleton no carregamento de campanhas' },
+  { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário lê descrição/família directamente do PO2/PO3; skeleton no carregamento de campanhas' },
   { version: '3.1.0', date: '2026-05-06', summary: 'Fix: carregamento de campanhas em 2 fases reais (SELECT sem rows + fetch separado); novo Inventário com leitura de códigos de barras por câmara ou leitor' },
   { version: '3.0.3', date: '2026-05-06', summary: 'Plano/Saída: PO2 e PO3 preenchidos automaticamente por EAN; Saída usa lookup dinâmico de stock; auto-preenchimento também grava PO2/PO3' },
   { version: '3.0.2', date: '2026-05-06', summary: 'Fix: famílias excluídas aplicadas também no auto-preenchimento, listagem de zonas, alterações de preço e stock' },
@@ -3619,7 +3619,6 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3}
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
             campaigns={filteredCampaigns}
-            setCampaigns={setCampaigns}
             excludedFamilies={excludedFamilies}
           />}
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
@@ -11659,7 +11658,7 @@ function toolBtn(disabled = false, danger = false) {
 // ─────────────────────────────────────────────────────────────────────────
 // Inventory Scanner View
 // ─────────────────────────────────────────────────────────────────────────
-function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, setCampaigns, excludedFamilies = [] }) {
+function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [] }) {
   const videoRef = useRef(null);
   const inputRef = useRef(null);
   const streamRef = useRef(null);
@@ -11667,21 +11666,6 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const rafRef = useRef(null);
   const lastEanRef = useRef(null);
   const lastEanTimeRef = useRef(0);
-
-  // Hydrate campaigns that still need rows — so productIndex has descriptions
-  useEffect(() => {
-    if (!setCampaigns || !supabase) return;
-    const needRows = campaigns.filter(c => c.id && (c._needsRows || !c.rows?.length));
-    if (needRows.length === 0) return;
-    cloudFetchCampaignRows(needRows.map(c => c.id)).then(hydrated => {
-      if (!hydrated.length) return;
-      const rowsById = new Map(hydrated.map(h => [h.id, h]));
-      setCampaigns(prev => prev.map(c => {
-        const r = rowsById.get(c.id);
-        return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
-      }));
-    }).catch(err => console.warn('[inventory-hydrate]', err));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [scanning, setScanning] = useState(false);
   const [manualEan, setManualEan] = useState('');
@@ -11707,33 +11691,33 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const [filterFamily, setFilterFamily] = useStoredState('inventory.filterFamily', '');
   const [filterSubfamily, setFilterSubfamily] = useStoredState('inventory.filterSubfamily', '');
 
-  // Build lookup indexes
-  const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
-  const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
+  // Build lookup indexes (qty)
+  const { index: stockIdxPO2, eanCol: eanColPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
+  const { index: stockIdxPO3, eanCol: eanColPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
 
-  // Build EAN → product info from campaigns
+  // Build EAN → description from PO2/PO3 stock files (inventory is store-based, not campaign-based)
   const productIndex = useMemo(() => {
     const map = new Map();
-    const excl = new Set((excludedFamilies || []).map(f => f.toUpperCase()));
-    for (const camp of campaigns) {
-      const cols = detectColumns(camp.headers || []);
-      if (!cols.ean) continue;
-      for (const row of (camp.rows || [])) {
-        const key = normalizeEAN(row[cols.ean]);
+    const buildFromStock = (rows, eanCol) => {
+      if (!rows.length || !eanCol) return;
+      const headers = Object.keys(rows[0]);
+      const descrCol = headers.find(h => /descri|design|nome|artigo|produto|título|titulo/i.test(h) && h !== eanCol);
+      const famCol   = headers.find(h => /famí|fami|categ|gama/i.test(h));
+      const subCol   = headers.find(h => /sub.?fam|sub.?cat/i.test(h));
+      for (const row of rows) {
+        const key = normalizeEAN(row[eanCol]);
         if (!key || map.has(key)) continue;
-        const fam = cols.family ? String(row[cols.family] ?? '').trim() : '';
-        if (fam && excl.has(fam.toUpperCase())) continue;
         map.set(key, {
-          descr: cols.description ? String(row[cols.description] ?? '').trim() : '',
-          family: fam,
-          subfamily: cols.subfamily ? String(row[cols.subfamily] ?? '').trim() : '',
-          price: cols.campaignPrice ? parseNum(row[cols.campaignPrice]) : (cols.basePrice ? parseNum(row[cols.basePrice]) : 0),
-          discount: cols.discount ? parseNum(row[cols.discount]) : 0,
+          descr:     descrCol ? String(row[descrCol] ?? '').trim() : '',
+          family:    famCol   ? String(row[famCol]   ?? '').trim() : '',
+          subfamily: subCol   ? String(row[subCol]   ?? '').trim() : '',
         });
       }
-    }
+    };
+    buildFromStock(stockRowsPO2, eanColPO2);
+    buildFromStock(stockRowsPO3, eanColPO3);
     return map;
-  }, [campaigns, excludedFamilies]);
+  }, [stockRowsPO2, stockRowsPO3, eanColPO2, eanColPO3]);
 
   // Extract available families and subfamilies from productIndex
   const { availableFamilies, subfamiliesFor } = useMemo(() => {
