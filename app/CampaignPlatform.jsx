@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.11.3';
-const APP_BUILD_DATE = '2026-05-09T22:33'; // Europe/Lisbon
+const APP_VERSION = '3.11.4';
+const APP_BUILD_DATE = '2026-05-09T23:25'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.11.4', date: '2026-05-09', summary: 'Performance & polish: React.memo nos cards de período/sumário/changes (mata re-renders do tick); Esc global fecha painéis flutuantes; scroll-to-top suave ao mudar de view; focus-ring acessível (Tab); transições padronizadas em botões/inputs; selection colorida.' },
   { version: '3.11.3', date: '2026-05-09', summary: 'periodStatus explicíto: campanha fica ATIVA até às 23:59:59 do dia de fim (antes a comparação era a meia-noite, o comportamento já era esse implicitamente; agora está documentado e à prova de bugs)' },
   { version: '3.11.2', date: '2026-05-09', summary: 'Visão geral: secção "Atenção" deduplicada (mesmo período já não aparece como urgente E sem plano); label "Sem plano definido" → "Sem produtos no plano" (mais claro — não confundir com datas)' },
   { version: '3.11.1', date: '2026-05-09', summary: 'Alterações: re-introduzido o filtro por dia (dropdown "Todas as datas") como sub-componente isolado <ChangesDateFilter/>. O bug anterior (ReferenceError) era porque a JSX vivia dentro de <ChangesReport/> mas as variáveis estavam só em ChangesView e não eram passadas como props.' },
@@ -2443,6 +2444,13 @@ function authLink() {
 // ─────────────────────────────────────────────────────────────────────────
 function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [view, setView] = useStoredState('view', 'dashboard');
+
+  // Scroll to top whenever the view changes — evita ficar no meio da página
+  // anterior quando se muda de menu (especialmente útil em mobile). v3.11.4
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [view]);
   const [campaigns, setCampaigns] = useState([]); // each: { id, key, name, rows, headers, floors, periodId }
   const [campaignsLoaded, setCampaignsLoaded] = useState(false);
   const [salesData, setSalesData] = useState(null);
@@ -3273,6 +3281,23 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [notesPanelOpen, setNotesPanelOpen] = useState(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
 
+  // Esc global: fecha o painel/overlay aberto mais recente (UX power-user, v3.11.4)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      // Não interferir quando um input/textarea está focado (deixa o browser tratar)
+      const tag = (e.target && e.target.tagName) || '';
+      if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
+      // Prioridade: blueprint > notes > notifications
+      if (blueprintOpen) { setBlueprintOpen(false); return; }
+      if (notesPanelOpen) { setNotesPanelOpen(false); return; }
+      // notificationPanelOpen é setado mais abaixo; fechar via custom event
+      window.dispatchEvent(new CustomEvent('close-panels'));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [blueprintOpen, notesPanelOpen]);
+
   // ─── Cloud sync state ──────────────────────────────────────────────────
   // syncStatus: 'idle' | 'loading' | 'syncing' | 'synced' | 'offline' | 'error'
   const [syncStatus, setSyncStatus] = useState('idle');
@@ -3525,6 +3550,31 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         ::-webkit-scrollbar-track { background: transparent; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
         .fade-up { animation: fadeUp 0.4s ease-out backwards; }
+
+        /* ─── Polish global (v3.11.4) ─── */
+        /* Scroll smooth em toda a app */
+        html { scroll-behavior: smooth; }
+        /* Focus ring acessível e consistente para toda a navegação por teclado */
+        button:focus-visible,
+        a:focus-visible,
+        input:focus-visible,
+        select:focus-visible,
+        textarea:focus-visible,
+        [tabindex]:focus-visible {
+          outline: 2px solid ${T.accent} !important;
+          outline-offset: 2px !important;
+          border-radius: 4px;
+        }
+        /* Botões — transição padrão para hover/active */
+        button { transition: background 0.15s, color 0.15s, transform 0.1s, box-shadow 0.15s, border-color 0.15s; }
+        button:active:not(:disabled) { transform: scale(0.98); }
+        button:disabled { cursor: not-allowed; opacity: 0.55; }
+        /* Inputs — transição subtil ao focar */
+        input, select, textarea {
+          transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+        }
+        /* Melhor seleção de texto no tema */
+        ::selection { background: ${T.accentSoft || '#fde68a'}; color: ${T.ink}; }
         .row-input { border: none; background: transparent; outline: none; padding: 4px 6px; font-size: 12px; width: 100%; color: ${T.ink}; }
         .row-input:focus { background: ${T.paper}; box-shadow: inset 0 0 0 1.5px ${T.accent}; border-radius: 3px; }
 
@@ -7459,7 +7509,7 @@ function PeriodGroup({ title, badge, periods, stats, onEnter, onEdit, onDelete, 
   );
 }
 
-function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, onDelete, onToggleHidden, dimmed }) {
+const PeriodCard = React.memo(function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, onDelete, onToggleHidden, dimmed }) {
   const status = periodStatus(period);
   const statusColor = status === 'active' ? T.green : (status === 'planned' ? T.accent : T.inkMute);
   const isOwner = period.created_by === currentUserId || period.user_id === currentUserId;
@@ -7662,7 +7712,7 @@ function PeriodCard({ period, stats, isAdmin, currentUserId, onEnter, onEdit, on
       )}
     </div>
   );
-}
+});
 
 function iconBtnStyle(hoverColor) {
   return {
@@ -10631,7 +10681,7 @@ function SummaryCard({ label, value, color, active, dimmed, onClick }) {
   );
 }
 
-function ChangeRow({ item }) {
+const ChangeRow = React.memo(function ChangeRow({ item }) {
   const kindStyles = {
     added: { bg: T.green, label: 'NOVO', icon: Plus },
     removed: { bg: T.red, label: 'REMOVIDO', icon: Minus },
@@ -10716,7 +10766,7 @@ function ChangeRow({ item }) {
       </td>
     </tr>
   );
-}
+});
 
 function PriceDelta({ oldVal, newVal, highlight }) {
   const diff = newVal - oldVal;
@@ -15346,7 +15396,7 @@ function ActiveCampaignsSummary({ periods, posters, setView }) {
   );
 }
 
-function SummaryCampaignCard({ period, setView }) {
+const SummaryCampaignCard = React.memo(function SummaryCampaignCard({ period, setView }) {
   const isActive = period.calcStatus === 'active';
   const accent = isActive ? T.green : T.accent;
 
@@ -15412,7 +15462,7 @@ function SummaryCampaignCard({ period, setView }) {
       </div>
     </button>
   );
-}
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // AdminPosterZonesTab — manage zones where posters are placed
