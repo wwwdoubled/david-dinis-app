@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.0';
-const APP_BUILD_DATE = '2026-05-09T13:17'; // Europe/Lisbon
+const APP_VERSION = '3.10.1';
+const APP_BUILD_DATE = '2026-05-09T13:24'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.1', date: '2026-05-09', summary: 'Alterações: nova coluna "Data" (lida da Data Início do ficheiro carregado) + dropdown "Todas as datas" com contagem por dia, permitindo filtrar adições/alterações/remoções de um dia específico. Data também incluída no CSV exportado.' },
   { version: '3.10.0', date: '2026-05-09', summary: 'UI: badge de urgência ao lado dos botões (sem sobrepor); hover suave (scale + tint) nos botões editar/esconder/eliminar; countdown HH:MM:SS no último dia; auto-tick para passar a "Terminadas" quando o relógio bate 00:00' },
   { version: '3.9.9', date: '2026-05-09', summary: 'UI: indicador visual de urgência nos cards das campanhas — badge "HOJE" pulsante, "−Xd" para terminadas há pouco, "Xd" para 1–5 dias até ao fim, tinta vermelha no fundo quando crítica' },
   { version: '3.9.8', date: '2026-05-09', summary: 'Fix: merge não sobrepõe rows locais não-vazios com rows vazios da cloud (evita perda durante poll de 30s)' },
@@ -9272,6 +9273,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [search, setSearch] = useStoredState('changes.search', '');
   const [filterAveiro, setFilterAveiro] = useStoredState('changes.filterAveiro', false);
   const [filterFamily, setFilterFamily] = useStoredState('changes.filterFamily', '');
+  const [filterDate, setFilterDate] = useStoredState('changes.filterDate', ''); // YYYY-MM-DD or '' = all
 
   // Load last uploaded snapshot from cloud (only relevant when source='upload')
   useEffect(() => {
@@ -9386,6 +9388,26 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     const changed = [];
     const unchanged = [];
 
+    // Helper: extract a normalized YYYY-MM-DD string from any cell value (Date,
+    // Excel serial number, or formatted string). Returns '' when not parseable.
+    const toIsoDay = (v) => {
+      if (v == null || v === '') return '';
+      if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+      if (typeof v === 'number' && isFinite(v)) {
+        const d = new Date(Math.round((v - 25569) * 86400 * 1000));
+        if (!isNaN(d)) return d.toISOString().slice(0, 10);
+      }
+      const s = String(v).trim();
+      let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+      if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
+      m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})/);
+      if (m) {
+        const yy = m[3].length === 2 ? '20' + m[3] : m[3];
+        return `${yy}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
+      }
+      return '';
+    };
+
     // Walk the new file
     for (const [key, newRow] of newByEan.entries()) {
       const oldRow = oldByEan.get(key);
@@ -9398,6 +9420,8 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
         campaignPrice: parseNum(colsNew.campaignPrice ? newRow[colsNew.campaignPrice] : 0),
         stockPO2: stock.stockPO2,
         stockPO3: stock.stockPO3,
+        // Date of change — taken from the new file's "Data Início" column
+        changeDate: colsNew.startDate ? toIsoDay(newRow[colsNew.startDate]) : '',
       };
 
       if (!oldRow) {
@@ -9437,6 +9461,8 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
           campaignPrice: parseNum(colsOld.campaignPrice ? oldRow[colsOld.campaignPrice] : 0),
           stockPO2: stock.stockPO2,
           stockPO3: stock.stockPO3,
+          // Removed items use the OLD file's start date
+          changeDate: colsOld.startDate ? toIsoDay(oldRow[colsOld.startDate]) : '',
         });
       }
     }
@@ -9489,6 +9515,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged.map(p => ({ ...p, kind: 'unchanged' })));
     if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
     if (filterFamily && filterFamily !== 'all') items = items.filter(p => p.family === filterFamily);
+    if (filterDate) items = items.filter(p => p.changeDate === filterDate);
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -9498,23 +9525,41 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
       );
     }
     return items;
-  }, [diff, filter, filterAveiro, filterFamily, search]);
+  }, [diff, filter, filterAveiro, filterFamily, filterDate, search]);
+
+  // All distinct change-dates present in the diff — used to populate the
+  // dropdown filter. Sorted desc (most recent first), with a count per day.
+  const allChangeDates = useMemo(() => {
+    if (!diff) return [];
+    const counts = new Map();
+    const buckets = [diff.added, diff.changed, diff.removed, diff.unchanged];
+    for (const list of buckets) {
+      for (const p of list) {
+        if (!p.changeDate) continue;
+        counts.set(p.changeDate, (counts.get(p.changeDate) || 0) + 1);
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }, [diff]);
 
   const exportDiff = () => {
     if (!diff) return;
-    const lines = [['Estado', 'EAN', 'Família', 'Descrição', 'PVP Base Antigo', 'PVP Base Novo', 'PVP Campanha Antigo', 'PVP Campanha Novo', 'Stock PO2', 'Stock PO3', 'Stock Total'].join(';')];
+    const lines = [['Estado', 'Data', 'EAN', 'Família', 'Descrição', 'PVP Base Antigo', 'PVP Base Novo', 'PVP Campanha Antigo', 'PVP Campanha Novo', 'Stock PO2', 'Stock PO3', 'Stock Total'].join(';')];
     const fmt = (p, kind) => {
       const total = (p.stockPO2 || 0) + (p.stockPO3 || 0);
-      if (kind === 'NOVO') return ['NOVO', p.ean, p.family, p.description, '', p.basePrice.toFixed(2), '', p.campaignPrice.toFixed(2), p.stockPO2 || 0, p.stockPO3 || 0, total];
-      if (kind === 'ALTERADO') return ['ALTERADO', p.ean, p.family, p.description, p.oldBasePrice.toFixed(2), p.basePrice.toFixed(2), p.oldCampaignPrice.toFixed(2), p.campaignPrice.toFixed(2), p.stockPO2 || 0, p.stockPO3 || 0, total];
-      return ['REMOVIDO', p.ean, p.family, p.description, p.basePrice.toFixed(2), '', p.campaignPrice.toFixed(2), '', p.stockPO2 || 0, p.stockPO3 || 0, total];
+      const d = p.changeDate || '';
+      if (kind === 'NOVO') return ['NOVO', d, p.ean, p.family, p.description, '', p.basePrice.toFixed(2), '', p.campaignPrice.toFixed(2), p.stockPO2 || 0, p.stockPO3 || 0, total];
+      if (kind === 'ALTERADO') return ['ALTERADO', d, p.ean, p.family, p.description, p.oldBasePrice.toFixed(2), p.basePrice.toFixed(2), p.oldCampaignPrice.toFixed(2), p.campaignPrice.toFixed(2), p.stockPO2 || 0, p.stockPO3 || 0, total];
+      return ['REMOVIDO', d, p.ean, p.family, p.description, p.basePrice.toFixed(2), '', p.campaignPrice.toFixed(2), '', p.stockPO2 || 0, p.stockPO3 || 0, total];
     };
     diff.added.forEach(p => lines.push(fmt(p, 'NOVO').join(';')));
     diff.changed.forEach(p => lines.push(fmt(p, 'ALTERADO').join(';')));
     diff.removed.forEach(p => lines.push(fmt(p, 'REMOVIDO').join(';')));
     diff.unchanged.forEach(p => {
       const total = (p.stockPO2 || 0) + (p.stockPO3 || 0);
-      lines.push(['SEM ALTERAÇÃO', p.ean, p.family, p.description, p.basePrice?.toFixed(2) ?? '', p.basePrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.stockPO2 || 0, p.stockPO3 || 0, total].join(';'));
+      lines.push(['SEM ALTERAÇÃO', p.changeDate || '', p.ean, p.family, p.description, p.basePrice?.toFixed(2) ?? '', p.basePrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.campaignPrice?.toFixed(2) ?? '', p.stockPO2 || 0, p.stockPO3 || 0, total].join(';'));
     });
     const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -9789,6 +9834,28 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             }}>{f.l}</button>
           ))}
         </div>
+        {/* Filtro por data de alteração — só aparece se houver datas detectadas */}
+        {allChangeDates.length > 0 && (
+          <select
+            value={filterDate}
+            onChange={e => setFilterDate(e.target.value)}
+            title="Filtrar por dia da alteração (coluna Data Início)"
+            style={{
+              padding: '6px 10px', fontSize: 11, fontWeight: 500, borderRadius: 6,
+              border: `1px solid ${filterDate ? T.accent : T.line}`,
+              background: filterDate ? T.accentSoft || '#eef2ff' : T.bgEl,
+              color: filterDate ? T.accent : T.inkSoft,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            <option value="">Todas as datas</option>
+            {allChangeDates.map(d => {
+              const [y, m, day] = d.date.split('-');
+              const label = `${day}/${m}/${y.slice(2)} (${d.count})`;
+              return <option key={d.date} value={d.date}>{label}</option>;
+            })}
+          </select>
+        )}
         {/* Stock Aveiro (PO3) filter — só aparece se houver dados de stock */}
         {(stockRowsPO3?.length > 0) && (
           <button
@@ -9852,6 +9919,7 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
               <thead style={{ position: 'sticky', top: 0, background: T.lineSoft, zIndex: 1 }}>
                 <tr>
                   <th style={{ ...lhStyle, width: 100 }}>Estado</th>
+                  <th style={{ ...lhStyle, width: 78 }}>Data</th>
                   <th style={{ ...lhStyle, width: 90 }}>Família</th>
                   <th style={{ ...lhStyle, width: 110 }}>EAN</th>
                   <th style={lhStyle}>Descrição / Título</th>
@@ -9929,6 +9997,11 @@ function ChangeRow({ item }) {
         }}>
           {k.label}
         </span>
+      </td>
+      <td style={{ ...ltdStyle, fontFamily: 'Geist Mono', fontSize: 11, color: T.inkSoft, whiteSpace: 'nowrap' }}>
+        {item.changeDate
+          ? (() => { const [y, m, d] = item.changeDate.split('-'); return `${d}/${m}/${y.slice(2)}`; })()
+          : <span style={{ color: T.inkMute }}>—</span>}
       </td>
       <td style={ltdStyle}>
         {item.family ? (
