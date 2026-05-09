@@ -9,7 +9,7 @@ import {
   Filter, ListTree, Layers, Tag, Lock, LogOut, AlertCircle, Sun, Moon,
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
-  Bell, Calendar, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera
+  Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -525,7 +525,7 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.3';
+const APP_VERSION = '3.9.4';
 const APP_BUILD_DATE = '2026-05-09T00:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.4', date: '2026-05-09', summary: 'Admin: separador Cloud para ver e apagar campanhas, snapshots PO2/PO3 e períodos da cloud' },
   { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário lê descrição/família directamente do PO2/PO3; skeleton no carregamento de campanhas' },
   { version: '3.1.0', date: '2026-05-06', summary: 'Fix: carregamento de campanhas em 2 fases reais (SELECT sem rows + fetch separado); novo Inventário com leitura de códigos de barras por câmara ou leitor' },
   { version: '3.0.3', date: '2026-05-06', summary: 'Plano/Saída: PO2 e PO3 preenchidos automaticamente por EAN; Saída usa lookup dinâmico de stock; auto-preenchimento também grava PO2/PO3' },
@@ -1706,6 +1707,40 @@ async function cloudFetchStockSnapshotById(id) {
     return { ...data, rows: rows || [] };
   }
   return data;
+}
+
+async function cloudDeleteStockSnapshot(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('stock_snapshots').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+async function cloudFetchAllStockSnapshots() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('stock_snapshots')
+    .select('id, store, filename, uploaded_at, uploaded_by_email, row_count, is_active')
+    .order('uploaded_at', { ascending: false });
+  if (error) return [];
+  return data || [];
+}
+
+async function cloudFetchAllPeriodsFull() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('periods')
+    .select('id, name, start_date, end_date, status, user_id, updated_at')
+    .order('updated_at', { ascending: false });
+  if (error) return [];
+  return data || [];
+}
+
+async function cloudDeletePeriodAdmin(id) {
+  if (!supabase) return { ok: false };
+  // Also delete all campaigns linked to this period
+  await supabase.from('campaigns').delete().eq('period_id', id);
+  const { error } = await supabase.from('periods').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
 }
 
 // Compute a stable campaign key from a filename
@@ -12907,6 +12942,7 @@ function AdminView({ user, uiConfig, setUIConfig }) {
         {[
           { id: 'users', label: 'Utilizadores', icon: Users },
           { id: 'activity', label: 'Atividade', icon: Activity },
+          { id: 'cloud', label: 'Cloud', icon: Database },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
           { id: 'emails', label: 'Emails', icon: Inbox },
           { id: 'config', label: 'Configuração', icon: Settings },
@@ -12930,9 +12966,172 @@ function AdminView({ user, uiConfig, setUIConfig }) {
 
       {tab === 'users' && <AdminUsersTab currentUserId={user?.id} currentUserEmail={user?.email} />}
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
+      {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
+    </div>
+  );
+}
+
+// ─── Cloud tab — view & delete all cloud data ────────────────────────────
+function AdminCloudTab() {
+  const [campaigns, setCampaigns] = useState(null);
+  const [snapshots, setSnapshots] = useState(null);
+  const [periods, setPeriods] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(new Set());
+  const [section, setSection] = useState('campaigns'); // 'campaigns' | 'stock' | 'periods'
+
+  useEffect(() => {
+    setLoading(true);
+    Promise.all([
+      cloudFetchAllCampaignsMeta(),
+      cloudFetchAllStockSnapshots(),
+      cloudFetchAllPeriodsFull(),
+    ]).then(([c, s, p]) => {
+      setCampaigns(c);
+      setSnapshots(s);
+      setPeriods(p);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, []);
+
+  const handleDeleteCampaign = async (id, name) => {
+    if (!confirm(`Apagar campanha "${name}" da cloud?\nEsta acção não pode ser desfeita.`)) return;
+    setDeleting(prev => new Set([...prev, id]));
+    const res = await cloudDeleteCampaign(id);
+    if (res.ok) setCampaigns(prev => prev.filter(c => c.id !== id));
+    else alert('Erro ao apagar: ' + res.error);
+    setDeleting(prev => { const s = new Set(prev); s.delete(id); return s; });
+  };
+
+  const handleDeleteSnapshot = async (id, filename) => {
+    if (!confirm(`Apagar snapshot "${filename}" da cloud?\nEsta acção não pode ser desfeita.`)) return;
+    setDeleting(prev => new Set([...prev, id]));
+    const res = await cloudDeleteStockSnapshot(id);
+    if (res.ok) setSnapshots(prev => prev.filter(s => s.id !== id));
+    else alert('Erro ao apagar: ' + res.error);
+    setDeleting(prev => { const s = new Set(prev); s.delete(id); return s; });
+  };
+
+  const handleDeletePeriod = async (id, name) => {
+    if (!confirm(`Apagar período "${name}" e todas as suas campanhas da cloud?\nEsta acção não pode ser desfeita.`)) return;
+    setDeleting(prev => new Set([...prev, id]));
+    const res = await cloudDeletePeriodAdmin(id);
+    if (res.ok) {
+      setPeriods(prev => prev.filter(p => p.id !== id));
+      setCampaigns(prev => (prev || []).filter(c => c.periodId !== id));
+    } else alert('Erro ao apagar: ' + res.error);
+    setDeleting(prev => { const s = new Set(prev); s.delete(id); return s; });
+  };
+
+  const fmt = (d) => d ? new Date(d).toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+  const rowStyle = { display: 'grid', gap: 12, padding: '10px 14px', alignItems: 'center', borderBottom: `1px solid ${T.lineSoft}` };
+  const headStyle = { ...rowStyle, background: T.bgEl, fontWeight: 600, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${T.line}` };
+
+  if (loading) return <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar dados da cloud…</div>;
+
+  return (
+    <div>
+      {/* Section switcher */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
+        {[
+          { id: 'campaigns', label: `Campanhas (${campaigns?.length ?? 0})`, icon: Layers },
+          { id: 'stock', label: `Stock PO2/PO3 (${snapshots?.length ?? 0})`, icon: Package },
+          { id: 'periods', label: `Períodos (${periods?.length ?? 0})`, icon: CalendarDays },
+        ].map(({ id, label, icon: Icon }) => (
+          <button key={id} onClick={() => setSection(id)} style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+            borderRadius: 6, border: `1px solid ${section === id ? T.ink : T.line}`,
+            background: section === id ? T.ink : 'transparent',
+            color: section === id ? T.bg : T.ink,
+            fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
+          }}><Icon size={13} />{label}</button>
+        ))}
+      </div>
+
+      {/* Campaigns */}
+      {section === 'campaigns' && (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+          <div style={{ ...headStyle, gridTemplateColumns: '2fr 1fr 1fr 80px 60px' }}>
+            <div>Nome</div><div>Utilizador</div><div>Carregado</div><div style={{ textAlign: 'right' }}>Artigos</div><div />
+          </div>
+          {!campaigns?.length && <div style={{ padding: '24px', textAlign: 'center', color: T.inkMute, fontSize: 13 }}>Nenhuma campanha na cloud.</div>}
+          {campaigns?.map(c => (
+            <div key={c.id} style={{ ...rowStyle, gridTemplateColumns: '2fr 1fr 1fr 80px 60px' }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{c.name || c.key || '—'}</div>
+                <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{c.id?.slice(0, 8)}…</div>
+              </div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{c.updated_by || c.created_by || '—'}</div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{fmt(c.updatedAt || c.uploaded)}</div>
+              <div style={{ textAlign: 'right', fontSize: 13, fontFamily: 'Geist Mono, monospace', color: T.ink }}>{c.itemCount >= 0 ? c.itemCount : '?'}</div>
+              <div style={{ textAlign: 'right' }}>
+                <button onClick={() => handleDeleteCampaign(c.id, c.name)} disabled={deleting.has(c.id)} style={{
+                  padding: '4px 8px', background: 'transparent', color: T.accent,
+                  border: `1px solid ${T.accent}40`, borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                }}>{deleting.has(c.id) ? '…' : <Trash2 size={12} />}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Stock snapshots */}
+      {section === 'stock' && (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+          <div style={{ ...headStyle, gridTemplateColumns: '60px 2fr 1fr 80px 70px 60px' }}>
+            <div>Loja</div><div>Ficheiro</div><div>Carregado por</div><div>Data</div><div style={{ textAlign: 'right' }}>Linhas</div><div />
+          </div>
+          {!snapshots?.length && <div style={{ padding: '24px', textAlign: 'center', color: T.inkMute, fontSize: 13 }}>Nenhum snapshot na cloud.</div>}
+          {snapshots?.map(s => (
+            <div key={s.id} style={{ ...rowStyle, gridTemplateColumns: '60px 2fr 1fr 80px 70px 60px', background: s.is_active ? `${T.green}08` : 'transparent' }}>
+              <div style={{ fontWeight: 700, fontSize: 12, color: T.ink }}>{s.store}</div>
+              <div>
+                <div style={{ fontSize: 12, color: T.ink }}>{s.filename || '—'}</div>
+                {s.is_active && <span style={{ fontSize: 9, background: T.green, color: '#fff', padding: '1px 5px', borderRadius: 3, fontWeight: 600 }}>ACTIVO</span>}
+              </div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{s.uploaded_by_email || '—'}</div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{fmt(s.uploaded_at)}</div>
+              <div style={{ textAlign: 'right', fontSize: 13, fontFamily: 'Geist Mono, monospace' }}>{s.row_count ?? '—'}</div>
+              <div style={{ textAlign: 'right' }}>
+                <button onClick={() => handleDeleteSnapshot(s.id, s.filename)} disabled={deleting.has(s.id)} style={{
+                  padding: '4px 8px', background: 'transparent', color: T.accent,
+                  border: `1px solid ${T.accent}40`, borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                }}>{deleting.has(s.id) ? '…' : <Trash2 size={12} />}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Periods */}
+      {section === 'periods' && (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+          <div style={{ ...headStyle, gridTemplateColumns: '2fr 100px 100px 80px 60px' }}>
+            <div>Nome</div><div>Início</div><div>Fim</div><div>Estado</div><div />
+          </div>
+          {!periods?.length && <div style={{ padding: '24px', textAlign: 'center', color: T.inkMute, fontSize: 13 }}>Nenhum período na cloud.</div>}
+          {periods?.map(p => (
+            <div key={p.id} style={{ ...rowStyle, gridTemplateColumns: '2fr 100px 100px 80px 60px' }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{p.name || '—'}</div>
+                <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono, monospace' }}>{p.id?.slice(0, 8)}…</div>
+              </div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{p.start_date ? new Date(p.start_date).toLocaleDateString('pt-PT') : '—'}</div>
+              <div style={{ fontSize: 12, color: T.inkSoft }}>{p.end_date ? new Date(p.end_date).toLocaleDateString('pt-PT') : '—'}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: p.status === 'active' ? T.green : T.inkMute }}>{p.status || '—'}</div>
+              <div style={{ textAlign: 'right' }}>
+                <button onClick={() => handleDeletePeriod(p.id, p.name)} disabled={deleting.has(p.id)} style={{
+                  padding: '4px 8px', background: 'transparent', color: T.accent,
+                  border: `1px solid ${T.accent}40`, borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                }}>{deleting.has(p.id) ? '…' : <Trash2 size={12} />}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
