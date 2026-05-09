@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.11.1';
-const APP_BUILD_DATE = '2026-05-09T18:19'; // Europe/Lisbon
+const APP_VERSION = '3.11.2';
+const APP_BUILD_DATE = '2026-05-09T22:29'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.11.2', date: '2026-05-09', summary: 'Visão geral: secção "Atenção" deduplicada (mesmo período já não aparece como urgente E sem plano); label "Sem plano definido" → "Sem produtos no plano" (mais claro — não confundir com datas)' },
   { version: '3.11.1', date: '2026-05-09', summary: 'Alterações: re-introduzido o filtro por dia (dropdown "Todas as datas") como sub-componente isolado <ChangesDateFilter/>. O bug anterior (ReferenceError) era porque a JSX vivia dentro de <ChangesReport/> mas as variáveis estavam só em ChangesView e não eram passadas como props.' },
   { version: '3.11.0', date: '2026-05-09', summary: 'Mobile UX refresh: botões compactos com text-overflow ellipsis (não saem da div), filter rows com scroll horizontal touch (não wrap), inputs/selects 36-38px de altura, headers 24/20px, padding interno reduzido em todos os cards/containers, tabelas com min-width 480px e scroll. Mantém o tema actual.' },
   { version: '3.10.10', date: '2026-05-09', summary: 'Mobile: widget de sessão removido COMPLETAMENTE do DOM em mobile (matchMedia + render condicional) — em vez de só escondido via CSS — para evitar sobreposição persistente em alguns browsers' },
@@ -4416,14 +4417,21 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
   }, [periods]);
 
   // Periods with NO plan yet (zero slots) — useful work cue
+  // Périodos sem produtos atribuídos no plano (zonas/móveis vazias).
+  // Excluí: terminados, planeados (ainda não começaram), ou já listados em
+  // endingSoon (para evitar duplicar a mesma campanha duas vezes na secção
+  // de Atenção).
   const periodsWithoutPlan = useMemo(() => {
+    const urgentIds = new Set(endingSoon.filter(i => i.days <= 2).map(i => i.period.id));
     return (periods || []).filter(p => {
-      if (periodStatus(p) === 'finished') return false;
+      const st = periodStatus(p);
+      if (st !== 'active') return false; // só campanhas em curso
+      if (urgentIds.has(p.id)) return false; // já mostrada como urgente
       const total = (Array.isArray(p.floors) ? p.floors : []).reduce((s, f) =>
         s + (f.zones || []).reduce((zs, z) => zs + (z.slots?.length || 0), 0), 0);
       return total === 0;
     });
-  }, [periods]);
+  }, [periods, endingSoon]);
 
   const stats = [
     { label: 'Períodos Ativos', value: activePeriodsCount || 0, sub: activePeriodsCount === 1 ? 'em curso' : 'em curso', icon: Calendar, color: T.green, view: 'campaigns' },
@@ -4584,7 +4592,7 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
               >
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 2 }}>
-                    Sem plano definido
+                    Sem produtos no plano
                   </div>
                   <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>
                     {p.name}
