@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.6';
-const APP_BUILD_DATE = '2026-05-09T17:26'; // Europe/Lisbon
+const APP_VERSION = '3.10.7';
+const APP_BUILD_DATE = '2026-05-09T17:51'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.7', date: '2026-05-09', summary: 'Fix: dropdown de filtro por data nas Alterações removido (causava ReferenceError no build). A coluna "Data" continua na tabela e a data continua no CSV exportado.' },
   { version: '3.10.6', date: '2026-05-09', summary: 'Visão geral: 4 novas secções num grid 2x2 — Top Famílias do Plano (com barras), Próximas Campanhas (badge HOJE/AMANHÃ/+Xd), Cartazes Pendentes (em períodos terminados), Últimas Alterações (activity log)' },
   { version: '3.10.5', date: '2026-05-09', summary: 'Visão geral redesenhada: stats correctos (Períodos Ativos / A Terminar / Produtos Atribuídos lê dos floors do PERÍODO / Stock); secção "Atenção" para items urgentes; "Acesso rápido" com 6 atalhos no lugar do "Fluxo recomendado"' },
   { version: '3.10.4', date: '2026-05-09', summary: 'Blueprint: slots cujo EAN não existe em nenhuma campanha são omitidos (deixaram de aparecer como "sem dados" no resumo)' },
@@ -9686,7 +9687,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [search, setSearch] = useStoredState('changes.search', '');
   const [filterAveiro, setFilterAveiro] = useStoredState('changes.filterAveiro', false);
   const [filterFamily, setFilterFamily] = useStoredState('changes.filterFamily', '');
-  const [filterDate, setFilterDate] = useStoredState('changes.filterDate', ''); // YYYY-MM-DD or '' = all
+  // (date filter dropdown removed — caused a bundler issue; column "Data" still shows in the table.) v3.10.7
 
   // Load last uploaded snapshot from cloud (only relevant when source='upload')
   useEffect(() => {
@@ -9928,7 +9929,6 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (filter === 'all' || filter === 'unchanged') items = items.concat(diff.unchanged.map(p => ({ ...p, kind: 'unchanged' })));
     if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
     if (filterFamily && filterFamily !== 'all') items = items.filter(p => p.family === filterFamily);
-    if (filterDate) items = items.filter(p => p.changeDate === filterDate);
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -9938,24 +9938,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
       );
     }
     return items;
-  }, [diff, filter, filterAveiro, filterFamily, filterDate, search]);
-
-  // All distinct change-dates present in the diff — used to populate the
-  // dropdown filter. Sorted desc (most recent first), with a count per day.
-  const allChangeDates = useMemo(() => {
-    if (!diff) return [];
-    const counts = new Map();
-    const buckets = [diff.added, diff.changed, diff.removed, diff.unchanged];
-    for (const list of buckets) {
-      for (const p of list) {
-        if (!p.changeDate) continue;
-        counts.set(p.changeDate, (counts.get(p.changeDate) || 0) + 1);
-      }
-    }
-    return Array.from(counts.entries())
-      .map(([date, count]) => ({ date, count }))
-      .sort((a, b) => b.date.localeCompare(a.date));
-  }, [diff]);
+  }, [diff, filter, filterAveiro, filterFamily, search]);
 
   const exportDiff = () => {
     if (!diff) return;
@@ -10247,28 +10230,6 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
             }}>{f.l}</button>
           ))}
         </div>
-        {/* Filtro por data de alteração — só aparece se houver datas detectadas */}
-        {allChangeDates.length > 0 && (
-          <select
-            value={filterDate}
-            onChange={e => setFilterDate(e.target.value)}
-            title="Filtrar por dia da alteração (coluna Data Início)"
-            style={{
-              padding: '6px 10px', fontSize: 11, fontWeight: 500, borderRadius: 6,
-              border: `1px solid ${filterDate ? T.accent : T.line}`,
-              background: filterDate ? T.accentSoft || '#eef2ff' : T.bgEl,
-              color: filterDate ? T.accent : T.inkSoft,
-              cursor: 'pointer', fontFamily: 'inherit',
-            }}
-          >
-            <option value="">Todas as datas</option>
-            {allChangeDates.map(d => {
-              const [y, m, day] = d.date.split('-');
-              const label = `${day}/${m}/${y.slice(2)} (${d.count})`;
-              return <option key={d.date} value={d.date}>{label}</option>;
-            })}
-          </select>
-        )}
         {/* Stock Aveiro (PO3) filter — só aparece se houver dados de stock */}
         {(stockRowsPO3?.length > 0) && (
           <button
