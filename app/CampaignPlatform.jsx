@@ -525,7 +525,7 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.9.5';
+const APP_VERSION = '3.9.6';
 const APP_BUILD_DATE = '2026-05-09T00:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.9.6', date: '2026-05-09', summary: 'Fix: rows de campanhas carregadas eagerly na startup (como PO2/PO3); erros de upload visíveis na UI' },
   { version: '3.9.5', date: '2026-05-09', summary: 'Fix: Excel de campanhas guardado imediatamente na cloud após upload; fix hydration de rows ao abrir período em novo dispositivo' },
   { version: '3.9.4', date: '2026-05-09', summary: 'Admin: separador Cloud para ver e apagar campanhas, snapshots PO2/PO3 e períodos da cloud' },
   { version: '3.9.3', date: '2026-05-09', summary: 'Fix: Inventário lê descrição/família directamente do PO2/PO3; skeleton no carregamento de campanhas' },
@@ -2725,6 +2726,30 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
+      // 2c. EAGER row hydration — load rows for ALL campaigns in background.
+      // This guarantees that no matter when the user opens a period, the rows
+      // are already there. Stock snapshots (PO2/PO3) work the same way and
+      // never had this problem. (v3.9.6)
+      (async () => {
+        try {
+          const idsNeedingRows = earlyMergedCampaigns
+            .filter(c => c.id && c._needsRows)
+            .map(c => c.id);
+          if (idsNeedingRows.length === 0) return;
+          console.log(`[startup] eager hydration: ${idsNeedingRows.length} campaigns`);
+          const hydrated = await cloudFetchCampaignRows(idsNeedingRows);
+          if (cancelled) return;
+          const rowsById = new Map(hydrated.map(h => [h.id, h]));
+          setCampaigns(prev => prev.map(c => {
+            const r = rowsById.get(c.id);
+            return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
+          }));
+          console.log(`[startup] eager hydration done`);
+        } catch (e) {
+          console.warn('[startup] eager hydration failed', e);
+        }
+      })();
+
       // 2b. Phase 2: lazy row hydration is now PER-PERIOD (see effect in
       // CampaignsView). Não pré-carregamos rows de TODAS as campanhas no
       // startup — só do período que o utilizador abrir. Isto torna o
@@ -4706,12 +4731,23 @@ function CampaignsView({
       // Immediate cloud push so rows persist across devices (Option A)
       if (user && supabase) {
         cloudUpsertCampaign({ ...updated, user_id: updated.user_id || user.id }, user.id).then(res => {
+          if (!res?.ok) {
+            console.error('[handleFile] cloud push failed (existing):', res?.error);
+            setUploadStatus({ kind: 'error', message: `Erro ao guardar na cloud: ${res?.error || 'desconhecido'}. Os dados estão guardados localmente.` });
+            return;
+          }
+          console.log('[handleFile] cloud push OK (existing)', res.data?.id);
           if (res?.data?.id && !isUUID(String(updated.id))) {
             setCampaigns(prev => prev.map(x =>
               x.id === updated.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x
             ));
           }
-        }).catch(e => console.warn('[handleFile] cloud push failed (existing)', e));
+        }).catch(e => {
+          console.error('[handleFile] cloud push failed (existing):', e);
+          setUploadStatus({ kind: 'error', message: `Erro ao guardar na cloud: ${e?.message || e}` });
+        });
+      } else {
+        console.warn('[handleFile] cannot push to cloud — user:', !!user, 'supabase:', !!supabase);
       }
       setUploadStatus({
         kind: 'success',
@@ -4791,12 +4827,23 @@ function CampaignsView({
       // Immediate cloud push so rows persist across devices (Option A)
       if (user && supabase) {
         cloudUpsertCampaign({ ...c, user_id: user.id }, user.id).then(res => {
+          if (!res?.ok) {
+            console.error('[handleFile] cloud push failed (new):', res?.error);
+            setUploadStatus({ kind: 'error', message: `Erro ao guardar na cloud: ${res?.error || 'desconhecido'}. Os dados estão guardados localmente.` });
+            return;
+          }
+          console.log('[handleFile] cloud push OK (new)', res.data?.id);
           if (res?.data?.id && !isUUID(String(c.id))) {
             setCampaigns(prev => prev.map(x =>
               x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || user.id } : x
             ));
           }
-        }).catch(e => console.warn('[handleFile] cloud push failed (new)', e));
+        }).catch(e => {
+          console.error('[handleFile] cloud push failed (new):', e);
+          setUploadStatus({ kind: 'error', message: `Erro ao guardar na cloud: ${e?.message || e}` });
+        });
+      } else {
+        console.warn('[handleFile] cannot push to cloud — user:', !!user, 'supabase:', !!supabase);
       }
       if (memoryHits > 0) {
         setTimeout(() => alert(`A memória de zonas pré-atribuiu ${memoryHits} ${memoryHits === 1 ? 'produto' : 'produtos'} com base em campanhas anteriores. Confirma na vista "Plano".`), 200);
