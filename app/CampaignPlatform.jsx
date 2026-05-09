@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.7';
-const APP_BUILD_DATE = '2026-05-09T17:51'; // Europe/Lisbon
+const APP_VERSION = '3.10.8';
+const APP_BUILD_DATE = '2026-05-09T17:53'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.8', date: '2026-05-09', summary: 'Layout mobile redesenhado: bottom-nav fixo com ícones+labels verticais, grids fixos colapsam para 1-2 colunas em tablet/telemóvel, FABs (blueprint/notas/notificações) afastados do nav inferior, modais full-screen, paddings reduzidos' },
   { version: '3.10.7', date: '2026-05-09', summary: 'Fix: dropdown de filtro por data nas Alterações removido (causava ReferenceError no build). A coluna "Data" continua na tabela e a data continua no CSV exportado.' },
   { version: '3.10.6', date: '2026-05-09', summary: 'Visão geral: 4 novas secções num grid 2x2 — Top Famílias do Plano (com barras), Próximas Campanhas (badge HOJE/AMANHÃ/+Xd), Cartazes Pendentes (em períodos terminados), Últimas Alterações (activity log)' },
   { version: '3.10.5', date: '2026-05-09', summary: 'Visão geral redesenhada: stats correctos (Períodos Ativos / A Terminar / Produtos Atribuídos lê dos floors do PERÍODO / Stock); secção "Atenção" para items urgentes; "Acesso rápido" com 6 atalhos no lugar do "Fluxo recomendado"' },
@@ -3570,43 +3571,108 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           .print-area .fade-up { animation: none !important; }
         }
 
-        /* ─── Mobile responsive ─── */
-        /* Tablet & phone: collapse sidebar to bottom nav, simplify tables */
+        /* ─── Mobile responsive (v3.10.8) ─── */
+        /* Tablet & phone: collapse sidebar to bottom nav, simplify layout */
         @media (max-width: 900px) {
           aside.no-print {
             position: fixed !important;
             bottom: 0 !important; left: 0 !important; right: 0 !important;
             top: auto !important;
-            width: 100% !important; height: auto !important;
-            flex-direction: row !important;
-            padding: 8px 12px !important;
+            width: 100% !important; height: auto !important; max-height: 64px !important;
+            flex-direction: row !important; align-items: center !important;
+            padding: 6px 8px !important;
             border-right: none !important;
             border-top: 1px solid ${T.line} !important;
-            overflow-x: auto !important;
+            overflow-x: auto !important; overflow-y: hidden !important;
             z-index: 50;
+            -webkit-overflow-scrolling: touch;
           }
-          aside.no-print > div { display: flex; flex-direction: row; gap: 4px; flex: 1; }
+          aside.no-print > div {
+            display: flex !important;
+            flex-direction: row !important;
+            gap: 2px !important;
+            flex: 1 !important;
+            margin-bottom: 0 !important;
+            align-items: center !important;
+          }
+          aside.no-print nav { flex-direction: row !important; gap: 2px !important; flex: 1 !important; flex-wrap: nowrap !important; }
           aside.no-print h1, aside.no-print .display { display: none !important; }
-          aside.no-print button { padding: 8px 10px !important; font-size: 11px !important; }
-          aside.no-print button span { display: none !important; }
-          main { padding-bottom: 80px !important; padding-left: 16px !important; padding-right: 16px !important; max-width: 100% !important; }
-          /* Tables: allow horizontal scroll */
+          aside.no-print button {
+            padding: 6px 8px !important; font-size: 9px !important;
+            flex-shrink: 0 !important; min-width: 52px !important; min-height: 48px !important;
+            flex-direction: column !important; gap: 2px !important;
+            line-height: 1 !important; border-radius: 6px !important;
+          }
+          aside.no-print button span {
+            font-size: 9px !important; line-height: 1 !important; display: inline !important;
+          }
+          /* Hide separator labels in mobile bottom nav */
+          aside.no-print nav > div .mono { display: none !important; }
+          aside.no-print nav > div { padding-top: 0 !important; margin: 0 !important; border-top: none !important; }
+
+          main {
+            padding: 24px 14px 84px !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+          }
+          /* Header titles smaller, no bottom margin overflow */
+          h1, h2, .display { font-size: 22px !important; }
+
+          /* COLLAPSE FIXED-COLUMN GRIDS to 1 or 2 cols on tablet */
+          [style*="repeat(4, 1fr)"] { grid-template-columns: repeat(2, 1fr) !important; }
+          [style*="repeat(3, 1fr)"] { grid-template-columns: repeat(2, 1fr) !important; }
+          [style*="1fr 1fr 1fr"] { grid-template-columns: 1fr !important; }
+          [style*="1fr 380px"] { grid-template-columns: 1fr !important; }
+          [style*="1fr 1.4fr"], [style*="1.4fr 1fr"] { grid-template-columns: 1fr !important; }
+
+          /* Tables: allow horizontal scroll AND smaller font */
           table { font-size: 10px !important; }
-          /* Hide low-priority columns by class */
           .mobile-hide { display: none !important; }
+
           /* Modals full-width on mobile */
-          [role="dialog"], .modal { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; }
+          [role="dialog"], .modal {
+            width: 100% !important; max-width: 100% !important;
+            max-height: 100vh !important; border-radius: 0 !important;
+            margin: 0 !important;
+          }
+
           /* Period overview cards stack */
           .period-grid { grid-template-columns: 1fr !important; }
-          /* Header buttons wrap */
-          h1, h2, .display { font-size: 18px !important; }
+
+          /* Floating action buttons — push higher to clear bottom nav (64px) */
+          button[title="Vista da loja (blueprint)"],
+          button[title="Notas"],
+          button[title="Notificações"] {
+            right: 14px !important;
+          }
+          /* Allow horizontal scroll for any grid that doesn't fit */
+          [style*="overflow-x"] { -webkit-overflow-scrolling: touch; }
         }
+
         @media (max-width: 600px) {
-          /* Hide more columns on phones */
+          /* Phones: 1 column for everything fixed */
+          [style*="repeat(4, 1fr)"],
+          [style*="repeat(3, 1fr)"],
+          [style*="repeat(2, 1fr)"] {
+            grid-template-columns: 1fr !important;
+          }
+          [style*="1fr 1fr"]:not([style*="1fr 1fr 1fr"]) {
+            grid-template-columns: 1fr !important;
+          }
           .phone-hide { display: none !important; }
+          /* Larger touch targets */
           input, select, button { font-size: 14px !important; }
-          /* Touch targets at least 40px */
           button { min-height: 36px; }
+          /* Reduce display font further */
+          h1, h2, .display { font-size: 20px !important; }
+          /* Header subtitle truncate */
+          main { padding: 16px 12px 84px !important; }
+          /* Bottom-nav buttons: tighter on small screens */
+          aside.no-print button {
+            min-width: 46px !important; padding: 5px 6px !important;
+            font-size: 8px !important;
+          }
+          aside.no-print button span { font-size: 8px !important; }
         }
       `}</style>
 
