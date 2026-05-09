@@ -9,7 +9,7 @@ import {
   Filter, ListTree, Layers, Tag, Lock, LogOut, AlertCircle, Sun, Moon,
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
-  Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database
+  Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.10.4';
-const APP_BUILD_DATE = '2026-05-09T13:37'; // Europe/Lisbon
+const APP_VERSION = '3.10.5';
+const APP_BUILD_DATE = '2026-05-09T17:22'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.10.5', date: '2026-05-09', summary: 'Visão geral redesenhada: stats correctos (Períodos Ativos / A Terminar / Produtos Atribuídos lê dos floors do PERÍODO / Stock); secção "Atenção" para items urgentes; "Acesso rápido" com 6 atalhos no lugar do "Fluxo recomendado"' },
   { version: '3.10.4', date: '2026-05-09', summary: 'Blueprint: slots cujo EAN não existe em nenhuma campanha são omitidos (deixaram de aparecer como "sem dados" no resumo)' },
   { version: '3.10.3', date: '2026-05-09', summary: 'Fix: Blueprint agora lê os slots dos floors do PERÍODO (não só das campanhas) — refletindo o plano que o utilizador definiu' },
   { version: '3.10.2', date: '2026-05-09', summary: 'CRITICAL: cloudUpsertCampaign nunca sobrescreve rows da cloud com vazios — só inclui rows/rows_compressed no payload quando há rows reais (protege contra ciclos de polling/floor-sync que apagavam dados)' },
@@ -4149,81 +4150,200 @@ function DropZone({ label, hint, accept, onFile, icon: Icon = Upload, compact = 
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Dashboard
+// Dashboard (v3.10.5 — reorganized)
+// Top: 4 stat cards (clickable, color-coded)
+// Section 1: Atenção (urgent items — only shown if any)
+// Section 2: Active campaigns summary (existing)
+// Section 3: Acesso rápido (quick action grid replacing recommended flow)
 // ─────────────────────────────────────────────────────────────────────────
 function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods, posters, notifications }) {
-  const totalSlots = campaigns.reduce((s, c) => s + countSlots(c.floors || []), 0);
+  // Plan ownership lives on PERIODS. Count ALL slots in every period's floors,
+  // then deduplicate by EAN so the same product attributed to two zones
+  // doesn't get counted twice.
+  const totalSlots = useMemo(() => {
+    const eans = new Set();
+    let countNoEan = 0;
+    (periods || []).forEach(p => {
+      const floors = Array.isArray(p.floors) ? p.floors : [];
+      floors.forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
+        const k = normalizeEAN(s.ref);
+        if (k) eans.add(k); else countNoEan++;
+      })));
+    });
+    // Legacy fallback: also count slots stored on campaigns for old data
+    campaigns.forEach(c => {
+      const floors = Array.isArray(c.floors) ? c.floors : [];
+      floors.forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
+        const k = normalizeEAN(s.ref);
+        if (k) eans.add(k); else countNoEan++;
+      })));
+    });
+    return eans.size + countNoEan;
+  }, [periods, campaigns]);
+
+  // Active periods (status === 'active') — periods currently running
+  const activePeriodsCount = useMemo(() => (periods || []).filter(p => periodStatus(p) === 'active').length, [periods]);
+
+  // Periods ending soon (within 5 days, not yet finished). Includes overdue.
+  const endingSoon = useMemo(() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const items = [];
+    (periods || []).forEach(p => {
+      if (!p.endDate || periodStatus(p) === 'finished') return;
+      if (periodStatus(p) !== 'active') return;
+      const end = new Date(p.endDate); end.setHours(0, 0, 0, 0);
+      const days = Math.round((end - today) / 86400000);
+      if (days <= 5) items.push({ period: p, days });
+    });
+    return items.sort((a, b) => a.days - b.days);
+  }, [periods]);
+
+  // Periods with NO plan yet (zero slots) — useful work cue
+  const periodsWithoutPlan = useMemo(() => {
+    return (periods || []).filter(p => {
+      if (periodStatus(p) === 'finished') return false;
+      const total = (Array.isArray(p.floors) ? p.floors : []).reduce((s, f) =>
+        s + (f.zones || []).reduce((zs, z) => zs + (z.slots?.length || 0), 0), 0);
+      return total === 0;
+    });
+  }, [periods]);
+
   const stats = [
-    { label: 'Campanhas', value: campaigns.length || '—', sub: 'carregadas' },
-    { label: 'Zonas Loja', value: defaultLayout.reduce((s, f) => s + f.zones.length, 0), sub: 'configuradas' },
-    { label: 'Produtos Atribuídos', value: totalSlots || '—', sub: 'em zonas' },
-    { label: 'Stock Cruzado', value: stockRowsPO2.length || '—', sub: 'referências' },
+    { label: 'Períodos Ativos', value: activePeriodsCount || 0, sub: activePeriodsCount === 1 ? 'em curso' : 'em curso', icon: Calendar, color: T.green, view: 'campaigns' },
+    { label: 'A Terminar', value: endingSoon.length || 0, sub: endingSoon.length === 0 ? 'tudo tranquilo' : 'em ≤ 5 dias', icon: Clock, color: endingSoon.some(i => i.days <= 0) ? T.red : (endingSoon.length > 0 ? '#d97706' : T.inkMute), view: 'campaigns' },
+    { label: 'Produtos Atribuídos', value: totalSlots || 0, sub: totalSlots === 0 ? 'sem plano ainda' : 'em zonas', icon: Layers, color: T.accent, view: 'campaigns' },
+    { label: 'Stock Cruzado', value: (stockRowsPO2.length || 0).toLocaleString('pt-PT'), sub: 'referências PO2', icon: Database, color: T.ink, view: 'stock' },
   ];
+
+  const showAttention = endingSoon.some(i => i.days <= 2) || periodsWithoutPlan.length > 0;
 
   return (
     <div className="fade-up">
       <Header eyebrow="Início" title="Visão geral" subtitle="Carrega ficheiros, analisa vendas, distribui produtos pelas zonas da loja e gera os materiais finais." />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 48 }}>
+      {/* Stats row — clickable cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
         {stats.map((s, i) => (
-          <div key={s.label} className="fade-up" style={{
-            animationDelay: `${i * 60}ms`,
-            padding: '24px 20px', background: T.bgEl,
-            border: `1px solid ${T.line}`, borderRadius: 10,
-          }}>
-            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>{s.label}</div>
-            <div className="display" style={{ fontSize: 44, lineHeight: 1, marginTop: 12, marginBottom: 4 }}>{s.value}</div>
-            <div style={{ fontSize: 12, color: T.inkSoft }}>{s.sub}</div>
-          </div>
+          <button key={s.label}
+            onClick={() => s.view && setView(s.view)}
+            className="fade-up"
+            style={{
+              animationDelay: `${i * 60}ms`,
+              padding: '20px', background: T.bgEl,
+              border: `1px solid ${T.line}`, borderLeft: `3px solid ${s.color}`,
+              borderRadius: 10, textAlign: 'left', cursor: s.view ? 'pointer' : 'default',
+              transition: 'all 0.15s', fontFamily: 'inherit',
+            }}
+            onMouseEnter={e => { if (s.view) e.currentTarget.style.borderColor = T.ink; }}
+            onMouseLeave={e => { if (s.view) e.currentTarget.style.borderColor = T.line; }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
+              <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>{s.label}</div>
+              <s.icon size={14} strokeWidth={1.6} style={{ color: s.color }} />
+            </div>
+            <div className="display" style={{ fontSize: 40, lineHeight: 1, marginBottom: 4, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 11, color: T.inkSoft }}>{s.sub}</div>
+          </button>
         ))}
       </div>
+
+      {/* Atenção — only when there are pressing items */}
+      {showAttention && (
+        <div style={{ marginBottom: 32, padding: 18, background: '#fffbeb', border: `1px solid #fde68a`, borderRadius: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <AlertTriangle size={14} style={{ color: '#d97706' }} />
+            <h3 className="mono" style={{ margin: 0, fontSize: 11, letterSpacing: '0.15em', color: '#92400e', textTransform: 'uppercase' }}>
+              Atenção
+            </h3>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+            {endingSoon.filter(i => i.days <= 2).map(({ period, days }) => (
+              <button key={`end-${period.id}`}
+                onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', period.id); window.location.reload(); }}
+                style={{
+                  padding: '10px 12px', background: '#fff', border: `1px solid ${days <= 0 || days === 0 ? T.red : '#fbbf24'}`,
+                  borderLeft: `3px solid ${days <= 0 || days === 0 ? T.red : '#d97706'}`,
+                  borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                }}
+              >
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="mono" style={{ fontSize: 9, color: days <= 0 ? T.red : '#d97706', letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 2 }}>
+                    {days < 0 ? `Terminou há ${Math.abs(days)}d` : days === 0 ? 'Termina hoje' : days === 1 ? 'Termina amanhã' : `Termina em ${days} dias`}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={period.name}>
+                    {period.name}
+                  </div>
+                </div>
+                <ArrowRight size={14} style={{ color: T.inkMute, flexShrink: 0 }} />
+              </button>
+            ))}
+            {periodsWithoutPlan.slice(0, 3).map(p => (
+              <button key={`noplan-${p.id}`}
+                onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', p.id); window.location.reload(); }}
+                style={{
+                  padding: '10px 12px', background: '#fff', border: `1px solid ${T.line}`,
+                  borderLeft: `3px solid ${T.inkMute}`,
+                  borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                }}
+              >
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 2 }}>
+                    Sem plano definido
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.name}>
+                    {p.name}
+                  </div>
+                </div>
+                <ArrowRight size={14} style={{ color: T.inkMute, flexShrink: 0 }} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Active campaigns summary */}
       {periods && periods.length > 0 && (
         <ActiveCampaignsSummary periods={periods} posters={posters} setView={setView} />
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 24 }}>
-        <div style={{ padding: 32, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12, position: 'relative', overflow: 'hidden' }}>
-          <div style={{ position: 'absolute', top: -40, right: -40, width: 200, height: 200, background: `radial-gradient(circle, ${T.accentSoft} 0%, transparent 70%)` }} />
-          <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.accent, textTransform: 'uppercase', marginBottom: 16 }}>
-            Fluxo recomendado
-          </div>
-          <h2 className="display" style={{ fontSize: 32, margin: 0, marginBottom: 16, fontStyle: 'italic' }}>Começa por aqui.</h2>
-          <ol style={{ paddingLeft: 0, listStyle: 'none', margin: 0, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {[
-              { n: '01', t: 'Analisa vendas e marca candidatos', v: 'sales' },
-              { n: '02', t: 'Carrega Excel da campanha', v: 'campaigns' },
-              { n: '03', t: 'Atribui produtos a cada zona/móvel', v: 'campaigns' },
-              { n: '04', t: 'Cruza com stock loja & armazém', v: 'stock' },
-              { n: '05', t: 'Prepara visuais e gera PDFs', v: 'images' },
-            ].map(s => (
-              <li key={s.n}>
-                <button onClick={() => setView(s.v)} style={{
-                  display: 'flex', alignItems: 'center', gap: 16, width: '100%',
-                  padding: '12px 0', background: 'transparent', border: 'none',
-                  borderBottom: `1px solid ${T.lineSoft}`, textAlign: 'left',
-                  color: T.ink, transition: 'all 0.15s',
-                }}
-                  onMouseEnter={e => e.currentTarget.style.paddingLeft = '8px'}
-                  onMouseLeave={e => e.currentTarget.style.paddingLeft = '0'}>
-                  <span className="mono" style={{ fontSize: 11, color: T.inkMute }}>{s.n}</span>
-                  <span style={{ flex: 1, fontSize: 15 }}>{s.t}</span>
-                  <ChevronRight size={16} strokeWidth={1.5} style={{ color: T.inkMute }} />
-                </button>
-              </li>
-            ))}
-          </ol>
+      {/* Acesso rápido — quick action grid (replaces "Fluxo recomendado") */}
+      <div style={{ marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <Zap size={14} style={{ color: T.accent }} />
+          <h3 className="mono" style={{ margin: 0, fontSize: 11, letterSpacing: '0.15em', color: T.inkSoft, textTransform: 'uppercase' }}>
+            Acesso rápido
+          </h3>
         </div>
-
-        <div style={{ padding: 32, background: T.ink, color: T.bg, borderRadius: 12, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', minHeight: 320 }}>
-          <div>
-            <Sparkles size={24} strokeWidth={1.5} style={{ color: T.accent }} />
-            <h3 className="display" style={{ fontSize: 26, margin: '20px 0 8px', fontStyle: 'italic', color: T.bg }}>Plano de loja vivo.</h3>
-            <p style={{ fontSize: 14, lineHeight: 1.6, color: '#A8A29A', margin: 0 }}>
-              Cada produto tem o seu lugar — móvel, cartaz, estado, stock. Tudo num só sítio, sempre atualizado.
-            </p>
-          </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+          {[
+            { v: 'campaigns', icon: Layers,    label: 'Campanhas',         hint: 'Carregar Excel & atribuir' },
+            { v: 'sales',     icon: BarChart3, label: 'Análise de vendas', hint: 'Top vendidos & candidatos' },
+            { v: 'changes',   icon: ArrowRight,label: 'Alterações',        hint: 'Comparar preços por dia' },
+            { v: 'stock',     icon: Database,  label: 'Stock',             hint: 'PO2 / PO3 cruzado' },
+            { v: 'images',    icon: ImageIcon, label: 'Cartazes',          hint: 'Imprimir & gerir' },
+            { v: 'inventory', icon: ScanLine,  label: 'Inventário',        hint: 'Picar EANs com câmara' },
+          ].map(q => (
+            <button key={q.v} onClick={() => setView(q.v)} style={{
+              padding: '14px 16px', background: T.bgEl, border: `1px solid ${T.line}`,
+              borderRadius: 8, textAlign: 'left', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 12,
+              transition: 'all 0.15s', fontFamily: 'inherit',
+            }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.background = T.paper || '#fff'; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = T.line; e.currentTarget.style.background = T.bgEl; }}
+            >
+              <div style={{ width: 36, height: 36, borderRadius: 8, background: T.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <q.icon size={16} strokeWidth={1.5} style={{ color: T.ink }} />
+              </div>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{q.label}</div>
+                <div style={{ fontSize: 11, color: T.inkMute, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q.hint}</div>
+              </div>
+              <ChevronRight size={14} style={{ color: T.inkMute, flexShrink: 0 }} />
+            </button>
+          ))}
         </div>
       </div>
     </div>
