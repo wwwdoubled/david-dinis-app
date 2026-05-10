@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.0';
-const APP_BUILD_DATE = '2026-05-10T16:55'; // Europe/Lisbon
+const APP_VERSION = '3.12.1';
+const APP_BUILD_DATE = '2026-05-10T17:05'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.1', date: '2026-05-10', summary: 'Performance crítica: SlotRow envolto em React.memo (escrever em Observações já não re-renderiza as outras 8 linhas); índice de stock construído UMA vez no FloorPlanner (era reconstruído por SlotRow ×9); cache automático global (WeakMap) no buildStockIndex — partilhado entre Plano/Saída/Listagem/Pedido GU, troca de tab agora é instantânea.' },
   { version: '3.12.0', date: '2026-05-10', summary: 'Pesquisa global Cmd+K/Ctrl+K (também "/"): overlay com input + resultados em tempo real para períodos, campanhas (Excels), produtos (EAN/desc/família) e atalhos de menu, navegação ↑↓ e Enter. Templates de plano renovados: 2 separadores ("Guardados" + "De outra campanha") com pesquisa, aplicam directamente ao floors do PERÍODO actual.' },
   { version: '3.11.4', date: '2026-05-09', summary: 'Performance & polish: React.memo nos cards de período/sumário/changes (mata re-renders do tick); Esc global fecha painéis flutuantes; scroll-to-top suave ao mudar de view; focus-ring acessível (Tab); transições padronizadas em botões/inputs; selection colorida.' },
   { version: '3.11.3', date: '2026-05-09', summary: 'periodStatus explicíto: campanha fica ATIVA até às 23:59:59 do dia de fim (antes a comparação era a meia-noite, o comportamento já era esse implicitamente; agora está documentado e à prova de bugs)' },
@@ -7176,8 +7177,20 @@ function filterRowsByFamily(rows, headers, excludedFamilies) {
 }
 
 // Build an indexed Map of stock rows keyed by normalized EAN. O(n) build, O(1) lookup.
+// Cache automático por referência de array (v3.12.1)
+// Evita reconstruir o índice (7299/36425 entries) quando os mesmos rows
+// são passados a vários componentes (ProductListing, FloorPlanner, PedidoGUView,
+// SlotRow, etc.) ou quando se troca de tab/view. Se o array referência for
+// idêntico, devolve o resultado anterior em O(1).
+const _stockIndexCache = typeof WeakMap !== 'undefined' ? new WeakMap() : null;
 function buildStockIndex(stockRows, mapping = {}) {
   if (!stockRows || !stockRows.length) return { index: new Map(), eanCol: null, stockCol: null };
+  // Cache lookup — só usa cache quando mapping não tem overrides custom
+  const useCache = _stockIndexCache && (!mapping || (!mapping.eanCol && !mapping.stockCol));
+  if (useCache) {
+    const cached = _stockIndexCache.get(stockRows);
+    if (cached) return cached;
+  }
   const headers = Object.keys(stockRows[0]);
 
   const eanCol = mapping.eanCol ||
@@ -7207,7 +7220,11 @@ function buildStockIndex(stockRows, mapping = {}) {
   }
 
   const index = new Map();
-  if (!stockCol) return { index, eanCol, stockCol: null };
+  if (!stockCol) {
+    const result = { index, eanCol, stockCol: null };
+    if (useCache) _stockIndexCache.set(stockRows, result);
+    return result;
+  }
 
   for (const r of stockRows) {
     const key = normalizeEAN(r[eanCol]);
@@ -7217,7 +7234,9 @@ function buildStockIndex(stockRows, mapping = {}) {
     const existing = index.get(key);
     if (existing === undefined || v > existing) index.set(key, v);
   }
-  return { index, eanCol, stockCol };
+  const result = { index, eanCol, stockCol };
+  if (useCache) _stockIndexCache.set(stockRows, result);
+  return result;
 }
 
 // Build an indexed Map of zones keyed by normalized EAN. O(slots) build, O(1) lookup.
@@ -9173,6 +9192,11 @@ function ColumnMappingPanel({ headers, autoCols, cols, overrides, onSetOverride,
 // Floor Planner
 // ─────────────────────────────────────────────────────────────────────────
 function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+  // Build stock indexes ONCE per FloorPlanner (not per slot row).
+  // 7299 PO2 + 36425 PO3 entries — building per-row was killing performance. (v3.12.1)
+  const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {}), [stockRowsPO2, stockMapPO2]);
+  const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {}), [stockRowsPO3, stockMapPO3]);
+
   return (
     <section>
       <div style={{
@@ -9202,8 +9226,8 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
             editZones={editZones}
             activeCampaign={activeCampaign}
             candidates={candidates}
-            stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
-            stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
+            stockIdxPO2={stockIdxPO2}
+            stockIdxPO3={stockIdxPO3}
             onRename={n => onRenameZone(zone.id, n)}
             onDelete={() => onDeleteZone(zone.id)}
             onAddSlot={() => onAddSlot(zone.id)}
@@ -9220,7 +9244,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -9288,8 +9312,8 @@ function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockRo
                   slot={slot}
                   activeCampaign={activeCampaign}
                   candidates={candidates}
-                  stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
-                  stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
+                  stockIdxPO2={stockIdxPO2}
+                  stockIdxPO3={stockIdxPO3}
                   onUpdate={p => onUpdateSlot(slot.id, p)}
                   onDelete={() => onDeleteSlot(slot.id)}
                 />
@@ -9319,13 +9343,12 @@ const ztdStyle = { padding: '2px 4px', borderBottom: `1px solid ${T.lineSoft}`, 
 // ─────────────────────────────────────────────────────────────────────────
 // Slot Row
 // ─────────────────────────────────────────────────────────────────────────
-function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {}, onUpdate, onDelete }) {
+// Wrapped in React.memo so that typing in one slot doesn't re-render
+// all sibling slots. Custom comparison ignores callback identity (parent
+// re-creates them inline) and only checks meaningful prop refs. (v3.12.1)
+const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, stockIdxPO2, stockIdxPO3, onUpdate, onDelete }) {
   const [showSuggest, setShowSuggest] = useState(false);
   const stateOpt = STATES.find(s => s.id === slot.state) || STATES[0];
-
-  // Build stock indexes (memoised per stock data, not per slot)
-  const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
-  const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
 
   // Resolve PO2/PO3: use stored value if set, otherwise look up by EAN from stock index
   const resolvedPO2 = useMemo(() => {
@@ -9537,7 +9560,15 @@ function SlotRow({ slot, activeCampaign, candidates, stockRowsPO2 = [], stockMap
       </td>
     </tr>
   );
-}
+}, (prev, next) => {
+  // Custom equality: ignore callback identity (createad inline), only check
+  // meaningful refs. Returns true if props are "equal" (skip re-render).
+  return prev.slot === next.slot
+      && prev.activeCampaign === next.activeCampaign
+      && prev.candidates === next.candidates
+      && prev.stockIdxPO2 === next.stockIdxPO2
+      && prev.stockIdxPO3 === next.stockIdxPO3;
+});
 
 // ─────────────────────────────────────────────────────────────────────────
 // Output Preview — print-friendly structured view (matches spreadsheet)
