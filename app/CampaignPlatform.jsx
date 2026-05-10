@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.5';
-const APP_BUILD_DATE = '2026-05-10T17:36'; // Europe/Lisbon
+const APP_VERSION = '3.12.6';
+const APP_BUILD_DATE = '2026-05-10T17:56'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.6', date: '2026-05-10', summary: 'Tab switching dentro da campanha (Plano/Listagem/Saída/Pedido GU) agora instantâneo: productByEan (lookup EAN→produto com 8 campos: nome/família/preços/datas) construído UMA vez no CampaignsView e partilhado entre as 4 views — antes cada uma reconstruía o seu Map (3806 entries). Também usado pelo SlotRow.resolvedProduct (era .find() linear sobre 3806 rows por slot).' },
   { version: '3.12.5', date: '2026-05-10', summary: 'Fluidez global tipo Cmd+K em toda a app: novo <SearchInput> uncontrolled+debounced (150ms) aplicado em Listagem, Alterações, Vendas, Templates, Importar campanha, Admin Cloud, Activity Log; ZoneBlock memoizado com equality custom (ignora callbacks); typing em qualquer campo de pesquisa ficou instantâneo independentemente do tamanho do dataset.' },
   { version: '3.12.4', date: '2026-05-10', summary: 'Adicionar produto / autocomplete do nome PRODUTO: novo <ProductNameAutocomplete> com lista pré-construída UMA vez por campanha (FloorPlanner) e filtro local em estado próprio. Antes: cada keystroke iterava 3806 rows × forEach por slot, em todas as zonas. Agora: filtragem instantânea sobre array já preparado (com nameLower pré-computado), input uncontrolled, sugestões aparecem imediatamente.' },
   { version: '3.12.3', date: '2026-05-10', summary: 'Inputs UNCONTROLLED nos campos do plano: o browser trata da digitação nativamente (zero re-renders React durante typing). Commit ao pai apenas onBlur ou Enter. Continua a sincronizar com cloud quando outro dispositivo edita (mas nunca rouba a edição se o utilizador está a digitar).' },
@@ -5466,6 +5467,40 @@ function CampaignsView({
     };
   }, [primaryCampaign, activeCampaigns, excludedFamilies]);
 
+  // Map EAN → produto (full info). Construído UMA vez quando a campanha
+  // activa muda; partilhado entre Plano (SlotRow.resolvedProduct), Saída
+  // (OutputPreview) e Pedido GU (PedidoGUView). Antes cada view construía
+  // o seu próprio em onMount → tab switching demorado. (v3.12.6)
+  const productByEan = useMemo(() => {
+    const map = new Map();
+    if (!mergedActiveCampaign) return map;
+    const cols = detectColumns(mergedActiveCampaign.headers || []);
+    if (!cols.ean) return map;
+    const rows = mergedActiveCampaign.rows || [];
+    const len = rows.length;
+    for (let i = 0; i < len; i++) {
+      const r = rows[i];
+      const key = normalizeEAN(r[cols.ean]);
+      if (!key || map.has(key)) continue;
+      const basePriceVal = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
+      const campPriceVal = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
+      const explicitDisc = cols.discount ? parseNum(r[cols.discount]) : 0;
+      const calcDisc = (basePriceVal > 0 && campPriceVal > 0 && campPriceVal < basePriceVal)
+        ? ((basePriceVal - campPriceVal) / basePriceVal) * 100 : 0;
+      map.set(key, {
+        name: cols.description ? String(r[cols.description] ?? '').trim() : '',
+        family: cols.family ? String(r[cols.family] ?? '').trim() : '',
+        subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '').trim() : '',
+        basePrice: basePriceVal,
+        campaignPrice: campPriceVal,
+        discount: explicitDisc >= 0.5 ? explicitDisc : calcDisc,
+        startDate: cols.startDate ? r[cols.startDate] : '',
+        endDate: cols.endDate ? r[cols.endDate] : '',
+      });
+    }
+    return map;
+  }, [mergedActiveCampaign]);
+
   // ─── PLAN OWNERSHIP: PERIOD ─────────────────────────────────────────
   // The plan (floors) lives on the PERIOD, not on any specific Excel.
   // Falls back to: oldest campaign's floors (legacy data) → defaultLayout.
@@ -6567,6 +6602,7 @@ function CampaignsView({
               editZones={editZones}
               activeCampaign={mergedActiveCampaign}
               candidates={candidates}
+              productByEan={productByEan}
               stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
               stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
               onAddZone={() => addZone(floor.id)}
@@ -6610,6 +6646,7 @@ function CampaignsView({
         <OutputPreview
           floors={combinedFloors}
           activeCampaign={mergedActiveCampaign}
+          productByEan={productByEan}
           stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
           stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
         />
@@ -6617,6 +6654,7 @@ function CampaignsView({
         <PedidoGUView
           floors={combinedFloors}
           activeCampaign={mergedActiveCampaign}
+          productByEan={productByEan}
           stockRowsPO2={stockRowsPO2} stockMapPO2={stockMapPO2}
           stockRowsPO3={stockRowsPO3} stockMapPO3={stockMapPO3}
           onUpdateSlot={(zoneId, slotId, patch) => {
@@ -9296,7 +9334,7 @@ function ColumnMappingPanel({ headers, autoCols, cols, overrides, onSetOverride,
 // ─────────────────────────────────────────────────────────────────────────
 // Floor Planner
 // ─────────────────────────────────────────────────────────────────────────
-function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function FloorPlanner({ floor, editZones, activeCampaign, candidates, productByEan, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   // Build stock indexes ONCE per FloorPlanner (not per slot row).
   // 7299 PO2 + 36425 PO3 entries — building per-row was killing performance. (v3.12.1)
   const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {}), [stockRowsPO2, stockMapPO2]);
@@ -9369,6 +9407,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
             activeCampaign={activeCampaign}
             candidates={candidates}
             productSuggestions={productSuggestions}
+            productByEan={productByEan}
             stockIdxPO2={stockIdxPO2}
             stockIdxPO3={stockIdxPO3}
             onRename={n => onRenameZone(zone.id, n)}
@@ -9387,7 +9426,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, productByEan, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -9456,6 +9495,7 @@ const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, active
                   activeCampaign={activeCampaign}
                   candidates={candidates}
                   productSuggestions={productSuggestions}
+                  productByEan={productByEan}
                   stockIdxPO2={stockIdxPO2}
                   stockIdxPO3={stockIdxPO3}
                   onUpdate={p => onUpdateSlot(slot.id, p)}
@@ -9487,6 +9527,7 @@ const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, active
       && prev.activeCampaign === next.activeCampaign
       && prev.candidates === next.candidates
       && prev.productSuggestions === next.productSuggestions
+      && prev.productByEan === next.productByEan
       && prev.stockIdxPO2 === next.stockIdxPO2
       && prev.stockIdxPO3 === next.stockIdxPO3;
 });
@@ -9674,7 +9715,7 @@ const ProductNameAutocomplete = React.memo(function ProductNameAutocomplete({ in
 // Wrapped in React.memo so that typing in one slot doesn't re-render
 // all sibling slots. Custom comparison ignores callback identity (parent
 // re-creates them inline) and only checks meaningful prop refs. (v3.12.1)
-const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onUpdate, onDelete }) {
+const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, productSuggestions, productByEan, stockIdxPO2, stockIdxPO3, onUpdate, onDelete }) {
   const stateOpt = STATES.find(s => s.id === slot.state) || STATES[0];
 
   // Resolve PO2/PO3: use stored value if set, otherwise look up by EAN from stock index
@@ -9690,9 +9731,16 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
     return key ? String(stockIdxPO3.get(key) ?? '') : '';
   }, [slot.stockPO3, slot.ref, stockIdxPO3]);
 
-  // If slot.name is empty but slot.ref is set, resolve full product info from activeCampaign by EAN
+  // Lookup do produto pela EAN — agora O(1) usando o productByEan partilhado.
+  // Antes: .find() iterava activeCampaign.rows (3806 entries) por slot. (v3.12.6)
   const resolvedProduct = useMemo(() => {
-    if (!slot.ref || !activeCampaign) return null;
+    if (!slot.ref) return null;
+    if (productByEan && productByEan.size > 0) {
+      const key = normalizeEAN(slot.ref);
+      return key ? (productByEan.get(key) || null) : null;
+    }
+    // Fallback: pesquisa directa (apenas se productByEan não estiver disponível)
+    if (!activeCampaign) return null;
     const cols = detectColumns(activeCampaign.headers);
     if (!cols.ean) return null;
     const normRef = normalizeEAN(slot.ref);
@@ -9706,7 +9754,7 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
       campaignPrice: cols.campaignPrice ? parseNum(match[cols.campaignPrice]) : 0,
       discount: cols.discount ? parseNum(match[cols.discount]) : 0,
     };
-  }, [slot.ref, activeCampaign]);
+  }, [slot.ref, activeCampaign, productByEan]);
   const resolvedName = slot.name || resolvedProduct?.name || '';
   const resolvedFamily = slot.family || resolvedProduct?.family || '';
   const resolvedSubfamily = slot.subfamily || resolvedProduct?.subfamily || '';
@@ -9865,6 +9913,7 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
       && prev.activeCampaign === next.activeCampaign
       && prev.candidates === next.candidates
       && prev.productSuggestions === next.productSuggestions
+      && prev.productByEan === next.productByEan
       && prev.stockIdxPO2 === next.stockIdxPO2
       && prev.stockIdxPO3 === next.stockIdxPO3;
 });
@@ -9876,7 +9925,7 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
 // PedidoGUView — calcula e exporta unidades a pedir ao armazém (PO2)
 // para preencher cada zona/móvel. GU = Garantia de Unidades = qtd a pedir.
 // ─────────────────────────────────────────────────────────────────────────
-function PedidoGUView({ floors, activeCampaign, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onUpdateSlot, campaignName }) {
+function PedidoGUView({ floors, activeCampaign, productByEan, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onUpdateSlot, campaignName }) {
   // Default target qty per slot (configurable globally; can be overridden per zone via zoneTargets)
   const [defaultTarget, setDefaultTarget] = useStoredState('pedido.defaultTarget', 1);
   // Map: zoneId → target qty (overrides defaultTarget for that zone)
@@ -9885,21 +9934,8 @@ function PedidoGUView({ floors, activeCampaign, stockRowsPO2, stockMapPO2, stock
   const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
   const { index: idxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
 
-  const productIdx = useMemo(() => {
-    const map = new Map();
-    if (!activeCampaign) return map;
-    const cols = detectColumns(activeCampaign.headers || []);
-    if (!cols.ean) return map;
-    for (const r of (activeCampaign.rows || [])) {
-      const key = normalizeEAN(r[cols.ean]);
-      if (!key || map.has(key)) continue;
-      map.set(key, {
-        name: cols.description ? String(r[cols.description] ?? '').trim() : '',
-        family: cols.family ? String(r[cols.family] ?? '').trim() : '',
-      });
-    }
-    return map;
-  }, [activeCampaign]);
+  // productByEan vem do CampaignsView agora (computado uma vez, partilhado entre Plano/Saída/Pedido GU). v3.12.6
+  const productIdx = productByEan || new Map();
 
   const targetForZone = (zoneId) => zoneTargets[zoneId] ?? defaultTarget;
 
@@ -10162,38 +10198,13 @@ function PedidoGUView({ floors, activeCampaign, stockRowsPO2, stockMapPO2, stock
 const pthStyle = { padding: '8px 10px', fontSize: 10, fontWeight: 600, color: T.inkSoft, letterSpacing: '0.04em', textTransform: 'uppercase', borderBottom: `1px solid ${T.line}`, textAlign: 'left' };
 const ptdStyle = { padding: '8px 10px', fontSize: 11, color: T.ink, verticalAlign: 'middle' };
 
-function OutputPreview({ floors, activeCampaign = null, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
-  // Build stock indexes once for EAN lookup
+function OutputPreview({ floors, activeCampaign = null, productByEan = null, stockRowsPO2 = [], stockMapPO2 = {}, stockRowsPO3 = [], stockMapPO3 = {} }) {
+  // Build stock indexes once for EAN lookup (cached globally via WeakMap em buildStockIndex)
   const { index: idxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
   const { index: idxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
 
-  // Build EAN → product info index from the active campaign
-  const productIdx = useMemo(() => {
-    const map = new Map();
-    if (!activeCampaign) return map;
-    const cols = detectColumns(activeCampaign.headers || []);
-    if (!cols.ean) return map;
-    for (const r of (activeCampaign.rows || [])) {
-      const key = normalizeEAN(r[cols.ean]);
-      if (!key || map.has(key)) continue;
-      const basePriceVal = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
-      const campPriceVal = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
-      const explicitDisc = cols.discount ? parseNum(r[cols.discount]) : 0;
-      const calcDisc = (basePriceVal > 0 && campPriceVal > 0 && campPriceVal < basePriceVal)
-        ? ((basePriceVal - campPriceVal) / basePriceVal) * 100 : 0;
-      map.set(key, {
-        name: cols.description ? String(r[cols.description] ?? '').trim() : '',
-        family: cols.family ? String(r[cols.family] ?? '').trim() : '',
-        subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '').trim() : '',
-        basePrice: basePriceVal,
-        campaignPrice: campPriceVal,
-        discount: explicitDisc >= 0.5 ? explicitDisc : calcDisc,
-        startDate: cols.startDate ? r[cols.startDate] : '',
-        endDate: cols.endDate ? r[cols.endDate] : '',
-      });
-    }
-    return map;
-  }, [activeCampaign]);
+  // productByEan vem do CampaignsView (computado uma vez, partilhado). v3.12.6
+  const productIdx = productByEan || new Map();
 
   const resolveField = (s, field) => {
     if (s[field] !== '' && s[field] !== undefined && s[field] !== null) return s[field];
