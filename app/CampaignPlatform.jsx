@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.1';
-const APP_BUILD_DATE = '2026-05-10T17:05'; // Europe/Lisbon
+const APP_VERSION = '3.12.2';
+const APP_BUILD_DATE = '2026-05-10T17:13'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.2', date: '2026-05-10', summary: 'Typing nas Observações INSTANTÂNEO: novo DebouncedInput com state local (digitação imediata, commit ao pai 250ms depois ou onBlur). updatePeriod debounceado (600ms) — IDB write + cloud upsert + activity log já não disparam por keystroke. Flush automático ao sair/perder foco. Aplicado em todos os inputs de SlotRow (Observações, Pedido GU, Stock PO2/PO3, Campanha, Data).' },
   { version: '3.12.1', date: '2026-05-10', summary: 'Performance crítica: SlotRow envolto em React.memo (escrever em Observações já não re-renderiza as outras 8 linhas); índice de stock construído UMA vez no FloorPlanner (era reconstruído por SlotRow ×9); cache automático global (WeakMap) no buildStockIndex — partilhado entre Plano/Saída/Listagem/Pedido GU, troca de tab agora é instantânea.' },
   { version: '3.12.0', date: '2026-05-10', summary: 'Pesquisa global Cmd+K/Ctrl+K (também "/"): overlay com input + resultados em tempo real para períodos, campanhas (Excels), produtos (EAN/desc/família) e atalhos de menu, navegação ↑↓ e Enter. Templates de plano renovados: 2 separadores ("Guardados" + "De outra campanha") com pesquisa, aplicam directamente ao floors do PERÍODO actual.' },
   { version: '3.11.4', date: '2026-05-09', summary: 'Performance & polish: React.memo nos cards de período/sumário/changes (mata re-renders do tick); Esc global fecha painéis flutuantes; scroll-to-top suave ao mudar de view; focus-ring acessível (Tab); transições padronizadas em botões/inputs; selection colorida.' },
@@ -3187,23 +3188,58 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return p;
   }, [user]);
 
+  // Debounced persistence buffers — evita escrever em IDB / cloud / activity_log
+  // a cada keystroke quando o utilizador escreve em campos como "Observações".
+  // O state local actualiza-se sempre imediatamente (UI responsiva). (v3.12.2)
+  const persistTimersRef = useRef(new Map()); // periodId → { timer, latest, changedKeys }
+  const flushPeriodPersist = useCallback((id) => {
+    const pending = persistTimersRef.current.get(id);
+    if (!pending) return;
+    persistTimersRef.current.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    const next = pending.latest;
+    if (!next) return;
+    idbPutPeriod(next).catch(err => console.warn('Period save failed:', err));
+    if (user && supabase) {
+      cloudUpsertPeriod(next, user.id).catch(err => console.warn('Period cloud upsert failed:', err));
+      logActivity({
+        userId: user.id, userEmail: user.email,
+        action: 'update', resourceType: 'period',
+        resourceId: id, resourceName: next.name,
+        metadata: { changes: Array.from(pending.changedKeys) },
+      });
+    }
+  }, [user]);
+
   const updatePeriod = useCallback((id, patch) => {
     setPeriods(ps => ps.map(p => {
       if (p.id !== id) return p;
       const next = { ...p, ...patch, updatedAt: new Date().toISOString() };
-      idbPutPeriod(next).catch(err => console.warn('Period save failed:', err));
-      if (user && supabase) {
-        cloudUpsertPeriod(next, user.id).catch(err => console.warn('Period cloud upsert failed:', err));
-        logActivity({
-          userId: user.id, userEmail: user.email,
-          action: 'update', resourceType: 'period',
-          resourceId: id, resourceName: next.name,
-          metadata: { changes: Object.keys(patch) },
-        });
-      }
+      // Update or create the pending persistence buffer for this period
+      const existing = persistTimersRef.current.get(id);
+      if (existing && existing.timer) clearTimeout(existing.timer);
+      const changedKeys = existing ? new Set(existing.changedKeys) : new Set();
+      Object.keys(patch).forEach(k => changedKeys.add(k));
+      const timer = setTimeout(() => flushPeriodPersist(id), 600);
+      persistTimersRef.current.set(id, { timer, latest: next, changedKeys });
       return next;
     }));
-  }, [user]);
+  }, [flushPeriodPersist]);
+
+  // Garantir flush quando o utilizador navega/sai (não perde dados nas Observações)
+  useEffect(() => {
+    const flushAll = () => {
+      const ids = Array.from(persistTimersRef.current.keys());
+      ids.forEach(id => flushPeriodPersist(id));
+    };
+    window.addEventListener('beforeunload', flushAll);
+    window.addEventListener('blur', flushAll);
+    return () => {
+      flushAll();
+      window.removeEventListener('beforeunload', flushAll);
+      window.removeEventListener('blur', flushAll);
+    };
+  }, [flushPeriodPersist]);
 
   const deletePeriod = useCallback((id) => {
     const p = periods.find(x => x.id === id);
@@ -9343,6 +9379,52 @@ const ztdStyle = { padding: '2px 4px', borderBottom: `1px solid ${T.lineSoft}`, 
 // ─────────────────────────────────────────────────────────────────────────
 // Slot Row
 // ─────────────────────────────────────────────────────────────────────────
+// Input com state local — escreve sempre instantaneamente sem aguardar
+// re-render do pai. Notifica o pai onBlur OU após um pequeno timeout sem
+// digitar (250ms). Ideal para campos como "Observações" onde o pai faria
+// IDB/cloud writes a cada keystroke. (v3.12.2)
+const DebouncedInput = React.memo(function DebouncedInput({ value, onCommit, debounce = 250, ...rest }) {
+  const [local, setLocal] = useState(value || '');
+  const lastCommittedRef = useRef(value);
+  const timerRef = useRef(null);
+
+  // Quando o valor externo muda (ex: outra pessoa edita), actualiza o local — mas
+  // só se o utilizador NÃO está a meio de uma edição (último valor committed = valor externo).
+  useEffect(() => {
+    if (value !== lastCommittedRef.current) {
+      lastCommittedRef.current = value;
+      setLocal(value || '');
+    }
+  }, [value]);
+
+  const commit = useCallback((v) => {
+    if (v === lastCommittedRef.current) return;
+    lastCommittedRef.current = v;
+    onCommit && onCommit(v);
+  }, [onCommit]);
+
+  const handleChange = (e) => {
+    const v = e.target.value;
+    setLocal(v);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => commit(v), debounce);
+  };
+  const handleBlur = () => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    commit(local);
+  };
+  // Flush quando o componente desmonta
+  useEffect(() => () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      if (local !== lastCommittedRef.current) onCommit && onCommit(local);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return <input value={local} onChange={handleChange} onBlur={handleBlur} {...rest} />;
+});
+
 // Wrapped in React.memo so that typing in one slot doesn't re-render
 // all sibling slots. Custom comparison ignores callback identity (parent
 // re-creates them inline) and only checks meaningful prop refs. (v3.12.1)
@@ -9516,37 +9598,58 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
         </select>
       </td>
       <td style={ztdStyle}>
-        <input type="text" value={slot.date} onChange={e => onUpdate({ date: e.target.value })} className="row-input" placeholder="—" />
+        <DebouncedInput
+          value={slot.date}
+          onCommit={v => onUpdate({ date: v })}
+          type="text"
+          className="row-input"
+          placeholder="—"
+        />
       </td>
       <td style={{ ...ztdStyle, background: slot.campaign ? T.blue : 'transparent', color: slot.campaign ? '#fff' : T.ink }}>
-        <input value={slot.campaign} onChange={e => onUpdate({ campaign: e.target.value })} className="row-input"
-          placeholder="campanha" style={{ color: slot.campaign ? '#fff' : T.ink, fontWeight: slot.campaign ? 500 : 400 }} />
+        <DebouncedInput
+          value={slot.campaign}
+          onCommit={v => onUpdate({ campaign: v })}
+          className="row-input"
+          placeholder="campanha"
+          style={{ color: slot.campaign ? '#fff' : T.ink, fontWeight: slot.campaign ? 500 : 400 }}
+        />
       </td>
       <td style={ztdStyle}>
-        <input value={slot.observations} onChange={e => onUpdate({ observations: e.target.value })} className="row-input" placeholder="—" />
+        <DebouncedInput
+          value={slot.observations}
+          onCommit={v => onUpdate({ observations: v })}
+          className="row-input"
+          placeholder="—"
+        />
       </td>
       <td style={{ ...ztdStyle, textAlign: 'center', background: resolvedPO2 && !slot.stockPO2 ? '#EAF5FB' : 'transparent' }}>
-        <input
+        <DebouncedInput
           value={slot.stockPO2}
-          onChange={e => onUpdate({ stockPO2: e.target.value })}
-          onFocus={e => { if (!slot.stockPO2 && resolvedPO2) onUpdate({ stockPO2: resolvedPO2 }); }}
+          onCommit={v => onUpdate({ stockPO2: v })}
+          onFocus={() => { if (!slot.stockPO2 && resolvedPO2) onUpdate({ stockPO2: resolvedPO2 }); }}
           placeholder={resolvedPO2 || '—'}
           className="row-input mono"
           style={{ textAlign: 'center', fontSize: 11, color: slot.stockPO2 ? T.ink : T.inkMute }}
         />
       </td>
       <td style={{ ...ztdStyle, textAlign: 'center', background: resolvedPO3 && !slot.stockPO3 ? '#EAF5FB' : 'transparent' }}>
-        <input
+        <DebouncedInput
           value={slot.stockPO3}
-          onChange={e => onUpdate({ stockPO3: e.target.value })}
-          onFocus={e => { if (!slot.stockPO3 && resolvedPO3) onUpdate({ stockPO3: resolvedPO3 }); }}
+          onCommit={v => onUpdate({ stockPO3: v })}
+          onFocus={() => { if (!slot.stockPO3 && resolvedPO3) onUpdate({ stockPO3: resolvedPO3 }); }}
           placeholder={resolvedPO3 || '—'}
           className="row-input mono"
           style={{ textAlign: 'center', fontSize: 11, color: slot.stockPO3 ? T.ink : T.inkMute }}
         />
       </td>
       <td style={{ ...ztdStyle, textAlign: 'center', background: T.yellow }}>
-        <input value={slot.pedidoGU} onChange={e => onUpdate({ pedidoGU: e.target.value })} className="row-input mono" style={{ textAlign: 'center', fontSize: 11, fontWeight: 600 }} />
+        <DebouncedInput
+          value={slot.pedidoGU}
+          onCommit={v => onUpdate({ pedidoGU: v })}
+          className="row-input mono"
+          style={{ textAlign: 'center', fontSize: 11, fontWeight: 600 }}
+        />
       </td>
       <td style={ztdStyle}>
         <button onClick={onDelete} style={{
