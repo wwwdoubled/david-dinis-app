@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.3';
-const APP_BUILD_DATE = '2026-05-10T17:22'; // Europe/Lisbon
+const APP_VERSION = '3.12.4';
+const APP_BUILD_DATE = '2026-05-10T17:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.4', date: '2026-05-10', summary: 'Adicionar produto / autocomplete do nome PRODUTO: novo <ProductNameAutocomplete> com lista pré-construída UMA vez por campanha (FloorPlanner) e filtro local em estado próprio. Antes: cada keystroke iterava 3806 rows × forEach por slot, em todas as zonas. Agora: filtragem instantânea sobre array já preparado (com nameLower pré-computado), input uncontrolled, sugestões aparecem imediatamente.' },
   { version: '3.12.3', date: '2026-05-10', summary: 'Inputs UNCONTROLLED nos campos do plano: o browser trata da digitação nativamente (zero re-renders React durante typing). Commit ao pai apenas onBlur ou Enter. Continua a sincronizar com cloud quando outro dispositivo edita (mas nunca rouba a edição se o utilizador está a digitar).' },
   { version: '3.12.2', date: '2026-05-10', summary: 'Typing nas Observações INSTANTÂNEO: novo DebouncedInput com state local (digitação imediata, commit ao pai 250ms depois ou onBlur). updatePeriod debounceado (600ms) — IDB write + cloud upsert + activity log já não disparam por keystroke. Flush automático ao sair/perder foco. Aplicado em todos os inputs de SlotRow (Observações, Pedido GU, Stock PO2/PO3, Campanha, Data).' },
   { version: '3.12.1', date: '2026-05-10', summary: 'Performance crítica: SlotRow envolto em React.memo (escrever em Observações já não re-renderiza as outras 8 linhas); índice de stock construído UMA vez no FloorPlanner (era reconstruído por SlotRow ×9); cache automático global (WeakMap) no buildStockIndex — partilhado entre Plano/Saída/Listagem/Pedido GU, troca de tab agora é instantânea.' },
@@ -9234,6 +9235,43 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
   const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {}), [stockRowsPO2, stockMapPO2]);
   const { index: stockIdxPO3 } = useMemo(() => buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {}), [stockRowsPO3, stockMapPO3]);
 
+  // Pre-build product autocomplete list ONCE per active campaign (not per slot
+  // and not per keystroke). Was: cada keystroke no PRODUTO de cada slot
+  // re-iterava activeCampaign.rows (3806 entries). (v3.12.4)
+  const productSuggestions = useMemo(() => {
+    const all = [];
+    if (activeCampaign && activeCampaign.rows && activeCampaign.headers) {
+      const cols = detectColumns(activeCampaign.headers);
+      const refKey = cols.ean || activeCampaign.headers.find(h => /ref|sku|cód|cod|ean/i.test(h)) || activeCampaign.headers[0];
+      const nameKey = cols.description || activeCampaign.headers.find(h => /nome|descri|produto|artigo/i.test(h)) || activeCampaign.headers[1];
+      const len = activeCampaign.rows.length;
+      for (let i = 0; i < len; i++) {
+        const r = activeCampaign.rows[i];
+        const name = String(r[nameKey] ?? '');
+        all.push({
+          source: 'campanha',
+          ref: String(r[refKey] ?? `#${i}`),
+          name,
+          nameLower: name.toLowerCase(),
+          family: cols.family ? String(r[cols.family] ?? '') : '',
+          subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '') : '',
+          basePrice: cols.basePrice ? parseNum(r[cols.basePrice]) : 0,
+          campaignPrice: cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0,
+          discount: cols.discount ? parseNum(r[cols.discount]) : 0,
+          startDate: cols.startDate ? r[cols.startDate] : '',
+          endDate: cols.endDate ? r[cols.endDate] : '',
+        });
+      }
+    }
+    (candidates || []).forEach(c => all.push({
+      source: 'vendas',
+      ref: c.ref,
+      name: c.name,
+      nameLower: String(c.name || '').toLowerCase(),
+    }));
+    return all;
+  }, [activeCampaign, candidates]);
+
   return (
     <section>
       <div style={{
@@ -9263,6 +9301,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
             editZones={editZones}
             activeCampaign={activeCampaign}
             candidates={candidates}
+            productSuggestions={productSuggestions}
             stockIdxPO2={stockIdxPO2}
             stockIdxPO3={stockIdxPO3}
             onRename={n => onRenameZone(zone.id, n)}
@@ -9281,7 +9320,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -9349,6 +9388,7 @@ function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, stockId
                   slot={slot}
                   activeCampaign={activeCampaign}
                   candidates={candidates}
+                  productSuggestions={productSuggestions}
                   stockIdxPO2={stockIdxPO2}
                   stockIdxPO3={stockIdxPO3}
                   onUpdate={p => onUpdateSlot(slot.id, p)}
@@ -9436,11 +9476,127 @@ const DebouncedInput = React.memo(function DebouncedInput({ value, onCommit, ...
   return prev.value === next.value;
 });
 
+// Autocomplete do nome do PRODUTO — input UNCONTROLLED com filtro de sugestões
+// em estado local. Filtra a lista pré-construída (productSuggestions) sem
+// disparar re-render do pai a cada keystroke. (v3.12.4)
+const ProductNameAutocomplete = React.memo(function ProductNameAutocomplete({ initialValue, displayName, productSuggestions, onPickSuggestion, onCommitName, italicPlaceholder }) {
+  const ref = useRef(null);
+  const lastSeenRef = useRef(initialValue || '');
+  const [filtered, setFiltered] = useState([]);
+  const [open, setOpen] = useState(false);
+
+  // Sincroniza com value externo se o utilizador não está a editar
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const v = displayName || '';
+    if (v === lastSeenRef.current) return;
+    const userIsEditing = document.activeElement === el && el.value !== lastSeenRef.current;
+    if (!userIsEditing) {
+      el.value = v;
+    }
+    lastSeenRef.current = v;
+  }, [displayName]);
+
+  const computeMatches = useCallback((q) => {
+    if (!q || q.length < 1) return [];
+    const lq = q.toLowerCase();
+    const out = [];
+    const list = productSuggestions || [];
+    const len = list.length;
+    for (let i = 0; i < len && out.length < 5; i++) {
+      const s = list[i];
+      if ((s.nameLower && s.nameLower.includes(lq)) || (s.ref && s.ref.toLowerCase().includes(lq))) {
+        out.push(s);
+      }
+    }
+    return out;
+  }, [productSuggestions]);
+
+  const handleInput = (e) => {
+    const v = e.target.value;
+    setFiltered(computeMatches(v));
+    setOpen(true);
+  };
+  const handleFocus = (e) => {
+    setFiltered(computeMatches(e.target.value));
+    setOpen(true);
+  };
+  const handleBlur = (e) => {
+    // delay to allow click on suggestion
+    setTimeout(() => setOpen(false), 200);
+    const v = e.target.value;
+    if (v === lastSeenRef.current) return;
+    lastSeenRef.current = v;
+    onCommitName && onCommitName(v);
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') e.target.blur();
+    if (e.key === 'Escape') { setOpen(false); }
+  };
+
+  const isItalic = italicPlaceholder && !lastSeenRef.current;
+
+  return (
+    <>
+      <input
+        ref={ref}
+        defaultValue={initialValue || ''}
+        onInput={handleInput}
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        className="row-input"
+        placeholder="nome do produto"
+        title={displayName}
+        style={isItalic ? { color: T.inkSoft, fontStyle: 'italic' } : undefined}
+      />
+      {open && filtered.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
+          background: T.paper, border: `1px solid ${T.line}`, borderRadius: 4,
+          boxShadow: '0 8px 24px rgba(20,18,16,0.12)', marginTop: 2,
+        }}>
+          {filtered.map((s, i) => (
+            <button key={i}
+              onMouseDown={(e) => {
+                e.preventDefault(); // evita blur antes do click
+                onPickSuggestion && onPickSuggestion(s);
+                if (ref.current) {
+                  ref.current.value = s.name || '';
+                  lastSeenRef.current = s.name || '';
+                }
+                setOpen(false);
+              }}
+              style={{
+                display: 'flex', width: '100%', padding: '8px 10px', textAlign: 'left',
+                background: 'transparent', border: 'none', borderBottom: i < filtered.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
+                gap: 8, alignItems: 'center', cursor: 'pointer',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = T.bgEl}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <span className="mono" style={{ fontSize: 9, padding: '2px 5px', background: s.source === 'vendas' ? T.accentSoft : T.cyan, borderRadius: 2, color: T.ink }}>
+                {s.source}
+              </span>
+              <span className="mono" style={{ fontSize: 10, color: T.inkMute, minWidth: 70 }}>{s.ref}</span>
+              <span style={{ fontSize: 12, flex: 1 }}>{s.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}, (prev, next) => {
+  return prev.displayName === next.displayName
+      && prev.productSuggestions === next.productSuggestions
+      && prev.italicPlaceholder === next.italicPlaceholder;
+});
+
 // Wrapped in React.memo so that typing in one slot doesn't re-render
 // all sibling slots. Custom comparison ignores callback identity (parent
 // re-creates them inline) and only checks meaningful prop refs. (v3.12.1)
-const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, stockIdxPO2, stockIdxPO3, onUpdate, onDelete }) {
-  const [showSuggest, setShowSuggest] = useState(false);
+const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onUpdate, onDelete }) {
   const stateOpt = STATES.find(s => s.id === slot.state) || STATES[0];
 
   // Resolve PO2/PO3: use stored value if set, otherwise look up by EAN from stock index
@@ -9485,33 +9641,8 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
     : 0;
   const resolvedDiscount = explicitDiscount >= 0.5 ? explicitDiscount : calcDiscount;
 
-  // Auto-suggest from active campaign or candidates as user types — full product object
-  const suggestions = useMemo(() => {
-    if (!slot.name || slot.name.length < 2) return [];
-    const all = [];
-    if (activeCampaign) {
-      const cols = detectColumns(activeCampaign.headers || []);
-      activeCampaign.rows.forEach((r, i) => {
-        const refKey = cols.ean || activeCampaign.headers.find(h => /ref|sku|cód|cod|ean/i.test(h)) || activeCampaign.headers[0];
-        const nameKey = cols.description || activeCampaign.headers.find(h => /nome|descri|produto|artigo/i.test(h)) || activeCampaign.headers[1];
-        all.push({
-          source: 'campanha',
-          ref: String(r[refKey] ?? `#${i}`),
-          name: String(r[nameKey] ?? ''),
-          family: cols.family ? String(r[cols.family] ?? '') : '',
-          subfamily: cols.subfamily ? String(r[cols.subfamily] ?? '') : '',
-          basePrice: cols.basePrice ? parseNum(r[cols.basePrice]) : 0,
-          campaignPrice: cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0,
-          discount: cols.discount ? parseNum(r[cols.discount]) : 0,
-          startDate: cols.startDate ? r[cols.startDate] : '',
-          endDate: cols.endDate ? r[cols.endDate] : '',
-        });
-      });
-    }
-    candidates.forEach(c => all.push({ source: 'vendas', ref: c.ref, name: c.name }));
-    const q = slot.name.toLowerCase();
-    return all.filter(a => a.name.toLowerCase().includes(q) || a.ref.toLowerCase().includes(q)).slice(0, 5);
-  }, [slot.name, activeCampaign, candidates]);
+  // Suggestions agora vivem dentro de <ProductNameAutocomplete/> com filtro
+  // local (não dispara re-render do SlotRow a cada keystroke). v3.12.4
 
   return (
     <tr style={{ background: slot.state === 'falta' ? '#FEF1EF' : 'transparent' }}>
@@ -9553,46 +9684,21 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
             )}
           </div>
         )}
-        <input
-          value={slot.name || resolvedName || ''}
-          onChange={e => { onUpdate({ name: e.target.value }); setShowSuggest(true); }}
-          onFocus={() => setShowSuggest(true)}
-          onBlur={() => setTimeout(() => setShowSuggest(false), 200)}
-          className="row-input"
-          placeholder="nome do produto"
-          title={resolvedName}
-          style={!slot.name && resolvedName ? { color: T.inkSoft, fontStyle: 'italic' } : undefined}
+        <ProductNameAutocomplete
+          initialValue={slot.name}
+          displayName={slot.name || resolvedName || ''}
+          productSuggestions={productSuggestions}
+          italicPlaceholder={!slot.name && !!resolvedName}
+          onCommitName={(v) => { if (v !== (slot.name || '')) onUpdate({ name: v }); }}
+          onPickSuggestion={(s) => onUpdate({
+            ref: s.ref, name: s.name,
+            family: s.family || '', subfamily: s.subfamily || '',
+            basePrice: s.basePrice || '', campaignPrice: s.campaignPrice || '',
+            discount: s.discount || 0,
+            startDate: s.startDate ? String(s.startDate) : '',
+            endDate: s.endDate ? String(s.endDate) : '',
+          })}
         />
-        {showSuggest && suggestions.length > 0 && (
-          <div style={{
-            position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 10,
-            background: T.paper, border: `1px solid ${T.line}`, borderRadius: 4,
-            boxShadow: '0 8px 24px rgba(20,18,16,0.12)', marginTop: 2,
-          }}>
-            {suggestions.map((s, i) => (
-              <button key={i} onClick={() => onUpdate({
-                ref: s.ref, name: s.name,
-                family: s.family || '', subfamily: s.subfamily || '',
-                basePrice: s.basePrice || '', campaignPrice: s.campaignPrice || '',
-                discount: s.discount || 0,
-                startDate: s.startDate ? String(s.startDate) : '',
-                endDate: s.endDate ? String(s.endDate) : '',
-              })} style={{
-                display: 'flex', width: '100%', padding: '8px 10px', textAlign: 'left',
-                background: 'transparent', border: 'none', borderBottom: i < suggestions.length - 1 ? `1px solid ${T.lineSoft}` : 'none',
-                gap: 8, alignItems: 'center',
-              }}
-                onMouseEnter={e => e.currentTarget.style.background = T.bgEl}
-                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                <span className="mono" style={{ fontSize: 9, padding: '2px 5px', background: s.source === 'vendas' ? T.accentSoft : T.cyan, borderRadius: 2, color: T.ink }}>
-                  {s.source}
-                </span>
-                <span className="mono" style={{ fontSize: 10, color: T.inkMute, minWidth: 70 }}>{s.ref}</span>
-                <span style={{ fontSize: 12, flex: 1 }}>{s.name}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </td>
       <td style={ztdStyle}>
         <select value={slot.cartaz} onChange={e => onUpdate({ cartaz: e.target.value })} className="row-input">
@@ -9680,6 +9786,7 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
   return prev.slot === next.slot
       && prev.activeCampaign === next.activeCampaign
       && prev.candidates === next.candidates
+      && prev.productSuggestions === next.productSuggestions
       && prev.stockIdxPO2 === next.stockIdxPO2
       && prev.stockIdxPO3 === next.stockIdxPO3;
 });
