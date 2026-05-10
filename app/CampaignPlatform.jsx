@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.4';
-const APP_BUILD_DATE = '2026-05-10T17:30'; // Europe/Lisbon
+const APP_VERSION = '3.12.5';
+const APP_BUILD_DATE = '2026-05-10T17:36'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.5', date: '2026-05-10', summary: 'Fluidez global tipo Cmd+K em toda a app: novo <SearchInput> uncontrolled+debounced (150ms) aplicado em Listagem, Alterações, Vendas, Templates, Importar campanha, Admin Cloud, Activity Log; ZoneBlock memoizado com equality custom (ignora callbacks); typing em qualquer campo de pesquisa ficou instantâneo independentemente do tamanho do dataset.' },
   { version: '3.12.4', date: '2026-05-10', summary: 'Adicionar produto / autocomplete do nome PRODUTO: novo <ProductNameAutocomplete> com lista pré-construída UMA vez por campanha (FloorPlanner) e filtro local em estado próprio. Antes: cada keystroke iterava 3806 rows × forEach por slot, em todas as zonas. Agora: filtragem instantânea sobre array já preparado (com nameLower pré-computado), input uncontrolled, sugestões aparecem imediatamente.' },
   { version: '3.12.3', date: '2026-05-10', summary: 'Inputs UNCONTROLLED nos campos do plano: o browser trata da digitação nativamente (zero re-renders React durante typing). Commit ao pai apenas onBlur ou Enter. Continua a sincronizar com cloud quando outro dispositivo edita (mas nunca rouba a edição se o utilizador está a digitar).' },
   { version: '3.12.2', date: '2026-05-10', summary: 'Typing nas Observações INSTANTÂNEO: novo DebouncedInput com state local (digitação imediata, commit ao pai 250ms depois ou onBlur). updatePeriod debounceado (600ms) — IDB write + cloud upsert + activity log já não disparam por keystroke. Flush automático ao sair/perder foco. Aplicado em todos os inputs de SlotRow (Observações, Pedido GU, Stock PO2/PO3, Campanha, Data).' },
@@ -4501,6 +4502,72 @@ function DropZone({ label, hint, accept, onFile, icon: Icon = Upload, compact = 
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// SearchInput — input UNCONTROLLED com debounce para campos de pesquisa.
+// O typing é imediato (browser nativo); o pai só recebe o valor 150ms depois
+// da última tecla. Reutilizável em listing, sales, changes, admin, etc. (v3.12.5)
+// ─────────────────────────────────────────────────────────────────────────
+const SearchInput = React.memo(function SearchInput({ value = '', onCommit, debounce = 150, autoFocus = false, placeholder, style, className }) {
+  const ref = useRef(null);
+  const lastSeenRef = useRef(value || '');
+  const timerRef = useRef(null);
+
+  // Sincroniza com value externo (ex: limpar filtro programaticamente)
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const v = value || '';
+    if (v === lastSeenRef.current) return;
+    const userIsEditing = document.activeElement === el && el.value !== lastSeenRef.current;
+    if (!userIsEditing) {
+      el.value = v;
+    }
+    lastSeenRef.current = v;
+  }, [value]);
+
+  const commit = (v) => {
+    if (v === lastSeenRef.current) return;
+    lastSeenRef.current = v;
+    onCommit && onCommit(v);
+  };
+
+  const handleInput = (e) => {
+    const v = e.target.value;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => commit(v), debounce);
+  };
+  const handleBlur = (e) => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    commit(e.target.value);
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.target.value = '';
+      if (timerRef.current) clearTimeout(timerRef.current);
+      commit('');
+    }
+  };
+
+  return (
+    <input
+      ref={ref}
+      type="text"
+      defaultValue={value || ''}
+      onInput={handleInput}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      autoFocus={autoFocus}
+      placeholder={placeholder}
+      style={style}
+      className={className}
+    />
+  );
+}, (prev, next) => {
+  return prev.value === next.value
+      && prev.placeholder === next.placeholder
+      && prev.autoFocus === next.autoFocus;
+});
+
+// ─────────────────────────────────────────────────────────────────────────
 // Dashboard (v3.10.5 — reorganized)
 // Top: 4 stat cards (clickable, color-coded)
 // Section 1: Atenção (urgent items — only shown if any)
@@ -5060,7 +5127,7 @@ function SalesView({ salesData, setSalesData, candidates, setCandidates }) {
           <div style={{ display: 'flex', gap: 12, marginBottom: 24, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flex: '1 1 280px' }}>
               <Search size={14} style={{ color: T.inkMute }} />
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar produto, referência…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
+              <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar produto, referência…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
             </div>
             <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
               {[{ id: 'qty', l: 'Quantidade' }, { id: 'revenue', l: 'Receita' }, { id: 'name', l: 'Nome' }].map(s => (
@@ -6885,8 +6952,8 @@ function TemplatesModal({ currentFloors, currentName, periods, currentPeriodId, 
             <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6 }}>
                 <Search size={13} style={{ color: T.inkMute }} />
-                <input
-                  value={search} onChange={e => setSearch(e.target.value)} autoFocus
+                <SearchInput
+                  value={search} onCommit={setSearch} autoFocus
                   placeholder="Pesquisar campanha…"
                   style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13, color: T.ink }}
                 />
@@ -8178,8 +8245,8 @@ function ImportFromPastDialog({ allCampaigns, allPeriods, excludePeriodId, onClo
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, marginBottom: 10 }}>
           <Search size={13} style={{ color: T.inkMute }} />
-          <input
-            value={search} onChange={e => setSearch(e.target.value)} autoFocus
+          <SearchInput
+            value={search} onCommit={setSearch} autoFocus
             placeholder="Pesquisar por nome do Excel ou campanha…"
             style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13, color: T.ink }}
           />
@@ -8464,7 +8531,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
       <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flex: '1 1 280px', minWidth: 240 }}>
           <Search size={14} style={{ color: T.inkMute }} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar EAN, descrição, família…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
+          <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar EAN, descrição, família…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
         </div>
         <button onClick={() => setFilterStar(s => !s)} style={{
           padding: '8px 12px', fontSize: 12,
@@ -9320,7 +9387,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, stockRowsP
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -9411,7 +9478,18 @@ function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, product
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  // Equality custom: ignora identidade dos callbacks (recriados a cada render
+  // pelo FloorPlanner). Só re-renderiza quando algo realmente mudou.
+  return prev.zone === next.zone
+      && prev.color === next.color
+      && prev.editZones === next.editZones
+      && prev.activeCampaign === next.activeCampaign
+      && prev.candidates === next.candidates
+      && prev.productSuggestions === next.productSuggestions
+      && prev.stockIdxPO2 === next.stockIdxPO2
+      && prev.stockIdxPO3 === next.stockIdxPO3;
+});
 
 const iconBtn = { background: 'rgba(255,255,255,0.15)', border: 'none', color: '#fff', borderRadius: 3, padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center' };
 const zhStyle = { textAlign: 'left', padding: '8px 10px', fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', color: T.inkSoft, textTransform: 'uppercase', borderBottom: `1px solid ${T.line}`, whiteSpace: 'nowrap' };
@@ -10951,7 +11029,7 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flex: '1 1 240px', minWidth: 200 }}>
           <Search size={14} style={{ color: T.inkMute }} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar EAN, descrição, família…"
+          <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar EAN, descrição, família…"
             style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%', color: T.ink }} />
         </div>
         <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
@@ -12691,8 +12769,8 @@ function ProductImportDialog({ products, onPick, onClose }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, marginBottom: 12 }}>
           <Search size={14} style={{ color: T.inkMute }} />
-          <input
-            value={search} onChange={e => setSearch(e.target.value)}
+          <SearchInput
+            value={search} onCommit={setSearch}
             autoFocus
             placeholder="Pesquisar EAN, descrição, família…"
             style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%', color: T.ink }}
@@ -15116,7 +15194,7 @@ function AdminActivityTab({ currentUserId }) {
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flex: '1 1 240px', minWidth: 200 }}>
           <Search size={13} style={{ color: T.inkMute }} />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Pesquisar utilizador, recurso, ação…"
+          <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar utilizador, recurso, ação…"
             style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 12, color: T.ink }} />
         </div>
         <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
