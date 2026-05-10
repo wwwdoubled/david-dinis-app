@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.2';
-const APP_BUILD_DATE = '2026-05-10T17:13'; // Europe/Lisbon
+const APP_VERSION = '3.12.3';
+const APP_BUILD_DATE = '2026-05-10T17:22'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.3', date: '2026-05-10', summary: 'Inputs UNCONTROLLED nos campos do plano: o browser trata da digitação nativamente (zero re-renders React durante typing). Commit ao pai apenas onBlur ou Enter. Continua a sincronizar com cloud quando outro dispositivo edita (mas nunca rouba a edição se o utilizador está a digitar).' },
   { version: '3.12.2', date: '2026-05-10', summary: 'Typing nas Observações INSTANTÂNEO: novo DebouncedInput com state local (digitação imediata, commit ao pai 250ms depois ou onBlur). updatePeriod debounceado (600ms) — IDB write + cloud upsert + activity log já não disparam por keystroke. Flush automático ao sair/perder foco. Aplicado em todos os inputs de SlotRow (Observações, Pedido GU, Stock PO2/PO3, Campanha, Data).' },
   { version: '3.12.1', date: '2026-05-10', summary: 'Performance crítica: SlotRow envolto em React.memo (escrever em Observações já não re-renderiza as outras 8 linhas); índice de stock construído UMA vez no FloorPlanner (era reconstruído por SlotRow ×9); cache automático global (WeakMap) no buildStockIndex — partilhado entre Plano/Saída/Listagem/Pedido GU, troca de tab agora é instantânea.' },
   { version: '3.12.0', date: '2026-05-10', summary: 'Pesquisa global Cmd+K/Ctrl+K (também "/"): overlay com input + resultados em tempo real para períodos, campanhas (Excels), produtos (EAN/desc/família) e atalhos de menu, navegação ↑↓ e Enter. Templates de plano renovados: 2 separadores ("Guardados" + "De outra campanha") com pesquisa, aplicam directamente ao floors do PERÍODO actual.' },
@@ -9379,50 +9380,60 @@ const ztdStyle = { padding: '2px 4px', borderBottom: `1px solid ${T.lineSoft}`, 
 // ─────────────────────────────────────────────────────────────────────────
 // Slot Row
 // ─────────────────────────────────────────────────────────────────────────
-// Input com state local — escreve sempre instantaneamente sem aguardar
-// re-render do pai. Notifica o pai onBlur OU após um pequeno timeout sem
-// digitar (250ms). Ideal para campos como "Observações" onde o pai faria
-// IDB/cloud writes a cada keystroke. (v3.12.2)
-const DebouncedInput = React.memo(function DebouncedInput({ value, onCommit, debounce = 250, ...rest }) {
-  const [local, setLocal] = useState(value || '');
-  const lastCommittedRef = useRef(value);
-  const timerRef = useRef(null);
+// Input UNCONTROLLED — o browser trata da digitação nativamente, React não
+// é envolvido até o utilizador sair do campo (blur). Para campos onde
+// commits parciais são caros (Observações, Pedido GU, etc). (v3.12.3)
+//
+// Importante: usa `defaultValue` (não `value`) — o React seta o valor inicial
+// e depois desinteressa-se. Quando o valor EXTERNO muda (ex: cloud sync), só
+// actualizamos o input se ele não estiver focado, para não roubar a edição
+// ao utilizador.
+const DebouncedInput = React.memo(function DebouncedInput({ value, onCommit, ...rest }) {
+  const ref = useRef(null);
+  const lastSeenValueRef = useRef(value || '');
 
-  // Quando o valor externo muda (ex: outra pessoa edita), actualiza o local — mas
-  // só se o utilizador NÃO está a meio de uma edição (último valor committed = valor externo).
   useEffect(() => {
-    if (value !== lastCommittedRef.current) {
-      lastCommittedRef.current = value;
-      setLocal(value || '');
+    const el = ref.current;
+    if (!el) return;
+    const v = value || '';
+    if (v === lastSeenValueRef.current) return;
+    // O valor externo mudou. Actualiza o DOM EXCEPTO se o utilizador está
+    // activamente a digitar (input focado E o valor actual no DOM já não
+    // corresponde ao último valor que vimos — ou seja, ele já editou).
+    const userIsEditing = document.activeElement === el && el.value !== lastSeenValueRef.current;
+    if (!userIsEditing) {
+      el.value = v;
     }
+    lastSeenValueRef.current = v;
   }, [value]);
 
-  const commit = useCallback((v) => {
-    if (v === lastCommittedRef.current) return;
-    lastCommittedRef.current = v;
-    onCommit && onCommit(v);
-  }, [onCommit]);
-
-  const handleChange = (e) => {
+  const handleBlur = (e) => {
     const v = e.target.value;
-    setLocal(v);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => commit(v), debounce);
+    if (v === lastSeenValueRef.current) return;
+    lastSeenValueRef.current = v;
+    onCommit && onCommit(v);
   };
-  const handleBlur = () => {
-    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    commit(local);
-  };
-  // Flush quando o componente desmonta
-  useEffect(() => () => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      if (local !== lastCommittedRef.current) onCommit && onCommit(local);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  return <input value={local} onChange={handleChange} onBlur={handleBlur} {...rest} />;
+  // Commit em Enter para inputs single-line (não para textareas) — UX comum
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
+      e.target.blur();
+    }
+  };
+
+  return (
+    <input
+      ref={ref}
+      defaultValue={value || ''}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      {...rest}
+    />
+  );
+}, (prev, next) => {
+  // Só re-renderiza se o valor externo muda. Ignora identidade de onCommit
+  // (criado inline pelo pai a cada render).
+  return prev.value === next.value;
 });
 
 // Wrapped in React.memo so that typing in one slot doesn't re-render
