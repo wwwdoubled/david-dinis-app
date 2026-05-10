@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.11.4';
-const APP_BUILD_DATE = '2026-05-09T23:25'; // Europe/Lisbon
+const APP_VERSION = '3.12.0';
+const APP_BUILD_DATE = '2026-05-10T16:55'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.0', date: '2026-05-10', summary: 'Pesquisa global Cmd+K/Ctrl+K (também "/"): overlay com input + resultados em tempo real para períodos, campanhas (Excels), produtos (EAN/desc/família) e atalhos de menu, navegação ↑↓ e Enter. Templates de plano renovados: 2 separadores ("Guardados" + "De outra campanha") com pesquisa, aplicam directamente ao floors do PERÍODO actual.' },
   { version: '3.11.4', date: '2026-05-09', summary: 'Performance & polish: React.memo nos cards de período/sumário/changes (mata re-renders do tick); Esc global fecha painéis flutuantes; scroll-to-top suave ao mudar de view; focus-ring acessível (Tab); transições padronizadas em botões/inputs; selection colorida.' },
   { version: '3.11.3', date: '2026-05-09', summary: 'periodStatus explicíto: campanha fica ATIVA até às 23:59:59 do dia de fim (antes a comparação era a meia-noite, o comportamento já era esse implicitamente; agora está documentado e à prova de bugs)' },
   { version: '3.11.2', date: '2026-05-09', summary: 'Visão geral: secção "Atenção" deduplicada (mesmo período já não aparece como urgente E sem plano); label "Sem plano definido" → "Sem produtos no plano" (mais claro — não confundir com datas)' },
@@ -3280,23 +3281,40 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [setNotes]);
   const [notesPanelOpen, setNotesPanelOpen] = useState(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
+  // Pesquisa global (Ctrl+K / Cmd+K) — v3.12.0
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
 
-  // Esc global: fecha o painel/overlay aberto mais recente (UX power-user, v3.11.4)
+  // Atalhos globais de teclado (v3.12.0)
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key !== 'Escape') return;
-      // Não interferir quando um input/textarea está focado (deixa o browser tratar)
       const tag = (e.target && e.target.tagName) || '';
-      if (/INPUT|TEXTAREA|SELECT/.test(tag)) return;
-      // Prioridade: blueprint > notes > notifications
-      if (blueprintOpen) { setBlueprintOpen(false); return; }
-      if (notesPanelOpen) { setNotesPanelOpen(false); return; }
-      // notificationPanelOpen é setado mais abaixo; fechar via custom event
-      window.dispatchEvent(new CustomEvent('close-panels'));
+      const inField = /INPUT|TEXTAREA|SELECT/.test(tag);
+
+      // Ctrl+K / Cmd+K → pesquisa global
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setGlobalSearchOpen(true);
+        return;
+      }
+      // "/" abre pesquisa quando não estás num input
+      if (e.key === '/' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setGlobalSearchOpen(true);
+        return;
+      }
+
+      // Esc fecha o painel/overlay mais recente
+      if (e.key === 'Escape') {
+        if (inField) return; // deixa o browser/input tratar
+        if (globalSearchOpen) { setGlobalSearchOpen(false); return; }
+        if (blueprintOpen) { setBlueprintOpen(false); return; }
+        if (notesPanelOpen) { setNotesPanelOpen(false); return; }
+        window.dispatchEvent(new CustomEvent('close-panels'));
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [blueprintOpen, notesPanelOpen]);
+  }, [blueprintOpen, notesPanelOpen, globalSearchOpen]);
 
   // ─── Cloud sync state ──────────────────────────────────────────────────
   // syncStatus: 'idle' | 'loading' | 'syncing' | 'synced' | 'offline' | 'error'
@@ -4087,6 +4105,30 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           periods={periods}
           defaultLayout={defaultLayout}
           onClose={() => setBlueprintOpen(false)}
+        />
+      )}
+
+      {/* Pesquisa global (Ctrl+K / Cmd+K / "/") — v3.12.0 */}
+      {globalSearchOpen && (
+        <GlobalSearch
+          campaigns={campaigns}
+          periods={periods}
+          stockRowsPO2={stockRowsPO2}
+          stockRowsPO3={stockRowsPO3}
+          isAdmin={isAdmin}
+          uiConfig={uiConfig}
+          userProfile={userProfile}
+          onClose={() => setGlobalSearchOpen(false)}
+          onNavigatePeriod={(periodId) => {
+            storeSet('campaigns.selectedPeriodId', periodId);
+            setView('campaigns');
+            setGlobalSearchOpen(false);
+            window.location.reload();
+          }}
+          onNavigateView={(v) => {
+            setView(v);
+            setGlobalSearchOpen(false);
+          }}
         />
       )}
     </div>
@@ -6497,12 +6539,19 @@ function CampaignsView({
 
       {templatesOpen && (
         <TemplatesModal
-          currentFloors={primaryCampaign?.floors || floors}
-          currentName={primaryCampaign?.name || selectedPeriod?.name || ''}
+          currentFloors={floors}
+          currentName={selectedPeriod?.name || ''}
+          periods={periods}
+          currentPeriodId={selectedPeriod?.id}
           onApply={(tpl) => {
-            if (!primaryCampaign) { alert('Carrega uma campanha primeiro para aplicar o template.'); return; }
-            if (!confirm(`Substituir o plano actual de "${primaryCampaign.name}" pelo template "${tpl.name}"? Os slots actuais serão perdidos.`)) return;
-            setCampaigns(cs => cs.map(c => c.id === primaryCampaign.id ? { ...c, floors: tpl.floors, updatedAt: new Date().toISOString() } : c));
+            if (!selectedPeriod) {
+              alert('Selecciona um período primeiro para aplicar o template.');
+              return;
+            }
+            const sourceLabel = tpl.source === 'period' ? `da campanha "${tpl.name}"` : `do template "${tpl.name}"`;
+            if (!confirm(`Substituir o plano actual de "${selectedPeriod.name}" pelo plano ${sourceLabel}? Os slots actuais serão perdidos.`)) return;
+            // Aplica os floors ao PERÍODO (não à campanha — o plano vive no período desde v3.x)
+            onUpdatePeriod && onUpdatePeriod(selectedPeriod.id, { floors: tpl.floors });
             setTemplatesOpen(false);
           }}
           onClose={() => setTemplatesOpen(false)}
@@ -6623,9 +6672,12 @@ function PresenceIndicator({ peers = [], currentUserId }) {
 // ─────────────────────────────────────────────────────────────────────────
 // TemplatesModal — save/apply layout templates for recurring campaigns
 // ─────────────────────────────────────────────────────────────────────────
-function TemplatesModal({ currentFloors, currentName, onApply, onClose }) {
+function TemplatesModal({ currentFloors, currentName, periods, currentPeriodId, onApply, onClose }) {
+  // Tabs: 'saved' (guardados localmente) | 'periods' (copiar de outro período)
+  const [tab, setTab] = useState('saved');
   const [list, setList] = useState(() => listTemplates());
   const [name, setName] = useState(currentName || '');
+  const [search, setSearch] = useState('');
 
   const refresh = () => setList(listTemplates());
 
@@ -6644,6 +6696,27 @@ function TemplatesModal({ currentFloors, currentName, onApply, onClose }) {
     refresh();
   };
 
+  // Períodos com plano (excluindo o actual) — ordenados pelos mais recentes
+  const periodsWithPlan = useMemo(() => {
+    const list = (periods || [])
+      .filter(p => p.id !== currentPeriodId)
+      .map(p => {
+        const floors = Array.isArray(p.floors) ? p.floors : [];
+        const slots = floors.reduce((s, f) => s + (f.zones || []).reduce((ss, z) => ss + (z.slots || []).length, 0), 0);
+        const zones = floors.reduce((s, f) => s + (f.zones || []).length, 0);
+        return { ...p, _slots: slots, _zones: zones };
+      })
+      .filter(p => p._slots > 0)
+      .sort((a, b) => {
+        const ta = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+        const tb = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+        return tb - ta;
+      });
+    if (!search.trim()) return list;
+    const q = search.toLowerCase();
+    return list.filter(p => (p.name || '').toLowerCase().includes(q));
+  }, [periods, currentPeriodId, search]);
+
   return (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
@@ -6652,7 +6725,7 @@ function TemplatesModal({ currentFloors, currentName, onApply, onClose }) {
     }}>
       <div onClick={e => e.stopPropagation()} style={{
         background: T.bg, borderRadius: 10, border: `1px solid ${T.line}`,
-        width: '100%', maxWidth: 600, maxHeight: '85vh',
+        width: '100%', maxWidth: 640, maxHeight: '85vh',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
         boxShadow: '0 24px 48px -12px rgba(0,0,0,0.3)',
       }}>
@@ -6673,79 +6746,164 @@ function TemplatesModal({ currentFloors, currentName, onApply, onClose }) {
           }}><X size={18} /></button>
         </div>
 
-        {/* Save current */}
-        <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
-          <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 8 }}>
-            Guardar o plano actual ({(currentFloors || []).reduce((s, f) => s + (f.zones || []).length, 0)} zonas) como template:
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="Nome do template (ex: Apple Week)"
-              style={{
-                flex: 1, padding: '8px 12px', fontSize: 13,
-                background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6,
-                color: T.ink, outline: 'none',
-              }}
-              onKeyDown={e => { if (e.key === 'Enter') handleSave(); }}
-            />
-            <button onClick={handleSave} style={{
-              padding: '8px 14px', background: T.ink, color: T.bg, border: 'none',
-              borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 5,
+        {/* Tabs */}
+        <div style={{ display: 'flex', padding: '0 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
+          {[
+            { id: 'saved', label: 'Guardados' },
+            { id: 'periods', label: 'De outra campanha' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              padding: '12px 14px', background: 'transparent', border: 'none',
+              borderBottom: `2px solid ${tab === t.id ? T.accent : 'transparent'}`,
+              color: tab === t.id ? T.ink : T.inkSoft,
+              fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
             }}>
-              <Plus size={12} /> Guardar
+              {t.label}
             </button>
-          </div>
+          ))}
         </div>
 
-        {/* List */}
-        <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
-          {list.length === 0 ? (
-            <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
-              <Layers size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
-              <div>Sem templates guardados.</div>
-              <div style={{ fontSize: 11, marginTop: 4 }}>Guarda o plano actual acima para criar o primeiro.</div>
+        {tab === 'saved' && (
+          <>
+            {/* Save current */}
+            <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
+              <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 8 }}>
+                Guardar o plano actual ({(currentFloors || []).reduce((s, f) => s + (f.zones || []).length, 0)} zonas) como template:
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  placeholder="Nome do template (ex: Apple Week)"
+                  style={{
+                    flex: 1, padding: '8px 12px', fontSize: 13,
+                    background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6,
+                    color: T.ink, outline: 'none',
+                  }}
+                  onKeyDown={e => { if (e.key === 'Enter') handleSave(); }}
+                />
+                <button onClick={handleSave} style={{
+                  padding: '8px 14px', background: T.ink, color: T.bg, border: 'none',
+                  borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', gap: 5,
+                }}>
+                  <Plus size={12} /> Guardar
+                </button>
+              </div>
             </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {list.map(t => {
-                const zones = (t.floors || []).reduce((s, f) => s + (f.zones || []).length, 0);
-                const slots = (t.floors || []).reduce((s, f) => s + (f.zones || []).reduce((ss, z) => ss + (z.slots || []).length, 0), 0);
-                const date = new Date(t.createdAt).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' });
-                return (
-                  <div key={t.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                    border: `1px solid ${T.lineSoft}`, borderRadius: 6, background: T.paper,
-                  }}>
-                    <Layers size={14} style={{ color: T.accent }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {t.name}
+
+            {/* List */}
+            <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
+              {list.length === 0 ? (
+                <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+                  <Layers size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
+                  <div>Sem templates guardados.</div>
+                  <div style={{ fontSize: 11, marginTop: 4 }}>Guarda o plano actual acima para criar o primeiro.</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {list.map(t => {
+                    const zones = (t.floors || []).reduce((s, f) => s + (f.zones || []).length, 0);
+                    const slots = (t.floors || []).reduce((s, f) => s + (f.zones || []).reduce((ss, z) => ss + (z.slots || []).length, 0), 0);
+                    const date = new Date(t.createdAt).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' });
+                    return (
+                      <div key={t.id} style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        border: `1px solid ${T.lineSoft}`, borderRadius: 6, background: T.paper,
+                      }}>
+                        <Layers size={14} style={{ color: T.accent }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {t.name}
+                          </div>
+                          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, fontFamily: 'Geist Mono, monospace' }}>
+                            {zones} zonas · {slots} slots · {date}
+                          </div>
+                        </div>
+                        <button onClick={() => onApply({ source: 'template', floors: t.floors, name: t.name })} title="Aplicar este template ao período actual" style={{
+                          padding: '6px 10px', background: T.green, color: '#fff', border: 'none',
+                          borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 4,
+                        }}>
+                          <Check size={11} /> Aplicar
+                        </button>
+                        <button onClick={() => handleDelete(t.id)} title="Eliminar template" style={{
+                          padding: 6, background: 'transparent', color: T.inkMute, border: 'none', borderRadius: 4, cursor: 'pointer',
+                        }}>
+                          <Trash2 size={12} />
+                        </button>
                       </div>
-                      <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, fontFamily: 'Geist Mono, monospace' }}>
-                        {zones} zonas · {slots} slots · {date}
-                      </div>
-                    </div>
-                    <button onClick={() => onApply(t)} title="Aplicar este template à campanha activa" style={{
-                      padding: '6px 10px', background: T.green, color: '#fff', border: 'none',
-                      borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', gap: 4,
-                    }}>
-                      <Check size={11} /> Aplicar
-                    </button>
-                    <button onClick={() => handleDelete(t.id)} title="Eliminar template" style={{
-                      padding: 6, background: 'transparent', color: T.inkMute, border: 'none', borderRadius: 4, cursor: 'pointer',
-                    }}>
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                );
-              })}
+                    );
+                  })}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </>
+        )}
+
+        {tab === 'periods' && (
+          <>
+            <div style={{ padding: '12px 20px', borderBottom: `1px solid ${T.lineSoft}`, background: T.bgEl }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+                <Search size={13} style={{ color: T.inkMute }} />
+                <input
+                  value={search} onChange={e => setSearch(e.target.value)} autoFocus
+                  placeholder="Pesquisar campanha…"
+                  style={{ flex: 1, border: 'none', background: 'transparent', outline: 'none', fontSize: 13, color: T.ink }}
+                />
+              </div>
+              <div style={{ fontSize: 11, color: T.inkMute, marginTop: 8 }}>
+                Selecciona uma campanha para copiar o seu plano (zonas + atribuições) para o período actual. Os slots actuais serão substituídos.
+              </div>
+            </div>
+            <div style={{ overflowY: 'auto', flex: 1, padding: '12px 20px' }}>
+              {periodsWithPlan.length === 0 ? (
+                <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+                  <CalendarDays size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
+                  <div>Sem outras campanhas com plano definido.</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {periodsWithPlan.map(p => {
+                    const date = p.updatedAt
+                      ? new Date(p.updatedAt).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })
+                      : '';
+                    const status = periodStatus(p);
+                    const stColor = status === 'active' ? T.green : status === 'planned' ? T.accent : T.inkMute;
+                    return (
+                      <div key={p.id} style={{
+                        display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                        border: `1px solid ${T.lineSoft}`, borderLeft: `3px solid ${stColor}`,
+                        borderRadius: 6, background: T.paper,
+                      }}>
+                        <Calendar size={14} style={{ color: stColor }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p.name}
+                          </div>
+                          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, fontFamily: 'Geist Mono, monospace' }}>
+                            {PERIOD_STATUS_LABEL[status] || status} · {p._zones} zonas · {p._slots} slots {date && '· ' + date}
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => onApply({ source: 'period', floors: p.floors, name: p.name, periodId: p.id })}
+                          title="Copiar este plano para o período actual"
+                          style={{
+                            padding: '6px 10px', background: T.green, color: '#fff', border: 'none',
+                            borderRadius: 4, fontSize: 11, fontWeight: 500, cursor: 'pointer',
+                            display: 'flex', alignItems: 'center', gap: 4,
+                          }}
+                        >
+                          <Check size={11} /> Copiar
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -13507,6 +13665,266 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
 
   return base;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// GlobalSearch — overlay tipo Cmd+K (v3.12.0)
+// Pesquisa em períodos, campanhas, produtos (EAN/desc/família) e atalhos
+// Navega com ↑↓, abre com Enter, fecha com Esc.
+// ─────────────────────────────────────────────────────────────────────────
+function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin, uiConfig, userProfile, onClose, onNavigatePeriod, onNavigateView }) {
+  const [query, setQuery] = useState('');
+  const [activeIdx, setActiveIdx] = useState(0);
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    inputRef.current && inputRef.current.focus();
+  }, []);
+
+  // Items navegáveis (atalhos para vistas)
+  const userRole = userProfile?.role || 'user';
+  const viewItems = useMemo(() => {
+    const all = [
+      { id: 'dashboard', label: 'Visão Geral', kind: 'view' },
+      { id: 'sales', label: 'Análise de Vendas', kind: 'view' },
+      { id: 'campaigns', label: 'Campanhas', kind: 'view' },
+      { id: 'calendar', label: 'Calendário', kind: 'view' },
+      { id: 'changes', label: 'Alterações', kind: 'view' },
+      { id: 'stock', label: 'Stock', kind: 'view' },
+      { id: 'inventory', label: 'Inventário', kind: 'view' },
+      { id: 'images', label: 'Folhetos', kind: 'view' },
+      { id: 'pdfs', label: 'PDFs', kind: 'view' },
+      { id: 'notes', label: 'Notas', kind: 'view' },
+    ];
+    if (isAdmin) all.push({ id: 'admin', label: 'Administração', kind: 'view' });
+    return all.filter(it => canSeeMenuItem(it.id, userRole, isAdmin, uiConfig));
+  }, [isAdmin, userRole, uiConfig]);
+
+  // Build search results
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const out = [];
+
+    // 1. Atalhos de menu — sempre que match label
+    if (q) {
+      viewItems.forEach(v => {
+        if (v.label.toLowerCase().includes(q)) {
+          out.push({ kind: 'view', id: v.id, label: v.label, sub: 'Ir para' });
+        }
+      });
+    }
+
+    // 2. Períodos por nome
+    const periodMatches = (periods || []).filter(p => {
+      if (!q) return false;
+      return (p.name || '').toLowerCase().includes(q);
+    }).slice(0, 8);
+    periodMatches.forEach(p => {
+      const st = periodStatus(p);
+      const stLabel = PERIOD_STATUS_LABEL[st] || '';
+      out.push({ kind: 'period', id: p.id, label: p.name, sub: stLabel + (p.startDate ? ' · ' + formatPeriodDates(p) : '') });
+    });
+
+    // 3. Campanhas (Excels) por nome
+    const campaignMatches = (campaigns || []).filter(c => {
+      if (!q) return false;
+      return (c.name || '').toLowerCase().includes(q) || (c.key || '').toLowerCase().includes(q);
+    }).slice(0, 8);
+    campaignMatches.forEach(c => {
+      const period = (periods || []).find(p => p.id === c.periodId);
+      out.push({
+        kind: 'campaign', id: c.id, periodId: c.periodId,
+        label: c.name, sub: (period ? period.name : 'Sem período') + ' · ' + ((c.rows || []).length) + ' produtos',
+      });
+    });
+
+    // 4. Produtos (limitar a 30 para não rebentar) — só procura se q tem ≥ 2 caracteres
+    if (q.length >= 2) {
+      const prodOut = [];
+      const seen = new Set();
+      const isNumeric = /^\d+$/.test(q);
+      const limit = 30;
+      outer: for (const c of campaigns || []) {
+        if (!c.rows || !c.headers) continue;
+        const cols = detectColumns(c.headers);
+        for (const r of c.rows) {
+          const ean = String(r[cols.ean] || '').trim();
+          const eanK = normalizeEAN(ean);
+          if (!eanK) continue;
+          if (seen.has(eanK)) continue;
+          const descr = cols.description ? String(r[cols.description] || '') : '';
+          const fam = cols.family ? String(r[cols.family] || '') : '';
+          let match = false;
+          if (isNumeric && eanK.includes(normalizeEAN(q))) match = true;
+          else if (descr.toLowerCase().includes(q)) match = true;
+          else if (fam.toLowerCase().includes(q)) match = true;
+          if (!match) continue;
+          seen.add(eanK);
+          const period = (periods || []).find(p => p.id === c.periodId);
+          prodOut.push({
+            kind: 'product', id: eanK, ean,
+            label: descr || ean,
+            sub: ean + (fam ? ' · ' + fam : '') + (period ? ' · ' + period.name : ''),
+            periodId: c.periodId,
+          });
+          if (prodOut.length >= limit) break outer;
+        }
+      }
+      out.push(...prodOut);
+    }
+
+    return out;
+  }, [query, campaigns, periods, viewItems]);
+
+  // Reset índice activo quando muda a query
+  useEffect(() => { setActiveIdx(0); }, [query]);
+
+  // Scroll do item activo para a vista
+  useEffect(() => {
+    const el = listRef.current && listRef.current.querySelector('[data-active="true"]');
+    if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [activeIdx]);
+
+  const onKeyDown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, results.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); }
+    else if (e.key === 'Enter') { e.preventDefault(); openResult(results[activeIdx]); }
+  };
+
+  const openResult = (r) => {
+    if (!r) return;
+    if (r.kind === 'view') onNavigateView(r.id);
+    else if (r.kind === 'period') onNavigatePeriod(r.id);
+    else if (r.kind === 'campaign') {
+      if (r.periodId) onNavigatePeriod(r.periodId);
+      else onNavigateView('campaigns');
+    } else if (r.kind === 'product') {
+      // Abre o período onde o produto está e leva ao listing
+      if (r.periodId) onNavigatePeriod(r.periodId);
+      else onNavigateView('campaigns');
+    }
+  };
+
+  // Suggestion chips quando query vazia
+  const showSuggestions = !query.trim();
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      zIndex: 300, display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+      paddingTop: 'min(12vh, 80px)', paddingLeft: 12, paddingRight: 12,
+      animation: 'fadeIn 0.15s ease-out',
+    }}>
+      <style>{`@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }`}</style>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 12,
+        width: 'min(640px, 100%)', maxHeight: '70vh',
+        display: 'flex', flexDirection: 'column',
+        border: `1px solid ${T.line}`,
+        boxShadow: '0 30px 70px -20px rgba(0,0,0,0.4)',
+        overflow: 'hidden',
+      }}>
+        {/* Input */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 18px', borderBottom: `1px solid ${T.line}` }}>
+          <Search size={16} style={{ color: T.inkMute, flexShrink: 0 }} />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder="Pesquisar campanhas, períodos, EAN, produtos…"
+            style={{
+              flex: 1, border: 'none', background: 'transparent', outline: 'none',
+              fontSize: 16, color: T.ink, fontFamily: 'inherit',
+            }}
+          />
+          <span className="mono" style={{ fontSize: 9, padding: '3px 6px', background: T.bgEl, color: T.inkMute, borderRadius: 4, letterSpacing: '0.08em', flexShrink: 0 }}>
+            ESC
+          </span>
+        </div>
+
+        {/* Results */}
+        <div ref={listRef} style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          {showSuggestions ? (
+            <div style={{ padding: 14 }}>
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.15em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+                Atalhos rápidos
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {viewItems.map(v => (
+                  <button key={v.id} onClick={() => onNavigateView(v.id)} style={{
+                    padding: '7px 12px', fontSize: 12, fontWeight: 500,
+                    background: T.bgEl, border: `1px solid ${T.line}`,
+                    borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', color: T.ink,
+                  }}>
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 18, fontSize: 11, color: T.inkMute, lineHeight: 1.6 }}>
+                <div><kbd style={kbdStyle}>↑</kbd> <kbd style={kbdStyle}>↓</kbd> navegar · <kbd style={kbdStyle}>Enter</kbd> abrir · <kbd style={kbdStyle}>Esc</kbd> fechar</div>
+                <div style={{ marginTop: 4 }}>Atalhos: <kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>K</kbd> ou <kbd style={kbdStyle}>/</kbd> abrem esta pesquisa em qualquer página.</div>
+              </div>
+            </div>
+          ) : results.length === 0 ? (
+            <div style={{ padding: '40px 20px', textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+              Sem resultados para <strong style={{ color: T.ink }}>"{query}"</strong>.
+            </div>
+          ) : (
+            results.map((r, i) => {
+              const active = i === activeIdx;
+              const KindIcon =
+                r.kind === 'view' ? ChevronRight :
+                r.kind === 'period' ? Calendar :
+                r.kind === 'campaign' ? Layers :
+                Tag; // product
+              const kindColor =
+                r.kind === 'view' ? T.inkMute :
+                r.kind === 'period' ? T.green :
+                r.kind === 'campaign' ? T.accent :
+                '#0ea5e9';
+              return (
+                <button
+                  key={r.kind + ':' + r.id + ':' + i}
+                  data-active={active ? 'true' : 'false'}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  onClick={() => openResult(r)}
+                  style={{
+                    width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '10px 18px', background: active ? T.bgEl : 'transparent',
+                    border: 'none', borderLeft: `3px solid ${active ? kindColor : 'transparent'}`,
+                    cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+                  }}
+                >
+                  <div style={{ width: 28, height: 28, borderRadius: 6, background: T.bgEl, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                    <KindIcon size={14} strokeWidth={1.6} style={{ color: kindColor }} />
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.label}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.inkMute, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.sub}
+                    </div>
+                  </div>
+                  <span className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', flexShrink: 0 }}>
+                    {r.kind === 'view' ? 'Atalho' : r.kind === 'period' ? 'Período' : r.kind === 'campaign' ? 'Excel' : 'Produto'}
+                  </span>
+                </button>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const kbdStyle = {
+  display: 'inline-block', padding: '1px 5px', background: T.bgEl,
+  border: `1px solid ${T.line}`, borderRadius: 3,
+  fontFamily: 'Geist Mono', fontSize: 10, color: T.inkSoft,
+};
 
 function BlueprintPanel({ campaigns, defaultLayout, periods, onClose }) {
   const [expandedZone, setExpandedZone] = useState(null); // zoneId of detail open
