@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.6';
-const APP_BUILD_DATE = '2026-05-10T17:56'; // Europe/Lisbon
+const APP_VERSION = '3.12.7';
+const APP_BUILD_DATE = '2026-05-10T22:01'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -536,6 +536,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.12.7', date: '2026-05-10', summary: 'Inventário (câmara): overlay tipo viewfinder com áreas escurecidas em volta de uma scan window central, 4 cantos L-shape brancos (verdes/vermelhos no momento de leitura), linha vermelha animada a oscilar (congela após pick), badge "✓ {EAN}" ou "✗ não encontrado" + texto guia. Lockout de 600ms entre quaisquer leituras (anteriormente só havia debounce de 2s para o MESMO EAN).' },
   { version: '3.12.6', date: '2026-05-10', summary: 'Tab switching dentro da campanha (Plano/Listagem/Saída/Pedido GU) agora instantâneo: productByEan (lookup EAN→produto com 8 campos: nome/família/preços/datas) construído UMA vez no CampaignsView e partilhado entre as 4 views — antes cada uma reconstruía o seu Map (3806 entries). Também usado pelo SlotRow.resolvedProduct (era .find() linear sobre 3806 rows por slot).' },
   { version: '3.12.5', date: '2026-05-10', summary: 'Fluidez global tipo Cmd+K em toda a app: novo <SearchInput> uncontrolled+debounced (150ms) aplicado em Listagem, Alterações, Vendas, Templates, Importar campanha, Admin Cloud, Activity Log; ZoneBlock memoizado com equality custom (ignora callbacks); typing em qualquer campo de pesquisa ficou instantâneo independentemente do tamanho do dataset.' },
   { version: '3.12.4', date: '2026-05-10', summary: 'Adicionar produto / autocomplete do nome PRODUTO: novo <ProductNameAutocomplete> com lista pré-construída UMA vez por campanha (FloorPlanner) e filtro local em estado próprio. Antes: cada keystroke iterava 3806 rows × forEach por slot, em todas as zonas. Agora: filtragem instantânea sobre array já preparado (com nameLower pré-computado), input uncontrolled, sugestões aparecem imediatamente.' },
@@ -13185,8 +13186,13 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const rafRef = useRef(null);
   const lastEanRef = useRef(null);
   const lastEanTimeRef = useRef(0);
+  // Lockout global após qualquer leitura — evita disparos rápidos sucessivos
+  // mesmo quando o EAN é diferente. (v3.12.7)
+  const lockoutUntilRef = useRef(0);
 
   const [scanning, setScanning] = useState(false);
+  // Feedback visual após cada leitura (verde/vermelho na moldura + badge)
+  const [justScanned, setJustScanned] = useState(null); // { ean, found } | null
   const [manualEan, setManualEan] = useState('');
   // Persisted scan history — survives menu changes, page reloads, crashes.
   // ts is stored as ISO string in localStorage and deserialised back to Date here.
@@ -13266,10 +13272,14 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   const processEan = useCallback((rawEan) => {
     const ean = normalizeEAN(rawEan);
     if (!ean) return;
+    const now = Date.now();
+    // Lockout global (~600ms) após qualquer leitura — dá tempo de mover a câmara
+    if (now < lockoutUntilRef.current) return;
     // Debounce: ignore same EAN within 2 seconds (camera fires multiple times)
-    if (ean === lastEanRef.current && Date.now() - lastEanTimeRef.current < 2000) return;
+    if (ean === lastEanRef.current && now - lastEanTimeRef.current < 2000) return;
     lastEanRef.current = ean;
-    lastEanTimeRef.current = Date.now();
+    lastEanTimeRef.current = now;
+    lockoutUntilRef.current = now + 600;
 
     const product = productIndex.get(ean);
     const po2 = stockIdxPO2.get(ean) ?? null;
@@ -13287,6 +13297,10 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       ts: new Date(),
       found: !!product,
     }, ...prev]);
+
+    // Feedback visual: moldura verde/vermelha + badge durante 800ms
+    setJustScanned({ ean, found: !!product });
+    setTimeout(() => setJustScanned(null), 800);
 
     // Beep feedback
     try {
@@ -13483,8 +13497,78 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
               {cameraError}
             </div>
           )}
-          <div style={{ marginTop: 12, borderRadius: 10, overflow: 'hidden', background: '#000', display: scanning ? 'block' : 'none', maxWidth: 500 }}>
+          <div style={{ marginTop: 12, borderRadius: 10, overflow: 'hidden', background: '#000', display: scanning ? 'block' : 'none', maxWidth: 500, position: 'relative' }}>
             <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', display: 'block' }} />
+            {/* Scanner viewfinder overlay (v3.12.7) */}
+            {scanning && (() => {
+              const frameColor = justScanned
+                ? (justScanned.found ? '#10b981' : '#ef4444')
+                : '#ffffff';
+              const cornerSize = 24;
+              const cornerThick = 3;
+              return (
+                <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', userSelect: 'none' }}>
+                  {/* Áreas escurecidas em volta da scan window (top, bottom, left, right) */}
+                  <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '35%', background: 'rgba(0,0,0,0.55)' }} />
+                  <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: '35%', background: 'rgba(0,0,0,0.55)' }} />
+                  <div style={{ position: 'absolute', top: '35%', bottom: '35%', left: 0, width: '15%', background: 'rgba(0,0,0,0.55)' }} />
+                  <div style={{ position: 'absolute', top: '35%', bottom: '35%', right: 0, width: '15%', background: 'rgba(0,0,0,0.55)' }} />
+                  {/* Scan window com cantos */}
+                  <div style={{ position: 'absolute', top: '35%', left: '15%', right: '15%', bottom: '35%' }}>
+                    {/* 4 cantos L-shape */}
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: cornerSize, height: cornerThick, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: cornerThick, height: cornerSize, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', top: 0, right: 0, width: cornerSize, height: cornerThick, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', top: 0, right: 0, width: cornerThick, height: cornerSize, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: cornerSize, height: cornerThick, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: cornerThick, height: cornerSize, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', bottom: 0, right: 0, width: cornerSize, height: cornerThick, background: frameColor, transition: 'background 0.15s' }} />
+                    <div style={{ position: 'absolute', bottom: 0, right: 0, width: cornerThick, height: cornerSize, background: frameColor, transition: 'background 0.15s' }} />
+                    {/* Linha de scan animada (congela quando justScanned) */}
+                    {!justScanned && (
+                      <div style={{
+                        position: 'absolute', left: 6, right: 6, height: 2,
+                        background: 'linear-gradient(90deg, transparent, #ef4444 20%, #ef4444 80%, transparent)',
+                        boxShadow: '0 0 6px rgba(239, 68, 68, 0.8)',
+                        animation: 'scanLine 1.6s ease-in-out infinite',
+                      }} />
+                    )}
+                    {/* Badge "✓ EAN" / "✗ não encontrado" */}
+                    {justScanned && (
+                      <div style={{
+                        position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                        padding: '6px 12px', background: justScanned.found ? '#10b981' : '#ef4444',
+                        color: '#fff', fontWeight: 700, fontSize: 13, borderRadius: 6,
+                        fontFamily: 'Geist Mono, monospace', letterSpacing: '0.05em',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                        animation: 'scanPop 0.2s ease-out',
+                      }}>
+                        {justScanned.found ? `✓ ${justScanned.ean}` : '✗ não encontrado'}
+                      </div>
+                    )}
+                  </div>
+                  {/* Helper text */}
+                  <div style={{
+                    position: 'absolute', left: 0, right: 0, bottom: 12, textAlign: 'center',
+                    color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: 500, letterSpacing: '0.04em',
+                    textShadow: '0 1px 2px rgba(0,0,0,0.6)',
+                  }}>
+                    Aponta o código de barras dentro da moldura
+                  </div>
+                  <style>{`
+                    @keyframes scanLine {
+                      0% { top: 8%; opacity: 0.4; }
+                      50% { top: 92%; opacity: 1; }
+                      100% { top: 8%; opacity: 0.4; }
+                    }
+                    @keyframes scanPop {
+                      0% { transform: translate(-50%, -50%) scale(0.8); opacity: 0; }
+                      100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+                    }
+                  `}</style>
+                </div>
+              );
+            })()}
           </div>
         </div>
       )}
