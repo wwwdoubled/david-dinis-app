@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.13.3';
-const APP_BUILD_DATE = '2026-05-12T16:30'; // Europe/Lisbon
+const APP_VERSION = '3.13.4';
+const APP_BUILD_DATE = '2026-05-12T17:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1846,6 +1846,124 @@ async function cloudDeletePeriodAdmin(id) {
   await supabase.from('campaigns').delete().eq('period_id', id);
   const { error } = await supabase.from('periods').delete().eq('id', id);
   return { ok: !error, error: error?.message };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Storage stats — estima espaço usado no Supabase por tabela.
+// Faz fetch da metadata + descarrega rows_compressed das maiores entradas
+// para medir bytes reais. Cap em ordem decrescente de tamanho para não
+// baixar dados todos.
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchStorageStats() {
+  if (!supabase) return null;
+  const stats = {
+    campaigns: { count: 0, bytes: 0, items: [] },
+    snapshots: { count: 0, bytes: 0, items: [] },
+    periods:   { count: 0, bytes: 0, items: [] },
+    userData:  { count: 0, bytes: 0 },
+    activity:  { count: 0, bytes: 0 },
+  };
+
+  // 1) Campaigns — fetch id+name+rows_compressed (medimos byte length)
+  try {
+    const { data: campaigns, error } = await supabase
+      .from('campaigns')
+      .select('id, name, campaign_key, rows_compressed, rows, floors_compressed, floors, headers, uploaded_at, updated_at');
+    if (!error && Array.isArray(campaigns)) {
+      stats.campaigns.count = campaigns.length;
+      for (const c of campaigns) {
+        let b = 0;
+        if (c.rows_compressed) b += measureJsonbBytes(c.rows_compressed);
+        if (c.rows && Array.isArray(c.rows) && c.rows.length > 0) b += measureJsonbBytes(c.rows);
+        if (c.floors_compressed) b += measureJsonbBytes(c.floors_compressed);
+        if (c.floors) b += measureJsonbBytes(c.floors);
+        if (c.headers) b += measureJsonbBytes(c.headers);
+        stats.campaigns.bytes += b;
+        stats.campaigns.items.push({ id: c.id, name: c.name || c.campaign_key, bytes: b, uploadedAt: c.uploaded_at || c.updated_at });
+      }
+      stats.campaigns.items.sort((a, b) => b.bytes - a.bytes);
+    }
+  } catch (e) { console.warn('storage campaigns:', e); }
+
+  // 2) Stock snapshots — mesmo padrão
+  try {
+    const { data: snaps, error } = await supabase
+      .from('stock_snapshots')
+      .select('id, store, filename, rows_compressed, rows, row_count, uploaded_at, is_active');
+    if (!error && Array.isArray(snaps)) {
+      stats.snapshots.count = snaps.length;
+      for (const s of snaps) {
+        let b = 0;
+        if (s.rows_compressed) b += measureJsonbBytes(s.rows_compressed);
+        if (s.rows && Array.isArray(s.rows) && s.rows.length > 0) b += measureJsonbBytes(s.rows);
+        stats.snapshots.bytes += b;
+        stats.snapshots.items.push({ id: s.id, store: s.store, filename: s.filename, bytes: b, rowCount: s.row_count, isActive: s.is_active, uploadedAt: s.uploaded_at });
+      }
+      stats.snapshots.items.sort((a, b) => b.bytes - a.bytes);
+    }
+  } catch (e) { console.warn('storage snapshots:', e); }
+
+  // 3) Periods — notes pode ter envelope JSON com floors embutidos
+  try {
+    const { data: periods, error } = await supabase
+      .from('periods')
+      .select('id, name, notes, start_date, end_date');
+    if (!error && Array.isArray(periods)) {
+      stats.periods.count = periods.length;
+      for (const p of periods) {
+        let b = 0;
+        if (p.notes) b += new Blob([String(p.notes)]).size;
+        stats.periods.bytes += b;
+        stats.periods.items.push({ id: p.id, name: p.name, bytes: b });
+      }
+      stats.periods.items.sort((a, b) => b.bytes - a.bytes);
+    }
+  } catch (e) { console.warn('storage periods:', e); }
+
+  // 4) user_data (preferences contém price_snapshot, inventory, etc.)
+  try {
+    const { data: ud, error } = await supabase
+      .from('user_data')
+      .select('user_id, notes, default_layout, preferences');
+    if (!error && Array.isArray(ud)) {
+      stats.userData.count = ud.length;
+      for (const u of ud) {
+        if (u.notes) stats.userData.bytes += new Blob([String(u.notes)]).size;
+        if (u.default_layout) stats.userData.bytes += measureJsonbBytes(u.default_layout);
+        if (u.preferences) stats.userData.bytes += measureJsonbBytes(u.preferences);
+      }
+    }
+  } catch (e) { console.warn('storage user_data:', e); }
+
+  // 5) activity_log — só conta linhas (cada uma é pequena)
+  try {
+    const { count, error } = await supabase
+      .from('activity_log')
+      .select('id', { count: 'exact', head: true });
+    if (!error && typeof count === 'number') {
+      stats.activity.count = count;
+      stats.activity.bytes = count * 256; // estimativa: ~256B por linha
+    }
+  } catch (e) { console.warn('storage activity:', e); }
+
+  stats.totalBytes = stats.campaigns.bytes + stats.snapshots.bytes + stats.periods.bytes + stats.userData.bytes + stats.activity.bytes;
+  return stats;
+}
+
+// Helper: tamanho em bytes de um valor JSONB serializado
+function measureJsonbBytes(v) {
+  try {
+    if (v == null) return 0;
+    if (typeof v === 'string') return new Blob([v]).size;
+    return new Blob([JSON.stringify(v)]).size;
+  } catch { return 0; }
+}
+
+function fmtBytes(b) {
+  if (!b || b < 1024) return `${b || 0} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(2)} MB`;
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 // Compute a stable campaign key from a filename
@@ -15070,7 +15188,7 @@ function AdminCloudTab() {
   const [periods, setPeriods] = useState(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(new Set());
-  const [section, setSection] = useState('campaigns'); // 'campaigns' | 'stock' | 'periods'
+  const [section, setSection] = useState('storage'); // 'storage' | 'campaigns' | 'stock' | 'periods'
 
   useEffect(() => {
     setLoading(true);
@@ -15124,8 +15242,9 @@ function AdminCloudTab() {
   return (
     <div>
       {/* Section switcher */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 24 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
         {[
+          { id: 'storage', label: 'Espaço', icon: Database },
           { id: 'campaigns', label: `Campanhas (${campaigns?.length ?? 0})`, icon: Layers },
           { id: 'stock', label: `Stock PO2/PO3 (${snapshots?.length ?? 0})`, icon: Package },
           { id: 'periods', label: `Períodos (${periods?.length ?? 0})`, icon: CalendarDays },
@@ -15139,6 +15258,9 @@ function AdminCloudTab() {
           }}><Icon size={13} />{label}</button>
         ))}
       </div>
+
+      {/* Storage — espaço utilizado por tabela */}
+      {section === 'storage' && <StorageSection />}
 
       {/* Campaigns */}
       {section === 'campaigns' && (
@@ -15219,6 +15341,190 @@ function AdminCloudTab() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Storage section — espaço usado vs limite do plano Supabase ─────────
+function StorageSection() {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const s = await cloudFetchStorageStats();
+      setStats(s);
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Limite estimado do plano Supabase Free: 500 MB.
+  // Para Pro: 8 GB. Para Team: 100 GB. Configurável aqui se mudares de plano.
+  const PLAN_LIMIT_BYTES = 500 * 1024 * 1024; // 500MB free tier
+  const PLAN_LABEL = 'Free (500 MB)';
+
+  if (loading || !stats) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>
+        {err ? `Erro: ${err}` : 'A medir espaço utilizado…'}
+      </div>
+    );
+  }
+
+  const totalBytes = stats.totalBytes || 0;
+  const pct = Math.min(100, (totalBytes / PLAN_LIMIT_BYTES) * 100);
+  const pctColor = pct > 90 ? '#b91c1c' : pct > 70 ? '#E68A2E' : T.green;
+
+  const categories = [
+    { id: 'campaigns', label: 'Campanhas', bytes: stats.campaigns.bytes, count: stats.campaigns.count, color: '#5B9BD5', icon: Layers },
+    { id: 'snapshots', label: 'Stock PO2/PO3', bytes: stats.snapshots.bytes, count: stats.snapshots.count, color: '#7B5EA8', icon: Package },
+    { id: 'periods', label: 'Períodos', bytes: stats.periods.bytes, count: stats.periods.count, color: '#5DA050', icon: CalendarDays },
+    { id: 'userData', label: 'Dados do utilizador', bytes: stats.userData.bytes, count: stats.userData.count, color: '#E68A2E', icon: Users },
+    { id: 'activity', label: 'Log de atividade', bytes: stats.activity.bytes, count: stats.activity.count, color: '#9B9690', icon: Activity },
+  ];
+
+  return (
+    <div>
+      {/* Header com total */}
+      <div style={{
+        padding: 20, marginBottom: 20,
+        background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase' }}>
+              Plano Supabase
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, marginTop: 2 }}>{PLAN_LABEL}</div>
+          </div>
+          <button onClick={load} disabled={loading} style={{
+            padding: '6px 12px', fontSize: 12, background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, cursor: loading ? 'wait' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <RotateCcw size={12} /> Recarregar
+          </button>
+        </div>
+
+        {/* Big metric */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
+          <div style={{ fontSize: 36, fontWeight: 700, color: T.ink, fontFamily: 'Geist Mono, monospace' }}>
+            {fmtBytes(totalBytes)}
+          </div>
+          <div style={{ fontSize: 14, color: T.inkMute }}>
+            de {fmtBytes(PLAN_LIMIT_BYTES)} ({pct.toFixed(1)}%)
+          </div>
+        </div>
+
+        {/* Progress bar */}
+        <div style={{
+          width: '100%', height: 16, background: T.lineSoft, borderRadius: 8, overflow: 'hidden',
+          border: `1px solid ${T.line}`,
+        }}>
+          <div style={{
+            width: `${pct}%`, height: '100%', background: pctColor,
+            transition: 'width 0.4s, background 0.3s',
+          }} />
+        </div>
+        <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6 }}>
+          Disponível: <strong style={{ color: T.ink }}>{fmtBytes(Math.max(0, PLAN_LIMIT_BYTES - totalBytes))}</strong>
+          {pct > 80 && <span style={{ marginLeft: 8, color: '#b91c1c', fontWeight: 600 }}>⚠ Espaço a esgotar</span>}
+        </div>
+      </div>
+
+      {/* Breakdown por categoria */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginBottom: 20,
+      }}>
+        {categories.map(({ id, label, bytes, count, color, icon: Icon }) => (
+          <div key={id} style={{
+            padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+              <Icon size={14} style={{ color }} />
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase' }}>
+                {label}
+              </div>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 600, color: T.ink, fontFamily: 'Geist Mono, monospace' }}>
+              {fmtBytes(bytes)}
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>
+              {count} {count === 1 ? 'registo' : 'registos'} · {totalBytes > 0 ? ((bytes / totalBytes) * 100).toFixed(1) : 0}%
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Top 10 maiores campanhas */}
+      {stats.campaigns.items.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div className="mono" style={{
+            fontSize: 10, letterSpacing: '0.1em', color: T.inkMute,
+            textTransform: 'uppercase', marginBottom: 8,
+          }}>
+            Top {Math.min(10, stats.campaigns.items.length)} campanhas mais pesadas
+          </div>
+          <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+            {stats.campaigns.items.slice(0, 10).map(c => (
+              <div key={c.id} style={{
+                display: 'grid', gridTemplateColumns: '1fr 100px',
+                gap: 12, padding: '8px 14px', alignItems: 'center',
+                borderBottom: `1px solid ${T.lineSoft}`, fontSize: 12,
+              }}>
+                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {c.name || c.id?.slice(0, 8)}
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: T.inkSoft }}>
+                  {fmtBytes(c.bytes)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Top stock snapshots */}
+      {stats.snapshots.items.length > 0 && (
+        <div>
+          <div className="mono" style={{
+            fontSize: 10, letterSpacing: '0.1em', color: T.inkMute,
+            textTransform: 'uppercase', marginBottom: 8,
+          }}>
+            Stock snapshots (todos)
+          </div>
+          <div style={{ border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+            {stats.snapshots.items.map(s => (
+              <div key={s.id} style={{
+                display: 'grid', gridTemplateColumns: '60px 1fr 90px 100px',
+                gap: 12, padding: '8px 14px', alignItems: 'center',
+                borderBottom: `1px solid ${T.lineSoft}`, fontSize: 12,
+                background: s.isActive ? `${T.green}08` : 'transparent',
+              }}>
+                <div style={{ fontWeight: 700, color: T.ink }}>{s.store}</div>
+                <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {s.filename || s.id?.slice(0, 8)}
+                  {s.isActive && <span style={{ marginLeft: 6, fontSize: 9, padding: '1px 5px', background: T.green, color: '#fff', borderRadius: 3 }}>ACTIVO</span>}
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: T.inkSoft }}>
+                  {s.rowCount ?? '—'} linhas
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono, monospace', color: T.inkSoft }}>
+                  {fmtBytes(s.bytes)}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
