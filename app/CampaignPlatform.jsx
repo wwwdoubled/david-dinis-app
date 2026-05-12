@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.13.1';
-const APP_BUILD_DATE = '2026-05-12T15:30'; // Europe/Lisbon
+const APP_VERSION = '3.13.2';
+const APP_BUILD_DATE = '2026-05-12T16:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -13429,12 +13429,54 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       osc.start(); osc.stop(ctx.currentTime + 0.15);
     } catch {}
 
-    // Haptic feedback on mobile (Android Chrome / Samsung Internet support
-    // navigator.vibrate; iOS Safari does NOT support it. iOS uses Web Vibration
-    // API only inside Web App, not Safari. Best-effort.)
+    // Haptic feedback:
+    // - Android Chrome / Samsung Internet → navigator.vibrate (real haptic)
+    // - iOS Safari → API bloqueada pela Apple. Fallback: som percussivo curto
+    //   de baixa frequência que produz uma sensação táctil quando o telefone
+    //   está apoiado contra a mão / mesa, complementado pelo flash visual
+    //   (justScanned state) que pisca verde/vermelho.
     try {
+      let triggered = false;
       if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-        navigator.vibrate(product ? [60] : [40, 60, 40]);
+        triggered = navigator.vibrate(product ? [60] : [40, 60, 40]);
+      }
+      // Se não houve vibração real (iOS), aplica um "thump" táctil via Web Audio.
+      // Frequência baixa (90Hz) com decay rápido → soa como tap percussivo curto
+      // em vez de beep puro. Cria sensação táctil para iOS users.
+      if (!triggered && typeof window !== 'undefined') {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (Ctx) {
+          const ctx = new Ctx();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(product ? 90 : 60, ctx.currentTime);
+          // Quick attack + decay = percussive "thump"
+          gain.gain.setValueAtTime(0, ctx.currentTime);
+          gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.005);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + (product ? 0.08 : 0.16));
+          osc.start();
+          osc.stop(ctx.currentTime + (product ? 0.1 : 0.2));
+          // For "not found", add a second pulse for emphasis
+          if (!product) {
+            setTimeout(() => {
+              try {
+                const osc2 = ctx.createOscillator();
+                const gain2 = ctx.createGain();
+                osc2.connect(gain2); gain2.connect(ctx.destination);
+                osc2.type = 'sine';
+                osc2.frequency.setValueAtTime(50, ctx.currentTime);
+                gain2.gain.setValueAtTime(0, ctx.currentTime);
+                gain2.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.005);
+                gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+                osc2.start();
+                osc2.stop(ctx.currentTime + 0.18);
+              } catch {}
+            }, 120);
+          }
+        }
       }
     } catch {}
   }, [productIndex, stockIdxPO2, stockIdxPO3]);
