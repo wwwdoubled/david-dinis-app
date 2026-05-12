@@ -9,7 +9,8 @@ import {
   Filter, ListTree, Layers, Tag, Lock, LogOut, AlertCircle, Sun, Moon,
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
-  Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap
+  Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap,
+  KeyRound, EyeOff, Copy
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -525,8 +526,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.14.0';
-const APP_BUILD_DATE = '2026-05-12T18:00'; // Europe/Lisbon
+const APP_VERSION = '3.15.0';
+const APP_BUILD_DATE = '2026-05-12T20:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -995,23 +996,132 @@ async function cloudDeleteZone(id) {
 
 // Seed inicial: copia DEFAULT_FLOORS para a cloud (chamado uma vez via admin)
 async function cloudSeedDefaultLayout(createdBy) {
-  if (!supabase) return { ok: false };
-  let created = 0;
+  if (!supabase) return { ok: false, error: 'Supabase indisponível' };
+  let floorsCreated = 0;
+  let zonesCreated = 0;
+  let zonesAttempted = 0;
+  const errors = [];
   for (let i = 0; i < DEFAULT_FLOORS.length; i++) {
     const f = DEFAULT_FLOORS[i];
     const floorRes = await cloudCreateFloor({
       name: f.name, color: f.color, star: f.star,
       displayOrder: i, createdBy,
     });
-    if (!floorRes.ok) continue;
+    if (!floorRes.ok) {
+      errors.push(`Piso "${f.name}": ${floorRes.error || 'erro desconhecido'}`);
+      continue;
+    }
+    floorsCreated++;
     const floorId = floorRes.data.id;
     for (let j = 0; j < (f.zones || []).length; j++) {
       const z = f.zones[j];
+      zonesAttempted++;
       const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy });
-      if (zRes.ok) created++;
+      if (zRes.ok) zonesCreated++;
+      else errors.push(`Zona "${z.name}" em "${f.name}": ${zRes.error || 'erro'}`);
     }
   }
-  return { ok: true, created };
+  // Considera sucesso só se TODOS os pisos foram criados (parcial é falha)
+  const ok = floorsCreated === DEFAULT_FLOORS.length && zonesCreated === zonesAttempted;
+  return {
+    ok,
+    floorsCreated,
+    zonesCreated,
+    zonesAttempted,
+    errors,
+    error: ok ? null : `Importação parcial: ${floorsCreated}/${DEFAULT_FLOORS.length} pisos, ${zonesCreated}/${zonesAttempted} zonas. ${errors.slice(0, 3).join(' · ')}`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Credentials Vault — passwords/códigos de equipamentos da loja
+// Schema: ver supabase/migrations/2026-05-12_credentials_vault.sql
+// Segurança: passwords em texto plano protegidas por RLS strict.
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchCredentials() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('credentials')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) {
+    console.warn('cloudFetchCredentials failed:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+async function cloudCreateCredential({ name, type, username, password, url, notes, tags, createdBy }) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase
+    .from('credentials')
+    .insert({
+      name, type: type || 'other',
+      username: username || null,
+      password: password || null,
+      url: url || null,
+      notes: notes || null,
+      tags: Array.isArray(tags) ? tags : [],
+      created_by: createdBy,
+      updated_by: createdBy,
+    })
+    .select()
+    .single();
+  return { ok: !error, data, error: error?.message };
+}
+
+async function cloudUpdateCredential(id, patch, updatedBy) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase
+    .from('credentials')
+    .update({ ...patch, updated_by: updatedBy, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select()
+    .single();
+  return { ok: !error, data, error: error?.message };
+}
+
+async function cloudDeleteCredential(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('credentials').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+// Best-effort logging — não bloqueia operações principais se falhar
+async function cloudLogCredentialAccess(credentialId, credentialName, action, user) {
+  if (!supabase || !user?.id) return;
+  try {
+    await supabase.from('credentials_activity').insert({
+      credential_id: credentialId,
+      credential_name: credentialName,
+      action,
+      user_id: user.id,
+      user_email: user.email || null,
+    });
+    // Para 'viewed' e 'copied', actualiza também last_accessed_at/by na credential
+    if ((action === 'viewed' || action === 'copied') && credentialId) {
+      await supabase
+        .from('credentials')
+        .update({
+          last_accessed_by: user.id,
+          last_accessed_at: new Date().toISOString(),
+        })
+        .eq('id', credentialId);
+    }
+  } catch (e) {
+    // silent — auditoria é best-effort
+  }
+}
+
+async function cloudFetchCredentialsActivity({ limit = 100 } = {}) {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('credentials_activity')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) return [];
+  return data || [];
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1980,13 +2090,16 @@ async function cloudFetchStorageStats() {
   try {
     const { data: campaigns, error } = await supabase
       .from('campaigns')
-      .select('id, name, campaign_key, rows_compressed, rows, floors_compressed, floors, headers, uploaded_at, updated_at');
+      // NOTA: NÃO incluir 'rows' uncompressed — pode trazer 100MB+ por campanha.
+      // Confiamos no rows_compressed para a medição (representa o que está em disco).
+      .select('id, name, campaign_key, rows_compressed, floors_compressed, floors, headers, uploaded_at, updated_at');
     if (!error && Array.isArray(campaigns)) {
       stats.campaigns.count = campaigns.length;
       for (const c of campaigns) {
         let b = 0;
+        // Apenas rows_compressed (rows uncompressed foi omitida do select para
+        // evitar baixar centenas de MB)
         if (c.rows_compressed) b += measureJsonbBytes(c.rows_compressed);
-        if (c.rows && Array.isArray(c.rows) && c.rows.length > 0) b += measureJsonbBytes(c.rows);
         if (c.floors_compressed) b += measureJsonbBytes(c.floors_compressed);
         if (c.floors) b += measureJsonbBytes(c.floors);
         if (c.headers) b += measureJsonbBytes(c.headers);
@@ -2001,13 +2114,14 @@ async function cloudFetchStorageStats() {
   try {
     const { data: snaps, error } = await supabase
       .from('stock_snapshots')
-      .select('id, store, filename, rows_compressed, rows, row_count, uploaded_at, is_active');
+      // Mesmo motivo: omitir rows uncompressed para evitar download massivo
+      .select('id, store, filename, rows_compressed, row_count, uploaded_at, is_active');
     if (!error && Array.isArray(snaps)) {
       stats.snapshots.count = snaps.length;
       for (const s of snaps) {
         let b = 0;
+        // Apenas rows_compressed (rows omitida do select)
         if (s.rows_compressed) b += measureJsonbBytes(s.rows_compressed);
-        if (s.rows && Array.isArray(s.rows) && s.rows.length > 0) b += measureJsonbBytes(s.rows);
         stats.snapshots.bytes += b;
         stats.snapshots.items.push({ id: s.id, store: s.store, filename: s.filename, bytes: b, rowCount: s.row_count, isActive: s.is_active, uploadedAt: s.uploaded_at });
       }
@@ -3261,6 +3375,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
   // Cloud-managed store layout (admin → Layout da loja). Quando há pisos
   // configurados na cloud, sobrepõem-se ao defaultLayout local.
+  // Anti-flash: só faz setDefaultLayout se o resultado for diferente do
+  // que já está em state (compare via JSON length+hash heuristic).
+  const lastLayoutSigRef = useRef('');
   useEffect(() => {
     if (!supabase) return;
     let cancelled = false;
@@ -3268,7 +3385,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       const cloudLayout = await cloudFetchStoreLayout();
       if (cancelled) return;
       if (cloudLayout && Array.isArray(cloudLayout) && cloudLayout.length > 0) {
-        setDefaultLayout(layoutOnly(cloudLayout));
+        const next = layoutOnly(cloudLayout);
+        const sig = JSON.stringify(next);
+        if (sig !== lastLayoutSigRef.current) {
+          lastLayoutSigRef.current = sig;
+          setDefaultLayout(next);
+        }
       }
     };
     load();
@@ -4336,6 +4458,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
+          {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
           {view === 'admin' && isAdmin && (
             <AdminView
               user={user}
@@ -4575,6 +4698,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'images', label: 'Folhetos', icon: ImageIcon },
     { id: 'pdfs', label: 'PDFs', icon: FileText },
     { id: 'notes', label: 'Notas', icon: NotebookPen },
+    { id: 'credentials', label: 'Cofre', icon: KeyRound },
   ];
   // Filter items by visibility config (admins always see everything)
   const items = allItems.filter(it => canSeeMenuItem(it.id, userRole, isAdmin, uiConfig));
@@ -13545,19 +13669,25 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
         setCloudSyncStatus('synced');
         return;
       }
-      // Merge: union by (ean + ts) to dedupe; sort by ts desc
+      // Merge: union by (ean + ts truncado ao segundo) — evita duplicados
+      // quando dois dispositivos leem o mesmo EAN no mesmo segundo mas com
+      // milissegundos diferentes.
+      const tsKey = (ts) => {
+        const ms = typeof ts === 'string' ? new Date(ts).getTime() : new Date(ts).getTime();
+        return new Date(Math.floor(ms / 1000) * 1000).toISOString();
+      };
       setScannedRaw(prev => {
         const map = new Map();
-        const key = (s) => `${s.ean}|${typeof s.ts === 'string' ? s.ts : new Date(s.ts).toISOString()}`;
+        const key = (s) => `${s.ean}|${tsKey(s.ts)}`;
         for (const s of (prev || [])) map.set(key(s), s);
         for (const s of cloudScans) {
-          const k = `${s.ean}|${typeof s.ts === 'string' ? s.ts : new Date(s.ts).toISOString()}`;
+          const k = `${s.ean}|${tsKey(s.ts)}`;
           if (!map.has(k)) map.set(k, s);
         }
         const merged = [...map.values()].sort((a, b) => {
           const ta = typeof a.ts === 'string' ? a.ts : new Date(a.ts).toISOString();
           const tb = typeof b.ts === 'string' ? b.ts : new Date(b.ts).toISOString();
-          return tb.localeCompare(ta);
+          return String(tb).localeCompare(String(ta));
         });
         return merged;
       });
@@ -13849,8 +13979,25 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       try { zxingControlsRef.current.stop(); } catch {}
       zxingControlsRef.current = null;
     }
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-    if (videoRef.current) videoRef.current.srcObject = null;
+    // Stop media tracks com checks. iOS Safari por vezes não liberta a
+    // câmara se chamarmos stop() em tracks já paradas — verifica primeiro.
+    if (streamRef.current) {
+      try {
+        const tracks = streamRef.current.getTracks?.() || [];
+        if (tracks.length > 0) {
+          tracks.forEach(t => {
+            try { if (t.readyState !== 'ended') t.stop(); } catch {}
+          });
+        }
+      } catch {}
+    }
+    if (videoRef.current) {
+      try {
+        videoRef.current.srcObject = null;
+        // load() reseta o elemento video — força iOS a libertar a câmara
+        if (typeof videoRef.current.load === 'function') videoRef.current.load();
+      } catch {}
+    }
     streamRef.current = null;
     detectorRef.current = null;
     setScanning(false);
@@ -14368,6 +14515,512 @@ const navBtnStyle = {
   border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
   display: 'flex', alignItems: 'center', gap: 4, fontSize: 12,
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// CredentialsView — Cofre de credenciais (passwords/códigos de equipamentos)
+// ─────────────────────────────────────────────────────────────────────────
+const CREDENTIAL_TYPES = [
+  { id: 'pc',       label: 'PC / Computador',  color: '#5B9BD5' },
+  { id: 'wifi',     label: 'WiFi / Rede',      color: '#5DA050' },
+  { id: 'alarm',    label: 'Alarme',           color: '#E68A2E' },
+  { id: 'atm',      label: 'ATM / Caixa',      color: '#7B5EA8' },
+  { id: 'printer',  label: 'Impressora',       color: '#C94A3D' },
+  { id: 'register', label: 'Registadora',      color: '#F1C84B' },
+  { id: 'saas',     label: 'Conta SaaS',       color: '#9B9690' },
+  { id: 'other',    label: 'Outro',            color: '#5A554E' },
+];
+
+function CredentialsView({ user, isAdmin }) {
+  const [items, setItems] = useState(null); // null = loading
+  const [search, setSearch] = useState('');
+  const [filterType, setFilterType] = useState('all');
+  const [editing, setEditing] = useState(null); // null | {id?, ...}
+  const [revealed, setRevealed] = useState(new Set());
+  const [copyToast, setCopyToast] = useState(null);
+
+  const refresh = useCallback(async () => {
+    setItems(null);
+    const data = await cloudFetchCredentials();
+    setItems(data);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Filtros
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    const q = search.trim().toLowerCase();
+    return items.filter(c => {
+      if (filterType !== 'all' && c.type !== filterType) return false;
+      if (!q) return true;
+      const haystack = [
+        c.name, c.username, c.url, c.notes,
+        ...(c.tags || []),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [items, search, filterType]);
+
+  const typeLabel = (id) => CREDENTIAL_TYPES.find(t => t.id === id)?.label || id;
+  const typeColor = (id) => CREDENTIAL_TYPES.find(t => t.id === id)?.color || T.inkSoft;
+
+  const toggleReveal = async (c) => {
+    setRevealed(prev => {
+      const next = new Set(prev);
+      if (next.has(c.id)) next.delete(c.id);
+      else {
+        next.add(c.id);
+        // Log "viewed" (best-effort)
+        cloudLogCredentialAccess(c.id, c.name, 'viewed', user).catch(() => {});
+      }
+      return next;
+    });
+  };
+
+  const handleCopy = async (c) => {
+    if (!c.password) {
+      setCopyToast({ kind: 'error', message: 'Não há password para copiar.' });
+      setTimeout(() => setCopyToast(null), 2500);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(c.password);
+      setCopyToast({ kind: 'success', message: 'Copiado. Clipboard será limpa em 30s.' });
+      setTimeout(() => setCopyToast(null), 3500);
+      // Auto-clear da clipboard ao fim de 30s
+      setTimeout(() => {
+        try { navigator.clipboard.writeText(''); } catch {}
+      }, 30000);
+      // Log
+      cloudLogCredentialAccess(c.id, c.name, 'copied', user).catch(() => {});
+    } catch (err) {
+      setCopyToast({ kind: 'error', message: 'Browser não permite copiar para clipboard.' });
+      setTimeout(() => setCopyToast(null), 3500);
+    }
+  };
+
+  const handleSave = async (data) => {
+    let res;
+    if (data.id) {
+      const { id, ...patch } = data;
+      res = await cloudUpdateCredential(id, patch, user?.id);
+      if (res?.ok) cloudLogCredentialAccess(id, data.name, 'updated', user).catch(() => {});
+    } else {
+      res = await cloudCreateCredential({ ...data, createdBy: user?.id });
+      if (res?.ok && res.data?.id) cloudLogCredentialAccess(res.data.id, data.name, 'created', user).catch(() => {});
+    }
+    if (res?.ok === true) {
+      setEditing(null);
+      refresh();
+    } else {
+      alert('Erro ao guardar: ' + (res?.error || 'desconhecido'));
+    }
+  };
+
+  const handleDelete = async (c) => {
+    if (!confirm(`Eliminar credencial "${c.name}"?\n\nEsta acção não pode ser desfeita.`)) return;
+    cloudLogCredentialAccess(c.id, c.name, 'deleted', user).catch(() => {});
+    const res = await cloudDeleteCredential(c.id);
+    if (res?.ok) {
+      setRevealed(prev => { const n = new Set(prev); n.delete(c.id); return n; });
+      refresh();
+    } else {
+      alert('Erro ao eliminar: ' + (res?.error || 'desconhecido'));
+    }
+  };
+
+  return (
+    <div className="fade-up">
+      <Header
+        eyebrow={<><KeyRound size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Cofre</>}
+        title="Credenciais de equipamentos"
+        subtitle="Guarda passwords e códigos dos equipamentos da loja (PCs, WiFi, alarmes, impressoras, contas). Acesso restrito a admins ou ao criador da credencial. Cada visualização/cópia fica registada no log."
+        action={
+          isAdmin && (
+            <button onClick={() => setEditing({ name: '', type: 'other', username: '', password: '', url: '', notes: '', tags: [] })} style={{
+              padding: '8px 14px', background: T.ink, color: T.bg,
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+            }}>
+              <Plus size={12} /> Nova credencial
+            </button>
+          )
+        }
+      />
+
+      {/* Filtros */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ position: 'relative', flex: '1 1 240px', maxWidth: 360 }}>
+          <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: T.inkMute }} />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Pesquisar por nome, username, URL, notas, tags…"
+            style={{
+              width: '100%', padding: '8px 10px 8px 30px', fontSize: 12,
+              background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6,
+              color: T.ink, outline: 'none',
+            }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          <button onClick={() => setFilterType('all')} style={chipBtnStyle(filterType === 'all', T.ink)}>
+            Todos {items ? `(${items.length})` : ''}
+          </button>
+          {CREDENTIAL_TYPES.map(t => {
+            const count = items?.filter(c => c.type === t.id).length || 0;
+            if (count === 0 && filterType !== t.id) return null;
+            return (
+              <button key={t.id} onClick={() => setFilterType(filterType === t.id ? 'all' : t.id)} style={chipBtnStyle(filterType === t.id, t.color)}>
+                {t.label} <span style={{ opacity: 0.7, marginLeft: 4 }}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Toast de cópia */}
+      {copyToast && (
+        <div style={{
+          padding: '8px 12px', marginBottom: 12, borderRadius: 6, fontSize: 12,
+          background: copyToast.kind === 'success' ? `${T.green}20` : `${T.red}20`,
+          color: copyToast.kind === 'success' ? T.green : T.red,
+          border: `1px solid ${copyToast.kind === 'success' ? T.green : T.red}40`,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          {copyToast.kind === 'success' ? <Check size={12} /> : <AlertTriangle size={12} />}
+          {copyToast.message}
+        </div>
+      )}
+
+      {/* Lista */}
+      {items === null ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>A carregar credenciais…</div>
+      ) : items.length === 0 ? (
+        <div style={{ padding: 60, textAlign: 'center', background: T.bgEl, borderRadius: 10, border: `1px dashed ${T.line}` }}>
+          <KeyRound size={32} style={{ color: T.inkMute, marginBottom: 12 }} />
+          <div style={{ fontSize: 14, color: T.ink, fontWeight: 500, marginBottom: 4 }}>Cofre vazio</div>
+          <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 16 }}>
+            Guarda aqui passwords de PCs, WiFi, alarmes, contas SaaS — nada se perde mais.
+          </div>
+          {isAdmin && (
+            <button onClick={() => setEditing({ name: '', type: 'other', username: '', password: '', url: '', notes: '', tags: [] })} style={{
+              padding: '8px 16px', background: T.accent, color: '#fff', border: 'none',
+              borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            }}>+ Adicionar primeira credencial</button>
+          )}
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 12, background: T.bgEl, borderRadius: 6 }}>
+          Sem resultados para "{search}".
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+          {filtered.map(c => (
+            <CredentialCard
+              key={c.id}
+              credential={c}
+              isAdmin={isAdmin}
+              revealed={revealed.has(c.id)}
+              typeLabel={typeLabel(c.type)}
+              typeColor={typeColor(c.type)}
+              onToggleReveal={() => toggleReveal(c)}
+              onCopy={() => handleCopy(c)}
+              onEdit={() => setEditing(c)}
+              onDelete={() => handleDelete(c)}
+            />
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <CredentialEditDialog
+          initial={editing}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+        />
+      )}
+    </div>
+  );
+}
+
+function chipBtnStyle(active, accentColor) {
+  return {
+    padding: '5px 10px', fontSize: 11, fontWeight: 500,
+    background: active ? accentColor : 'transparent',
+    color: active ? '#fff' : T.inkSoft,
+    border: `1px solid ${active ? accentColor : T.line}`,
+    borderRadius: 4, cursor: 'pointer',
+  };
+}
+
+function CredentialCard({ credential: c, isAdmin, revealed, typeLabel, typeColor, onToggleReveal, onCopy, onEdit, onDelete }) {
+  const lastAccess = c.last_accessed_at ? new Date(c.last_accessed_at) : null;
+  const lastStr = lastAccess
+    ? `${lastAccess.toLocaleDateString('pt-PT', { day: '2-digit', month: 'short' })} ${lastAccess.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' })}`
+    : 'nunca';
+
+  return (
+    <div style={{
+      padding: 14, background: T.paper, border: `1px solid ${T.line}`, borderRadius: 8,
+      display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      {/* Header: nome + badge tipo */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {c.name}
+          </div>
+          <span style={{
+            display: 'inline-block', marginTop: 4, padding: '2px 6px',
+            fontSize: 9, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase',
+            background: typeColor, color: '#fff', borderRadius: 3,
+          }}>
+            {typeLabel}
+          </span>
+        </div>
+        {isAdmin && (
+          <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+            <button onClick={onEdit} title="Editar" style={credIconBtnStyle()}>
+              <Pencil size={12} />
+            </button>
+            <button onClick={onDelete} title="Eliminar" style={credIconBtnStyle(T.red)}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Username */}
+      {c.username && (
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 2 }}>Username</div>
+          <div style={{ fontSize: 12, color: T.ink, fontFamily: 'Geist Mono, monospace', wordBreak: 'break-all' }}>{c.username}</div>
+        </div>
+      )}
+
+      {/* Password */}
+      {c.password && (
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 2 }}>Password</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{
+              flex: 1, fontSize: 12, color: T.ink,
+              fontFamily: 'Geist Mono, monospace',
+              padding: '4px 8px', background: T.bgEl, border: `1px solid ${T.lineSoft}`, borderRadius: 4,
+              minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {revealed ? c.password : '••••••••••••'}
+            </div>
+            <button onClick={onToggleReveal} title={revealed ? 'Esconder' : 'Mostrar'} style={credIconBtnStyle()}>
+              {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
+            </button>
+            <button onClick={onCopy} title="Copiar (limpa-se em 30s)" style={credIconBtnStyle(T.accent)}>
+              <Copy size={12} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* URL */}
+      {c.url && (
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 2 }}>URL</div>
+          <a href={c.url} target="_blank" rel="noopener noreferrer" style={{
+            fontSize: 11, color: T.blue, textDecoration: 'underline',
+            wordBreak: 'break-all',
+          }}>{c.url}</a>
+        </div>
+      )}
+
+      {/* Notas */}
+      {c.notes && (
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 2 }}>Notas</div>
+          <div style={{ fontSize: 11, color: T.inkSoft, whiteSpace: 'pre-wrap' }}>{c.notes}</div>
+        </div>
+      )}
+
+      {/* Tags */}
+      {Array.isArray(c.tags) && c.tags.length > 0 && (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
+          {c.tags.map(tag => (
+            <span key={tag} style={{
+              padding: '2px 6px', fontSize: 9, fontFamily: 'Geist Mono, monospace',
+              background: T.bgEl, color: T.inkSoft,
+              border: `1px solid ${T.lineSoft}`, borderRadius: 3,
+            }}>{tag}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Footer: last accessed */}
+      <div style={{
+        fontSize: 9, color: T.inkMute, marginTop: 4,
+        paddingTop: 6, borderTop: `1px dashed ${T.lineSoft}`,
+        fontFamily: 'Geist Mono, monospace',
+      }}>
+        último acesso: {lastStr}
+      </div>
+    </div>
+  );
+}
+
+function credIconBtnStyle(color) {
+  return {
+    padding: 6, background: 'transparent', color: color || T.inkSoft,
+    border: `1px solid ${T.line}`, borderRadius: 4, cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minWidth: 28, minHeight: 28,
+  };
+}
+
+function CredentialEditDialog({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || '');
+  const [type, setType] = useState(initial.type || 'other');
+  const [username, setUsername] = useState(initial.username || '');
+  const [password, setPassword] = useState(initial.password || '');
+  const [showPw, setShowPw] = useState(false);
+  const [url, setUrl] = useState(initial.url || '');
+  const [notes, setNotes] = useState(initial.notes || '');
+  const [tagsInput, setTagsInput] = useState((initial.tags || []).join(', '));
+
+  // ESC para fechar
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const generateStrongPassword = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*';
+    let pw = '';
+    const arr = new Uint32Array(16);
+    crypto.getRandomValues(arr);
+    for (let i = 0; i < 16; i++) pw += chars[arr[i] % chars.length];
+    setPassword(pw);
+    setShowPw(true);
+  };
+
+  // Força da password (heuristic)
+  const strength = useMemo(() => {
+    const pw = password || '';
+    if (!pw) return null;
+    let score = 0;
+    if (pw.length >= 8) score++;
+    if (pw.length >= 12) score++;
+    if (/[A-Z]/.test(pw)) score++;
+    if (/[0-9]/.test(pw)) score++;
+    if (/[^A-Za-z0-9]/.test(pw)) score++;
+    if (score <= 2) return { label: 'Fraca', color: T.red };
+    if (score <= 3) return { label: 'Média', color: T.orange };
+    return { label: 'Forte', color: T.green };
+  }, [password]);
+
+  const submit = () => {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      alert('Indica um nome para a credencial.');
+      return;
+    }
+    const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean);
+    onSave({
+      id: initial.id,
+      name: trimmedName,
+      type,
+      username: username.trim() || null,
+      password: password || null,
+      url: url.trim() || null,
+      notes: notes.trim() || null,
+      tags,
+    });
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9999, padding: 20,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 10, border: `1px solid ${T.line}`,
+        width: '100%', maxWidth: 520, maxHeight: '90vh', overflow: 'auto',
+        boxShadow: '0 24px 48px -12px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <h3 className="display" style={{ fontSize: 18, fontStyle: 'italic', margin: 0 }}>
+            {initial.id ? 'Editar credencial' : 'Nova credencial'}
+          </h3>
+          <button onClick={onClose} style={{ padding: 6, background: 'transparent', border: 'none', color: T.inkMute, cursor: 'pointer' }}>
+            <X size={16} />
+          </button>
+        </div>
+        <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <label>
+            <div style={dialogLabelStyle()}>Nome <span style={{ color: T.red }}>*</span></div>
+            <input value={name} onChange={e => setName(e.target.value)} autoFocus style={dialogInput()} placeholder="Ex: PC Caixa 2, WiFi Loja…" />
+          </label>
+          <label>
+            <div style={dialogLabelStyle()}>Tipo</div>
+            <select value={type} onChange={e => setType(e.target.value)} style={dialogInput()}>
+              {CREDENTIAL_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <div style={dialogLabelStyle()}>Username</div>
+            <input value={username} onChange={e => setUsername(e.target.value)} style={dialogInput()} placeholder="opcional" />
+          </label>
+          <div>
+            <div style={dialogLabelStyle()}>Password</div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type={showPw ? 'text' : 'password'}
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                style={{ ...dialogInput(), fontFamily: 'Geist Mono, monospace' }}
+                placeholder="opcional"
+              />
+              <button type="button" onClick={() => setShowPw(s => !s)} style={credIconBtnStyle()} title={showPw ? 'Esconder' : 'Mostrar'}>
+                {showPw ? <EyeOff size={12} /> : <Eye size={12} />}
+              </button>
+              <button type="button" onClick={generateStrongPassword} style={credIconBtnStyle(T.accent)} title="Gerar password forte">
+                <Sparkles size={12} />
+              </button>
+            </div>
+            {strength && (
+              <div style={{ fontSize: 10, color: strength.color, marginTop: 4 }}>
+                Força: <strong>{strength.label}</strong>
+              </div>
+            )}
+          </div>
+          <label>
+            <div style={dialogLabelStyle()}>URL</div>
+            <input value={url} onChange={e => setUrl(e.target.value)} style={dialogInput()} placeholder="https://… (opcional)" />
+          </label>
+          <label>
+            <div style={dialogLabelStyle()}>Notas</div>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3} style={{ ...dialogInput(), resize: 'vertical', fontFamily: 'inherit' }} placeholder="instruções, contexto, etc." />
+          </label>
+          <label>
+            <div style={dialogLabelStyle()}>Tags (separadas por vírgulas)</div>
+            <input value={tagsInput} onChange={e => setTagsInput(e.target.value)} style={dialogInput()} placeholder="ex: caixa, urgente, piso1" />
+          </label>
+        </div>
+        <div style={{ padding: '12px 20px', borderTop: `1px solid ${T.line}`, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button onClick={onClose} style={dialogBtnGhost()}>Cancelar</button>
+          <button onClick={submit} disabled={!name.trim()} style={dialogBtnPrimary()}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function dialogLabelStyle() {
+  return {
+    fontSize: 10, color: T.inkSoft, marginBottom: 4,
+    fontFamily: 'Geist Mono, monospace', letterSpacing: '0.05em', textTransform: 'uppercase',
+  };
+}
 
 // Full-page notes view (accessible via sidebar)
 function NotesView({ notes, setNotes }) {
@@ -17074,7 +17727,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
         displayOrder: data.displayOrder, createdBy: currentUserId,
       });
     }
-    if (res?.ok !== false) { fireChanged(); setEditingFloor(null); refresh(); }
+    if (res?.ok === true) { fireChanged(); setEditingFloor(null); refresh(); }
     else alert('Erro: ' + (res?.error || 'desconhecido'));
   };
 
@@ -17101,7 +17754,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
         displayOrder: data.displayOrder, createdBy: currentUserId,
       });
     }
-    if (res?.ok !== false) { fireChanged(); setEditingZone(null); refresh(); }
+    if (res?.ok === true) { fireChanged(); setEditingZone(null); refresh(); }
     else alert('Erro: ' + (res?.error || 'desconhecido'));
   };
 
@@ -17250,6 +17903,11 @@ function AdminStoreLayoutTab({ currentUserId }) {
           initial={editingZone}
           onClose={() => setEditingZone(null)}
           onSave={handleSaveZone}
+          siblingNames={
+            ((layout || []).find(f => f.id === editingZone.floorId)?.zones || [])
+              .filter(z => z.id !== editingZone.id)
+              .map(z => z.name)
+          }
         />
       )}
     </div>
@@ -17262,9 +17920,22 @@ function FloorEditDialog({ initial, onClose, onSave }) {
   const [color, setColor] = useState(initial.color || '#5DA050');
   const [star, setStar] = useState(!!initial.star);
 
+  // ESC para fechar
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const submit = () => {
     if (!name.trim()) return;
-    onSave({ id: initial.id, name: name.trim(), color, star, displayOrder: initial.displayOrder });
+    // Validação de cor: aceita só #RRGGBB
+    const trimmedColor = (color || '').trim();
+    if (!/^#[0-9A-Fa-f]{6}$/.test(trimmedColor)) {
+      alert(`Cor inválida: "${trimmedColor}". Usa formato #RRGGBB (ex: #5DA050).`);
+      return;
+    }
+    onSave({ id: initial.id, name: name.trim(), color: trimmedColor, star, displayOrder: initial.displayOrder });
   };
 
   return (
@@ -17302,12 +17973,28 @@ function FloorEditDialog({ initial, onClose, onSave }) {
   );
 }
 
-function ZoneEditDialog({ initial, onClose, onSave }) {
+function ZoneEditDialog({ initial, onClose, onSave, siblingNames = [] }) {
   const [name, setName] = useState(initial.name || '');
 
+  // ESC para fechar
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const submit = () => {
-    if (!name.trim()) return;
-    onSave({ id: initial.id, floorId: initial.floorId, name: name.trim(), displayOrder: initial.displayOrder });
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    // Verificar duplicados no mesmo piso (excluindo a própria zona)
+    const duplicate = (siblingNames || []).some(n =>
+      n.trim().toLowerCase() === trimmed.toLowerCase()
+    );
+    if (duplicate) {
+      alert(`Já existe uma zona com o nome "${trimmed}" neste piso. Usa um nome diferente.`);
+      return;
+    }
+    onSave({ id: initial.id, floorId: initial.floorId, name: trimmed, displayOrder: initial.displayOrder });
   };
 
   return (
