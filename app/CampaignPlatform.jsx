@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.12.7';
-const APP_BUILD_DATE = '2026-05-10T22:01'; // Europe/Lisbon
+const APP_VERSION = '3.13.0';
+const APP_BUILD_DATE = '2026-05-12T11:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1678,6 +1678,59 @@ async function cloudClearPriceSnapshot(userId) {
     return cloudUpsertUserData(userId, { preferences: restPrefs });
   } catch (err) {
     console.warn('cloudClearPriceSnapshot failed:', err);
+    return { ok: false };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Inventory scans — persisted in user_data.preferences so they survive
+// across sessions and devices. Each scan is a small object so we can store
+// hundreds without compression. If the list grows large we can gzip later.
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudSaveInventoryScans(userId, scans) {
+  if (!supabase || !userId) return { ok: false };
+  try {
+    // Cap at 5000 most recent scans to keep the JSONB payload reasonable
+    const capped = Array.isArray(scans) ? scans.slice(0, 5000) : [];
+    // Compress if more than a few hundred scans (rough heuristic)
+    const json = JSON.stringify(capped);
+    const compressed = json.length > 50 * 1024 ? await gzipJSON(capped) : null;
+    const payload = compressed
+      ? { __compressed: compressed, count: capped.length, savedAt: new Date().toISOString() }
+      : { scans: capped, count: capped.length, savedAt: new Date().toISOString() };
+    const current = await cloudFetchUserData(userId);
+    const prefs = { ...(current?.preferences || {}), inventory: payload };
+    return cloudUpsertUserData(userId, { preferences: prefs });
+  } catch (err) {
+    console.warn('cloudSaveInventoryScans failed:', err);
+    return { ok: false, error: err?.message };
+  }
+}
+
+async function cloudLoadInventoryScans(userId) {
+  if (!supabase || !userId) return [];
+  try {
+    const data = await cloudFetchUserData(userId);
+    const inv = data?.preferences?.inventory;
+    if (!inv) return [];
+    if (inv.__compressed) {
+      const decompressed = await gunzipJSON(inv.__compressed);
+      return Array.isArray(decompressed) ? decompressed : [];
+    }
+    return Array.isArray(inv.scans) ? inv.scans : [];
+  } catch (err) {
+    console.warn('cloudLoadInventoryScans failed:', err);
+    return [];
+  }
+}
+
+async function cloudClearInventoryScans(userId) {
+  if (!supabase || !userId) return { ok: false };
+  try {
+    const current = await cloudFetchUserData(userId);
+    const { inventory: _removed, ...restPrefs } = current?.preferences || {};
+    return cloudUpsertUserData(userId, { preferences: restPrefs });
+  } catch (err) {
     return { ok: false };
   }
 }
@@ -4012,6 +4065,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3}
             campaigns={filteredCampaigns}
             excludedFamilies={excludedFamilies}
+            user={user}
           />}
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
           {view === 'pdfs' && <PdfEditor />}
@@ -13178,7 +13232,7 @@ function toolBtn(disabled = false, danger = false) {
 // ─────────────────────────────────────────────────────────────────────────
 // Inventory Scanner View
 // ─────────────────────────────────────────────────────────────────────────
-function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [] }) {
+function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, campaigns, excludedFamilies = [], user = null }) {
   const videoRef = useRef(null);
   const inputRef = useRef(null);
   const streamRef = useRef(null);
@@ -13194,8 +13248,9 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   // Feedback visual após cada leitura (verde/vermelho na moldura + badge)
   const [justScanned, setJustScanned] = useState(null); // { ean, found } | null
   const [manualEan, setManualEan] = useState('');
-  // Persisted scan history — survives menu changes, page reloads, crashes.
-  // ts is stored as ISO string in localStorage and deserialised back to Date here.
+  // Persisted scan history — agora na CLOUD (user_data.preferences.inventory)
+  // para que fique disponível em qualquer sessão / dispositivo. localStorage é
+  // mantido como buffer offline (sync rápido entre tabs e durante perda de rede).
   const [scannedRaw, setScannedRaw] = useStoredState('inventory.scanned', []);
   const scanned = useMemo(
     () => (scannedRaw || []).map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts : new Date(s.ts) })),
@@ -13205,10 +13260,70 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
     setScannedRaw(prev => {
       const list = (prev || []).map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts : new Date(s.ts) }));
       const next = typeof updater === 'function' ? updater(list) : updater;
-      // Serialise ts to ISO string before storing
       return next.map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts.toISOString() : s.ts }));
     });
   }, [setScannedRaw]);
+
+  // Cloud hydration: ao montar, vai buscar as leituras guardadas na cloud
+  // do utilizador. Se a cloud tiver mais leituras que o local (outro
+  // dispositivo), faz merge por timestamp+ean (dedup).
+  const cloudHydratedRef = useRef(false);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState('idle'); // 'idle' | 'loading' | 'syncing' | 'synced' | 'error'
+  useEffect(() => {
+    if (cloudHydratedRef.current) return;
+    if (!user?.id) return;
+    cloudHydratedRef.current = true;
+    setCloudSyncStatus('loading');
+    cloudLoadInventoryScans(user.id).then(cloudScans => {
+      if (!Array.isArray(cloudScans) || cloudScans.length === 0) {
+        setCloudSyncStatus('synced');
+        return;
+      }
+      // Merge: union by (ean + ts) to dedupe; sort by ts desc
+      setScannedRaw(prev => {
+        const map = new Map();
+        const key = (s) => `${s.ean}|${typeof s.ts === 'string' ? s.ts : new Date(s.ts).toISOString()}`;
+        for (const s of (prev || [])) map.set(key(s), s);
+        for (const s of cloudScans) {
+          const k = `${s.ean}|${typeof s.ts === 'string' ? s.ts : new Date(s.ts).toISOString()}`;
+          if (!map.has(k)) map.set(k, s);
+        }
+        const merged = [...map.values()].sort((a, b) => {
+          const ta = typeof a.ts === 'string' ? a.ts : new Date(a.ts).toISOString();
+          const tb = typeof b.ts === 'string' ? b.ts : new Date(b.ts).toISOString();
+          return tb.localeCompare(ta);
+        });
+        return merged;
+      });
+      setCloudSyncStatus('synced');
+    }).catch(err => {
+      console.warn('[inventory] cloud load failed:', err);
+      setCloudSyncStatus('error');
+    });
+  }, [user?.id, setScannedRaw]);
+
+  // Auto-sync para cloud — debounced para não bombardear o Supabase a cada
+  // leitura. 1.5s depois da última leitura, faz upsert.
+  const cloudSyncTimerRef = useRef(null);
+  const lastSyncedSnapshotRef = useRef('');
+  useEffect(() => {
+    if (!user?.id) return;
+    if (!cloudHydratedRef.current) return; // não escreve antes de ler
+    if (cloudSyncTimerRef.current) clearTimeout(cloudSyncTimerRef.current);
+    const snapshot = JSON.stringify(scannedRaw || []);
+    if (snapshot === lastSyncedSnapshotRef.current) return;
+    cloudSyncTimerRef.current = setTimeout(async () => {
+      setCloudSyncStatus('syncing');
+      const res = await cloudSaveInventoryScans(user.id, scannedRaw || []);
+      if (res?.ok !== false) {
+        lastSyncedSnapshotRef.current = snapshot;
+        setCloudSyncStatus('synced');
+      } else {
+        setCloudSyncStatus('error');
+      }
+    }, 1500);
+    return () => { if (cloudSyncTimerRef.current) clearTimeout(cloudSyncTimerRef.current); };
+  }, [scannedRaw, user?.id]);
   const [cameraError, setCameraError] = useState(null);
   const [mode, setMode] = useState('manual'); // 'camera' | 'manual'
   const [compareWith, setCompareWith] = useStoredState('inventory.compareWith', 'both'); // 'po2' | 'po3' | 'both'
@@ -13437,7 +13552,7 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
           <ScanLine size={22} style={{ color: T.accent }} /> Scanner de Inventário
         </h2>
         <p style={{ fontSize: 13, color: T.inkMute, marginTop: 6 }}>
-          Lê códigos de barras com a câmara ou digita manualmente. Cada EAN é cruzado com o stock PO2/PO3. A sessão é <strong>guardada automaticamente</strong> neste dispositivo — podes mudar de menu, fechar e reabrir o browser, que as leituras ficam.
+          Lê códigos de barras com a câmara ou digita manualmente. Cada EAN é cruzado com o stock PO2/PO3. A sessão é <strong>guardada na cloud automaticamente</strong> — podes mudar de menu, fechar o browser, mudar de dispositivo, que as leituras ficam disponíveis em qualquer sessão.
         </p>
       </div>
 
@@ -13603,10 +13718,27 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
             <strong style={{ color: T.green }}>{totalFound}</strong> encontrados ·{' '}
             <strong style={{ color: T.accent }}>{totalNotFound}</strong> não encontrados
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: T.green, fontFamily: 'Geist Mono, monospace' }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: T.green, display: 'inline-block' }} />
-            sessão guardada
-          </div>
+          {(() => {
+            const status = cloudSyncStatus;
+            const isOk = status === 'synced';
+            const isBusy = status === 'loading' || status === 'syncing';
+            const isErr = status === 'error';
+            const color = isErr ? T.red : isBusy ? T.accent : T.green;
+            const label =
+              status === 'loading' ? 'a carregar da cloud…' :
+              status === 'syncing' ? 'a guardar na cloud…' :
+              status === 'error'   ? 'erro de sync — sessão local guardada' :
+                                     'sessão guardada na cloud';
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color, fontFamily: 'Geist Mono, monospace' }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%', background: color, display: 'inline-block',
+                  animation: isBusy ? 'pulse 1s ease-in-out infinite' : 'none',
+                }} />
+                {label}
+              </div>
+            );
+          })()}
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
             <button onClick={exportXLSX} title="Exporta um Excel com 2 folhas: Histórico (1 linha por leitura) e Resumo por EAN com diferença vs PO2/PO3" style={{
               padding: '6px 12px', background: T.green, color: '#fff',
@@ -13616,9 +13748,15 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
               <Download size={12} /> Exportar Excel
             </button>
             <button
-              onClick={() => {
-                if (!confirm(`Iniciar nova sessão de inventário?\n\nIsto apaga as ${scanned.length} leituras actuais. Considera exportar para Excel primeiro.`)) return;
+              onClick={async () => {
+                if (!confirm(`Iniciar nova sessão de inventário?\n\nIsto apaga as ${scanned.length} leituras actuais (local + cloud). Considera exportar para Excel primeiro.`)) return;
                 setScanned([]);
+                if (user?.id) {
+                  setCloudSyncStatus('syncing');
+                  const res = await cloudClearInventoryScans(user.id);
+                  setCloudSyncStatus(res?.ok !== false ? 'synced' : 'error');
+                  lastSyncedSnapshotRef.current = '[]';
+                }
               }}
               style={{
                 padding: '6px 12px', background: 'transparent', color: T.accent,
