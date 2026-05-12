@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.13.2';
-const APP_BUILD_DATE = '2026-05-12T16:00'; // Europe/Lisbon
+const APP_VERSION = '3.13.3';
+const APP_BUILD_DATE = '2026-05-12T16:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -8498,7 +8498,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
       if (p.family) counts.set(p.family, (counts.get(p.family) || 0) + 1);
     }
     return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .sort((a, b) => b[1] - a[1] || String(a[0] ?? '').localeCompare(String(b[0] ?? '')))
       .map(([name, count]) => ({ name, count }));
   }, [productsExcludingFamilyFilter]);
 
@@ -10816,7 +10816,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     }
     const list = [];
     counts.forEach((count, date) => list.push({ date, count }));
-    list.sort((a, b) => b.date.localeCompare(a.date));
+    list.sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')));
     return list;
   }, [diff]);
 
@@ -11470,13 +11470,13 @@ function StockView({
       .map(([family, subMap]) => {
         const subs = Array.from(subMap.entries())
           .map(([subfamily, v]) => ({ subfamily, ...v }))
-          .sort((a, b) => a.subfamily.localeCompare(b.subfamily));
+          .sort((a, b) => String(a.subfamily ?? '').localeCompare(String(b.subfamily ?? '')));
         const totPO2 = subs.reduce((s, x) => s + x.po2, 0);
         const totPO3 = subs.reduce((s, x) => s + x.po3, 0);
         const totRefs = subs.reduce((s, x) => s + x.refs, 0);
         return { family, subs, totPO2, totPO3, totRefs };
       })
-      .sort((a, b) => a.family.localeCompare(b.family));
+      .sort((a, b) => String(a.family ?? '').localeCompare(String(b.family ?? '')));
   }, [stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, eanFamilyMap]);
 
   const [expandedFamilies, setExpandedFamilies] = useState(new Set());
