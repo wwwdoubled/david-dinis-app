@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.13.4';
-const APP_BUILD_DATE = '2026-05-12T17:00'; // Europe/Lisbon
+const APP_VERSION = '3.14.0';
+const APP_BUILD_DATE = '2026-05-12T18:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -900,6 +900,118 @@ async function deletePosterZone(id) {
     .delete()
     .eq('id', id);
   return { ok: !error, error: error?.message };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Store Layout — pisos + zonas/móveis (geríveis pelo admin)
+// Substitui o DEFAULT_FLOORS hardcoded. Schema: ver supabase/migrations/
+// 2026-05-12_store_layout.sql
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchStoreLayout() {
+  if (!supabase) return null;
+  try {
+    const [floorsRes, zonesRes] = await Promise.all([
+      supabase.from('store_floors').select('*').order('display_order', { ascending: true }),
+      supabase.from('store_zones').select('*').order('display_order', { ascending: true }),
+    ]);
+    if (floorsRes.error) {
+      console.warn('cloudFetchStoreLayout(floors):', floorsRes.error.message);
+      return null;
+    }
+    if (zonesRes.error) {
+      console.warn('cloudFetchStoreLayout(zones):', zonesRes.error.message);
+      return null;
+    }
+    const floors = floorsRes.data || [];
+    const zones  = zonesRes.data  || [];
+    // Build the same shape as DEFAULT_FLOORS so FloorPlanner/Blueprint don't change
+    return floors.map(f => ({
+      id: f.id,
+      name: f.name,
+      color: f.color || '#5DA050',
+      star: !!f.star,
+      zones: zones
+        .filter(z => z.floor_id === f.id)
+        .map(z => ({ id: z.id, name: z.name, slots: [] })),
+    }));
+  } catch (e) {
+    console.warn('cloudFetchStoreLayout failed:', e);
+    return null;
+  }
+}
+
+async function cloudCreateFloor({ name, color, star, displayOrder, createdBy }) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase
+    .from('store_floors')
+    .insert({
+      name, color: color || '#5DA050', star: !!star,
+      display_order: displayOrder ?? 0,
+      created_by: createdBy,
+    })
+    .select()
+    .single();
+  return { ok: !error, data, error: error?.message };
+}
+
+async function cloudUpdateFloor(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('store_floors').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+async function cloudDeleteFloor(id) {
+  if (!supabase) return { ok: false };
+  // FK on_delete cascade apaga as zonas automaticamente
+  const { error } = await supabase.from('store_floors').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+async function cloudCreateZone({ floorId, name, displayOrder, createdBy }) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase
+    .from('store_zones')
+    .insert({
+      floor_id: floorId, name,
+      display_order: displayOrder ?? 0,
+      created_by: createdBy,
+    })
+    .select()
+    .single();
+  return { ok: !error, data, error: error?.message };
+}
+
+async function cloudUpdateZone(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('store_zones').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+async function cloudDeleteZone(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('store_zones').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+// Seed inicial: copia DEFAULT_FLOORS para a cloud (chamado uma vez via admin)
+async function cloudSeedDefaultLayout(createdBy) {
+  if (!supabase) return { ok: false };
+  let created = 0;
+  for (let i = 0; i < DEFAULT_FLOORS.length; i++) {
+    const f = DEFAULT_FLOORS[i];
+    const floorRes = await cloudCreateFloor({
+      name: f.name, color: f.color, star: f.star,
+      displayOrder: i, createdBy,
+    });
+    if (!floorRes.ok) continue;
+    const floorId = floorRes.data.id;
+    for (let j = 0; j < (f.zones || []).length; j++) {
+      const z = f.zones[j];
+      const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy });
+      if (zRes.ok) created++;
+    }
+  }
+  return { ok: true, created };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -3147,6 +3259,27 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   });
   useEffect(() => { storeSet('default_layout', layoutOnly(defaultLayout)); }, [defaultLayout]);
 
+  // Cloud-managed store layout (admin → Layout da loja). Quando há pisos
+  // configurados na cloud, sobrepõem-se ao defaultLayout local.
+  useEffect(() => {
+    if (!supabase) return;
+    let cancelled = false;
+    const load = async () => {
+      const cloudLayout = await cloudFetchStoreLayout();
+      if (cancelled) return;
+      if (cloudLayout && Array.isArray(cloudLayout) && cloudLayout.length > 0) {
+        setDefaultLayout(layoutOnly(cloudLayout));
+      }
+    };
+    load();
+    const onChange = () => { if (!cancelled) load(); };
+    window.addEventListener('dd:store-layout-changed', onChange);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('dd:store-layout-changed', onChange);
+    };
+  }, []);
+
   // One-time migration (per session): for each period without floors,
   // copy floors from the oldest campaign in that period (legacy plan owned
   // by a campaign → promote to period level).
@@ -3337,6 +3470,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     setPosters(allPosters);
     setDismissals(dismiss);
   }, [user]);
+
+  // Refresh poster zones list (called when admin creates/edits/deletes a zone)
+  const refreshPosterZones = useCallback(async () => {
+    if (!supabase) return;
+    const zones = await fetchPosterZones();
+    setPosterZones(zones);
+  }, []);
+
+  // Listen for admin changes to poster zones — refreshes the dropdown
+  // in PosterAddDialog without requiring page reload.
+  useEffect(() => {
+    const onChange = () => { refreshPosterZones(); };
+    window.addEventListener('dd:poster-zones-changed', onChange);
+    return () => window.removeEventListener('dd:poster-zones-changed', onChange);
+  }, [refreshPosterZones]);
 
   // Dismiss a notification (don't show again for this user)
   const handleDismissNotification = useCallback(async (key) => {
@@ -15150,6 +15298,7 @@ function AdminView({ user, uiConfig, setUIConfig }) {
           { id: 'users', label: 'Utilizadores', icon: Users },
           { id: 'activity', label: 'Atividade', icon: Activity },
           { id: 'cloud', label: 'Cloud', icon: Database },
+          { id: 'layout', label: 'Layout da loja', icon: Layers },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
           { id: 'emails', label: 'Emails', icon: Inbox },
           { id: 'config', label: 'Configuração', icon: Settings },
@@ -15174,6 +15323,7 @@ function AdminView({ user, uiConfig, setUIConfig }) {
       {tab === 'users' && <AdminUsersTab currentUserId={user?.id} currentUserEmail={user?.email} />}
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
+      {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
@@ -16863,6 +17013,343 @@ const SummaryCampaignCard = React.memo(function SummaryCampaignCard({ period, se
 });
 
 // ─────────────────────────────────────────────────────────────────────────
+// AdminStoreLayoutTab — gestão de pisos + zonas/móveis (layout físico da loja)
+// Substitui o DEFAULT_FLOORS hardcoded por dados em Supabase, geríveis.
+// ─────────────────────────────────────────────────────────────────────────
+function AdminStoreLayoutTab({ currentUserId }) {
+  const [layout, setLayout] = useState(null); // null while loading; [] when empty; [{...}] when loaded
+  const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState(null);
+  const [seeding, setSeeding] = useState(false);
+  const [expandedFloors, setExpandedFloors] = useState(new Set());
+  const [editingFloor, setEditingFloor] = useState(null);  // { id?, name, color, star, displayOrder }
+  const [editingZone, setEditingZone]   = useState(null);  // { id?, floorId, name, displayOrder }
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    const res = await cloudFetchStoreLayout();
+    if (res == null) {
+      setError('Não foi possível carregar o layout. Verifica se as tabelas store_floors / store_zones existem (corre o SQL em supabase/migrations/2026-05-12_store_layout.sql).');
+      setLayout([]);
+    } else {
+      setLayout(res);
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const toggleFloor = (id) => setExpandedFloors(prev => {
+    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
+  });
+
+  const fireChanged = () => {
+    try { window.dispatchEvent(new CustomEvent('dd:store-layout-changed')); } catch {}
+  };
+
+  const handleSeed = async () => {
+    if (!confirm('Importar layout default (PISO 1, PISO 0, DESTAQUES PORTÁTEIS) com todas as zonas predefinidas?')) return;
+    setSeeding(true);
+    const res = await cloudSeedDefaultLayout(currentUserId);
+    setSeeding(false);
+    if (res.ok) {
+      fireChanged();
+      refresh();
+    } else {
+      alert('Erro ao importar: ' + (res.error || 'desconhecido'));
+    }
+  };
+
+  const handleSaveFloor = async (data) => {
+    let res;
+    if (data.id) {
+      res = await cloudUpdateFloor(data.id, {
+        name: data.name, color: data.color, star: !!data.star,
+        display_order: data.displayOrder,
+      });
+    } else {
+      res = await cloudCreateFloor({
+        name: data.name, color: data.color, star: !!data.star,
+        displayOrder: data.displayOrder, createdBy: currentUserId,
+      });
+    }
+    if (res?.ok !== false) { fireChanged(); setEditingFloor(null); refresh(); }
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  const handleDeleteFloor = async (floor) => {
+    const zoneCount = (floor.zones || []).length;
+    const msg = zoneCount > 0
+      ? `Eliminar piso "${floor.name}"?\n\nIsto também apaga as ${zoneCount} zona(s) deste piso.\n\nNota: períodos existentes que tenham snapshots deste piso continuam intactos (são cópias).`
+      : `Eliminar piso "${floor.name}"?`;
+    if (!confirm(msg)) return;
+    const res = await cloudDeleteFloor(floor.id);
+    if (res.ok) { fireChanged(); refresh(); }
+    else alert('Erro: ' + (res.error || 'desconhecido'));
+  };
+
+  const handleSaveZone = async (data) => {
+    let res;
+    if (data.id) {
+      res = await cloudUpdateZone(data.id, {
+        name: data.name, display_order: data.displayOrder,
+      });
+    } else {
+      res = await cloudCreateZone({
+        floorId: data.floorId, name: data.name,
+        displayOrder: data.displayOrder, createdBy: currentUserId,
+      });
+    }
+    if (res?.ok !== false) { fireChanged(); setEditingZone(null); refresh(); }
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  const handleDeleteZone = async (zone) => {
+    if (!confirm(`Eliminar zona "${zone.name}"?`)) return;
+    const res = await cloudDeleteZone(zone.id);
+    if (res.ok) { fireChanged(); refresh(); }
+    else alert('Erro: ' + (res.error || 'desconhecido'));
+  };
+
+  // ── render ──
+  if (loading) return <div style={{ padding: 30, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>A carregar layout…</div>;
+
+  if (error) {
+    return (
+      <div style={{ padding: 20, background: '#fff3f2', border: `1px solid ${T.red}`, borderRadius: 8, color: T.red, fontSize: 13, lineHeight: 1.5 }}>
+        {error}
+      </div>
+    );
+  }
+
+  const isEmpty = (layout || []).length === 0;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, gap: 16 }}>
+        <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, maxWidth: 620 }}>
+          Define os <strong>pisos</strong> da loja e os <strong>móveis/zonas</strong> dentro de cada piso.
+          Este layout é usado por todas as campanhas como base do plano (Blueprint, Plano de zonas, Saída).
+          Períodos já criados mantêm um snapshot próprio — alterações aqui só afectam o default para campanhas novas.
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+          {isEmpty && (
+            <button onClick={handleSeed} disabled={seeding} style={{
+              padding: '8px 14px', background: T.accent, color: '#fff',
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: seeding ? 'wait' : 'pointer',
+            }}>
+              <Sparkles size={12} /> {seeding ? 'A importar…' : 'Importar layout default'}
+            </button>
+          )}
+          <button onClick={() => setEditingFloor({ name: '', color: '#5DA050', star: false, displayOrder: (layout || []).length })} style={{
+            padding: '8px 14px', background: T.ink, color: T.bg,
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+          }}>
+            <Plus size={12} /> Novo piso
+          </button>
+        </div>
+      </div>
+
+      {isEmpty ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13, background: T.bgEl, borderRadius: 8 }}>
+          Nenhum piso configurado. Importa o layout default ou cria um piso novo.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {layout.map(floor => {
+            const isOpen = expandedFloors.has(floor.id);
+            return (
+              <div key={floor.id} style={{
+                background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden',
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px',
+                  background: `${floor.color}15`, borderBottom: isOpen ? `1px solid ${T.lineSoft}` : 'none',
+                }}>
+                  <button onClick={() => toggleFloor(floor.id)} style={{
+                    padding: 4, background: 'transparent', border: 'none', cursor: 'pointer', color: T.inkSoft,
+                  }}>
+                    <ChevronRight size={14} style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }} />
+                  </button>
+                  <span style={{ width: 14, height: 14, borderRadius: 3, background: floor.color, flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {floor.name}
+                      {floor.star && <Star size={11} fill={T.yellow} stroke={T.yellow} />}
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>
+                      {floor.zones.length} zona{floor.zones.length === 1 ? '' : 's'}
+                    </div>
+                  </div>
+                  <button onClick={() => setEditingFloor({
+                    id: floor.id, name: floor.name, color: floor.color, star: floor.star,
+                    displayOrder: 0,
+                  })} style={adminActionBtn()}>
+                    <Pencil size={11} /> Editar
+                  </button>
+                  <button onClick={() => handleDeleteFloor(floor)} style={adminActionBtn(T.red)}>
+                    <Trash2 size={11} /> Eliminar
+                  </button>
+                </div>
+
+                {isOpen && (
+                  <div style={{ padding: '8px 14px 12px' }}>
+                    {floor.zones.length === 0 ? (
+                      <div style={{ fontSize: 11, color: T.inkMute, fontStyle: 'italic', padding: '8px 0' }}>
+                        Sem zonas neste piso.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {floor.zones.map(z => (
+                          <div key={z.id} style={{
+                            display: 'flex', alignItems: 'center', gap: 10,
+                            padding: '6px 8px', background: T.paper,
+                            borderRadius: 4, border: `1px solid ${T.lineSoft}`,
+                          }}>
+                            <div style={{ flex: 1, fontSize: 12, color: T.ink }}>{z.name}</div>
+                            <button onClick={() => setEditingZone({
+                              id: z.id, floorId: floor.id, name: z.name, displayOrder: 0,
+                            })} style={adminActionBtn()}>
+                              <Pencil size={10} /> Editar
+                            </button>
+                            <button onClick={() => handleDeleteZone(z)} style={adminActionBtn(T.red)}>
+                              <Trash2 size={10} /> Eliminar
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <button onClick={() => setEditingZone({ floorId: floor.id, name: '', displayOrder: floor.zones.length })} style={{
+                      marginTop: 8, padding: '5px 10px',
+                      background: 'transparent', color: T.accent, border: `1px dashed ${T.accent}50`,
+                      borderRadius: 4, fontSize: 11, cursor: 'pointer',
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                    }}>
+                      <Plus size={10} /> Nova zona
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editingFloor && (
+        <FloorEditDialog
+          initial={editingFloor}
+          onClose={() => setEditingFloor(null)}
+          onSave={handleSaveFloor}
+        />
+      )}
+      {editingZone && (
+        <ZoneEditDialog
+          initial={editingZone}
+          onClose={() => setEditingZone(null)}
+          onSave={handleSaveZone}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Diálogos auxiliares ────────────────────────────────────────────────
+function FloorEditDialog({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || '');
+  const [color, setColor] = useState(initial.color || '#5DA050');
+  const [star, setStar] = useState(!!initial.star);
+
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({ id: initial.id, name: name.trim(), color, star, displayOrder: initial.displayOrder });
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.45)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 12, padding: 24, width: 'min(400px, 92vw)', border: `1px solid ${T.line}`,
+      }}>
+        <h3 className="display" style={{ fontSize: 18, fontStyle: 'italic', margin: '0 0 18px' }}>
+          {initial.id ? 'Editar piso' : 'Novo piso'}
+        </h3>
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 3, fontFamily: 'Geist Mono', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Nome</div>
+          <input value={name} onChange={e => setName(e.target.value)} autoFocus style={dialogInput()} placeholder="Ex: PISO 2" />
+        </label>
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 3, fontFamily: 'Geist Mono', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Cor</div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input type="color" value={color} onChange={e => setColor(e.target.value)} style={{ width: 50, height: 36, border: `1px solid ${T.line}`, borderRadius: 4, padding: 2, cursor: 'pointer' }} />
+            <input value={color} onChange={e => setColor(e.target.value)} style={{ ...dialogInput(), fontFamily: 'Geist Mono' }} />
+          </div>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18, cursor: 'pointer' }}>
+          <input type="checkbox" checked={star} onChange={e => setStar(e.target.checked)} />
+          <span style={{ fontSize: 12, color: T.ink }}>Marcar como "destaques portáteis" (★)</span>
+        </label>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button onClick={onClose} style={dialogBtnGhost()}>Cancelar</button>
+          <button onClick={submit} disabled={!name.trim()} style={dialogBtnPrimary()}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ZoneEditDialog({ initial, onClose, onSave }) {
+  const [name, setName] = useState(initial.name || '');
+
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({ id: initial.id, floorId: initial.floorId, name: name.trim(), displayOrder: initial.displayOrder });
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.45)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bg, borderRadius: 12, padding: 24, width: 'min(400px, 92vw)', border: `1px solid ${T.line}`,
+      }}>
+        <h3 className="display" style={{ fontSize: 18, fontStyle: 'italic', margin: '0 0 18px' }}>
+          {initial.id ? 'Editar zona' : 'Nova zona'}
+        </h3>
+        <label style={{ display: 'block', marginBottom: 18 }}>
+          <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 3, fontFamily: 'Geist Mono', letterSpacing: '0.05em', textTransform: 'uppercase' }}>Nome da zona / móvel</div>
+          <input value={name} onChange={e => setName(e.target.value)} autoFocus style={dialogInput()} placeholder="Ex: MLS SOM (LADO SOM)" />
+        </label>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          <button onClick={onClose} style={dialogBtnGhost()}>Cancelar</button>
+          <button onClick={submit} disabled={!name.trim()} style={dialogBtnPrimary()}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Helpers de estilo locais para os diálogos do Layout (dialogInput já existe acima)
+function dialogBtnGhost() {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    background: 'transparent', color: T.inkSoft,
+    border: `1px solid ${T.line}`, borderRadius: 5, cursor: 'pointer',
+  };
+}
+function dialogBtnPrimary() {
+  return {
+    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+    background: T.ink, color: T.bg, border: 'none', borderRadius: 5, cursor: 'pointer',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // AdminPosterZonesTab — manage zones where posters are placed
 // ─────────────────────────────────────────────────────────────────────────
 function AdminPosterZonesTab({ currentUserId }) {
@@ -16891,12 +17378,16 @@ function AdminPosterZonesTab({ currentUserId }) {
     }
     setEditing(null);
     refresh();
+    // Notifica o resto da app (CampaignsView / PosterAddDialog) que as zonas
+    // mudaram, para refrescar o dropdown sem precisar de reload completo.
+    try { window.dispatchEvent(new CustomEvent('dd:poster-zones-changed')); } catch {}
   };
 
   const handleDelete = async (zone) => {
     if (!confirm(`Eliminar zona "${zone.name}"?\n\nOs cartazes registados nesta zona ficam sem zona associada.`)) return;
     await deletePosterZone(zone.id);
     refresh();
+    try { window.dispatchEvent(new CustomEvent('dd:poster-zones-changed')); } catch {}
   };
 
   return (
