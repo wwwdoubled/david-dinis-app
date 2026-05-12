@@ -525,8 +525,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.13.0';
-const APP_BUILD_DATE = '2026-05-12T11:30'; // Europe/Lisbon
+const APP_VERSION = '3.13.1';
+const APP_BUILD_DATE = '2026-05-12T15:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -13440,38 +13440,107 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   }, [productIndex, stockIdxPO2, stockIdxPO3]);
 
   // Start camera scanner
+  // Engine de detecção actualmente activa: 'native' (BarcodeDetector — Android Chrome)
+  // ou 'zxing' (fallback JS para iOS Safari, Firefox e qualquer browser sem suporte).
+  const zxingControlsRef = useRef(null); // BrowserMultiFormatReader controls (stop fn)
+
   const startCamera = useCallback(async () => {
     setCameraError(null);
     try {
-      if (!('BarcodeDetector' in window)) {
-        setCameraError('O teu browser não suporta o leitor de câmara nativo. Usa o modo manual ou actualiza para iOS 17+ / Chrome 83+.');
+      // Pré-condições — getUserMedia é universal em browsers modernos
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraError('Este browser não suporta acesso à câmara. Usa o modo manual.');
         return;
       }
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } });
+      // iOS Safari requer https (ou localhost) para câmara
+      if (typeof window !== 'undefined' && window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
+        setCameraError('A câmara requer HTTPS. Abre a app em https:// (no Safari iOS) ou usa o modo manual.');
+        return;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // iOS Safari precisa explicitamente de playsinline + muted (já está) e play()
+        videoRef.current.setAttribute('playsinline', 'true');
         await videoRef.current.play();
       }
-      detectorRef.current = new window.BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39'] });
       setScanning(true);
 
-      const detect = async () => {
-        if (!videoRef.current || !detectorRef.current) return;
+      // ── Engine de decode ──
+      // Preferência 1: BarcodeDetector nativo (Android Chrome ≥83, alguns Edge).
+      // iOS Safari 17+ ainda NÃO implementa BarcodeDetector — fallback obrigatório.
+      if ('BarcodeDetector' in window) {
         try {
-          const barcodes = await detectorRef.current.detect(videoRef.current);
-          for (const b of barcodes) processEan(b.rawValue);
-        } catch {}
-        rafRef.current = requestAnimationFrame(detect);
-      };
-      rafRef.current = requestAnimationFrame(detect);
+          detectorRef.current = new window.BarcodeDetector({
+            formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39'],
+          });
+          const detect = async () => {
+            if (!videoRef.current || !detectorRef.current) return;
+            try {
+              const barcodes = await detectorRef.current.detect(videoRef.current);
+              for (const b of barcodes) processEan(b.rawValue);
+            } catch {}
+            rafRef.current = requestAnimationFrame(detect);
+          };
+          rafRef.current = requestAnimationFrame(detect);
+          return;
+        } catch (e) {
+          console.warn('[scanner] BarcodeDetector falhou, a usar fallback ZXing:', e);
+          detectorRef.current = null;
+        }
+      }
+
+      // Preferência 2: ZXing (JS puro, funciona em iOS Safari, Firefox, etc.)
+      try {
+        const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+          import('@zxing/browser'),
+          import('@zxing/library'),
+        ]);
+        const hints = new Map();
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+          BarcodeFormat.EAN_13, BarcodeFormat.EAN_8,
+          BarcodeFormat.UPC_A, BarcodeFormat.UPC_E,
+          BarcodeFormat.CODE_128, BarcodeFormat.CODE_39,
+        ]);
+        hints.set(DecodeHintType.TRY_HARDER, true);
+        const reader = new BrowserMultiFormatReader(hints);
+        const controls = await reader.decodeFromVideoElement(videoRef.current, (result, _err) => {
+          if (result) {
+            const text = typeof result.getText === 'function' ? result.getText() : (result.text || '');
+            if (text) processEan(text);
+          }
+          // ignore NotFoundException (no barcode in frame) — continues scanning
+        });
+        zxingControlsRef.current = controls;
+      } catch (e) {
+        console.error('[scanner] ZXing fallback failed:', e);
+        setCameraError('Não foi possível iniciar o leitor de barcodes neste browser. Usa o modo manual.');
+      }
     } catch (err) {
-      setCameraError('Erro ao aceder à câmara: ' + err.message);
+      const msg = err?.message || String(err);
+      if (err?.name === 'NotAllowedError') {
+        setCameraError('Permissão de câmara negada. Vai a Definições do browser → permitir câmara para este site.');
+      } else if (err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError') {
+        setCameraError('Câmara traseira não encontrada. Tenta noutro dispositivo ou usa o modo manual.');
+      } else {
+        setCameraError('Erro ao aceder à câmara: ' + msg);
+      }
     }
   }, [processEan]);
 
   const stopCamera = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    // Stop ZXing decoder if active
+    if (zxingControlsRef.current) {
+      try { zxingControlsRef.current.stop(); } catch {}
+      zxingControlsRef.current = null;
+    }
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     if (videoRef.current) videoRef.current.srcObject = null;
     streamRef.current = null;
