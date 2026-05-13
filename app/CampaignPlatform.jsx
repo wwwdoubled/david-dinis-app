@@ -37,6 +37,9 @@ const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
 // in env, replace the body of `reportError` with `Sentry.captureException`.
 // Until then, errors are buffered to Supabase `error_log` table (best-effort).
 // ─────────────────────────────────────────────────────────────────────────
+// v3.15.1: enquanto a tabela `error_log` não existir, apenas log local — sem
+// inserir na cloud (evita 404 spam na consola). Para activar persistência,
+// criar a tabela `error_log` no Supabase e descomentar o bloco em baixo.
 function reportError(err, context = {}) {
   try {
     const payload = {
@@ -48,8 +51,7 @@ function reportError(err, context = {}) {
       created_at: new Date().toISOString(),
     };
     console.error('[reportError]', payload);
-    // Best-effort: silently drop if table doesn't exist (no app crash)
-    if (supabase) supabase.from('error_log').insert(payload).then(() => {}, () => {});
+    // if (supabase) supabase.from('error_log').insert(payload).then(() => {}, () => {});
   } catch {}
 }
 
@@ -526,8 +528,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.0';
-const APP_BUILD_DATE = '2026-05-12T20:00'; // Europe/Lisbon
+const APP_VERSION = '3.15.1';
+const APP_BUILD_DATE = '2026-05-13T11:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -537,6 +539,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.1', date: '2026-05-13', summary: 'Fixes pós-3.15.0: (1) crash "a.localeCompare is not a function" ao entrar em campanha com Excel carregado — sort em Vendas e Listagem agora coage ambos os operandos a String quando pelo menos um é string (Excel mistura tipos); (2) NotAllowedError ao auto-limpar clipboard 30s após copiar password — passou a apanhar a rejeição assíncrona do writeText() e a verificar document.hasFocus() antes; (3) 404 spam na consola por insert em `error_log` (tabela não existe) — desactivado o insert até a tabela ser criada, mantém-se apenas o console.error local.' },
   { version: '3.12.7', date: '2026-05-10', summary: 'Inventário (câmara): overlay tipo viewfinder com áreas escurecidas em volta de uma scan window central, 4 cantos L-shape brancos (verdes/vermelhos no momento de leitura), linha vermelha animada a oscilar (congela após pick), badge "✓ {EAN}" ou "✗ não encontrado" + texto guia. Lockout de 600ms entre quaisquer leituras (anteriormente só havia debounce de 2s para o MESMO EAN).' },
   { version: '3.12.6', date: '2026-05-10', summary: 'Tab switching dentro da campanha (Plano/Listagem/Saída/Pedido GU) agora instantâneo: productByEan (lookup EAN→produto com 8 campos: nome/família/preços/datas) construído UMA vez no CampaignsView e partilhado entre as 4 views — antes cada uma reconstruía o seu Map (3806 entries). Também usado pelo SlotRow.resolvedProduct (era .find() linear sobre 3806 rows por slot).' },
   { version: '3.12.5', date: '2026-05-10', summary: 'Fluidez global tipo Cmd+K em toda a app: novo <SearchInput> uncontrolled+debounced (150ms) aplicado em Listagem, Alterações, Vendas, Templates, Importar campanha, Admin Cloud, Activity Log; ZoneBlock memoizado com equality custom (ignora callbacks); typing em qualquer campo de pesquisa ficou instantâneo independentemente do tamanho do dataset.' },
@@ -5534,7 +5537,12 @@ function SalesView({ salesData, setSalesData, candidates, setCandidates }) {
     );
     r = [...r].sort((a, b) => {
       const av = a[sortBy] ?? 0; const bv = b[sortBy] ?? 0;
-      if (typeof av === 'string') return sortDir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
+      // v3.15.1: coerce qualquer valor para string se um dos dois for string
+      // (Excel mistura tipos — alguns nomes vêm como números, etc).
+      if (typeof av === 'string' || typeof bv === 'string') {
+        const sa = String(av); const sb = String(bv);
+        return sortDir === 'desc' ? sb.localeCompare(sa) : sa.localeCompare(sb);
+      }
       return sortDir === 'desc' ? bv - av : av - bv;
     });
     return topOnly ? r.slice(0, 20) : r;
@@ -8912,7 +8920,12 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
     });
     r = [...r].sort((a, b) => {
       const av = a[sortBy] ?? 0; const bv = b[sortBy] ?? 0;
-      if (typeof av === 'string') return sortDir === 'desc' ? bv.localeCompare(av) : av.localeCompare(bv);
+      // v3.15.1: coerce qualquer valor para string se um dos dois for string
+      // (Excel mistura tipos — alguns campos vêm como números, etc).
+      if (typeof av === 'string' || typeof bv === 'string') {
+        const sa = String(av); const sb = String(bv);
+        return sortDir === 'desc' ? sb.localeCompare(sa) : sa.localeCompare(sb);
+      }
       return sortDir === 'desc' ? bv - av : av - bv;
     });
     return r;
@@ -14587,9 +14600,15 @@ function CredentialsView({ user, isAdmin }) {
       await navigator.clipboard.writeText(c.password);
       setCopyToast({ kind: 'success', message: 'Copiado. Clipboard será limpa em 30s.' });
       setTimeout(() => setCopyToast(null), 3500);
-      // Auto-clear da clipboard ao fim de 30s
+      // Auto-clear da clipboard ao fim de 30s. v3.15.1: o writeText devolve
+      // Promise que rejeita quando o documento não tem foco — apanhar com .catch
+      // (try/catch sync não apanha a rejeição assíncrona).
       setTimeout(() => {
-        try { navigator.clipboard.writeText(''); } catch {}
+        if (typeof document !== 'undefined' && !document.hasFocus()) return;
+        try {
+          const p = navigator.clipboard.writeText('');
+          if (p && typeof p.catch === 'function') p.catch(() => {});
+        } catch {}
       }, 30000);
       // Log
       cloudLogCredentialAccess(c.id, c.name, 'copied', user).catch(() => {});
