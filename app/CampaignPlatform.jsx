@@ -529,7 +529,7 @@ function debounce(fn, ms = 600) {
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
 const APP_VERSION = '3.15.4';
-const APP_BUILD_DATE = '2026-05-13T15:00'; // Europe/Lisbon
+const APP_BUILD_DATE = '2026-05-13T15:45'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -5872,12 +5872,17 @@ function CampaignsView({
   // só a campanha pedida (o detalhe abre automaticamente). O ID fica em
   // sessionStorage para sobreviver à navegação onNavigatePeriod (que faz
   // setView + reload de selectedPeriodId). Cleanup de 3s evita key órfã.
+  //
+  // NOTA TDZ: chama setActiveIds([id]) directamente em vez de setOnlyActive
+  // — esta useCallback só é declarada mais abaixo no corpo da função e
+  // referenciá-la aqui dispararia ReferenceError (acessível só após linha
+  // ~6057). setActiveIds vem do useState no topo (já hoisted).
   useEffect(() => {
     let wantId;
     try { wantId = sessionStorage.getItem('campaigns.openCampaignId'); } catch {}
     if (!wantId) return;
     if (scopedCampaigns.some(c => c.id === wantId)) {
-      setOnlyActive(wantId);
+      setActiveIds([wantId]);
       try { sessionStorage.removeItem('campaigns.openCampaignId'); } catch {}
       return;
     }
@@ -5887,7 +5892,7 @@ function CampaignsView({
       try { sessionStorage.removeItem('campaigns.openCampaignId'); } catch {}
     }, 3000);
     return () => clearTimeout(t);
-  }, [scopedCampaigns, setOnlyActive]);
+  }, [scopedCampaigns]);
 
   const activeCampaigns = useMemo(
     () => activeIds.map(id => scopedCampaigns.find(c => c.id === id)).filter(Boolean),
