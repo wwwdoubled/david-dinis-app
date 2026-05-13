@@ -528,8 +528,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.2';
-const APP_BUILD_DATE = '2026-05-13T12:30'; // Europe/Lisbon
+const APP_VERSION = '3.15.3';
+const APP_BUILD_DATE = '2026-05-13T13:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -539,6 +539,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.3', date: '2026-05-13', summary: 'Cofre de credenciais — visibilidade controlada pelo admin + integração Cmd+K. (A) Admin → Definições → Visibilidade de menus agora inclui linha "Cofre de credenciais" com aviso visual destacado (laranja) quando activo para outros papéis. RLS de leitura passou a permitir qualquer utilizador autenticado (escrita continua só admins) — requer correr supabase/migrations/2026-05-13_credentials_share.sql. Por defeito permanece admin-only (visible: false). (B) Cmd+K passou a procurar também no cofre — mostra apenas nome/username/url/tags, nunca passwords. Atalho "Cofre" adicionado às vistas rápidas; navegação para o cofre via Cmd+K faz scroll automático e destaca a credencial 3s.' },
   { version: '3.15.2', date: '2026-05-13', summary: 'Fix crítico de persistência (estado DESTAQUE/FEITO/etc nos slots não guardava ao mudar de campo): (A) updatePeriod passa a aceitar patch funcional (prev)=>obj para ler o estado mais recente do período; setFloors em CampaignDetail usa este updater e resolve baseFloors a partir do currentPeriod real, em vez de uma closure desactualizada. (B) Sync periódica (30s) lia periodsRef.current ANTES do await do fetch e depois sobrescrevia tudo via setPeriods(merged) — perdia edits locais durante o await. Agora o merge corre dentro de setPeriods(curr => mergePeriods(curr, cloud)). Aplicado também a setCampaigns.' },
   { version: '3.15.1', date: '2026-05-13', summary: 'Fixes pós-3.15.0: (1) crash "a.localeCompare is not a function" ao entrar em campanha com Excel carregado — sort em Vendas e Listagem agora coage ambos os operandos a String quando pelo menos um é string (Excel mistura tipos); (2) NotAllowedError ao auto-limpar clipboard 30s após copiar password — passou a apanhar a rejeição assíncrona do writeText() e a verificar document.hasFocus() antes; (3) 404 spam na consola por insert em `error_log` (tabela não existe) — desactivado o insert até a tabela ser criada, mantém-se apenas o console.error local.' },
   { version: '3.12.7', date: '2026-05-10', summary: 'Inventário (câmara): overlay tipo viewfinder com áreas escurecidas em volta de uma scan window central, 4 cantos L-shape brancos (verdes/vermelhos no momento de leitura), linha vermelha animada a oscilar (congela após pick), badge "✓ {EAN}" ou "✗ não encontrado" + texto guia. Lockout de 600ms entre quaisquer leituras (anteriormente só havia debounce de 2s para o MESMO EAN).' },
@@ -821,6 +822,10 @@ const DEFAULT_MENU_VISIBILITY = {
   images: { roles: ['user', 'manager'], visible: true },
   pdfs: { roles: ['user', 'manager'], visible: true },
   notes: { roles: ['user', 'manager', 'viewer'], visible: true },
+  // v3.15.3: Cofre de credenciais — admin-only por defeito. Admin pode
+  // activar `visible` e escolher que roles vêm a opção na sidebar/Cmd+K.
+  // (RLS continua a garantir que só vêem o que podem ler.)
+  credentials: { roles: [], visible: false },
   scanner: { visible: true, roles: ['user', 'manager', 'viewer'] },
 };
 
@@ -14583,6 +14588,8 @@ function CredentialsView({ user, isAdmin }) {
   const [editing, setEditing] = useState(null); // null | {id?, ...}
   const [revealed, setRevealed] = useState(new Set());
   const [copyToast, setCopyToast] = useState(null);
+  const [highlightId, setHighlightId] = useState(null); // v3.15.3: vinda de Cmd+K
+  const highlightRef = useRef(null);
 
   const refresh = useCallback(async () => {
     setItems(null);
@@ -14591,6 +14598,30 @@ function CredentialsView({ user, isAdmin }) {
   }, []);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // v3.15.3: ao chegar via Cmd+K, faz scroll para a credencial e dá um destaque
+  // visual temporário (3s). Limpa o sessionStorage para não persistir entre views.
+  useEffect(() => {
+    try {
+      const id = sessionStorage.getItem('credentials.highlight');
+      if (id) {
+        setHighlightId(id);
+        sessionStorage.removeItem('credentials.highlight');
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!highlightId || !items) return;
+    // Scroll + clear highlight after 3s
+    requestAnimationFrame(() => {
+      if (highlightRef.current && highlightRef.current.scrollIntoView) {
+        highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    });
+    const t = setTimeout(() => setHighlightId(null), 3000);
+    return () => clearTimeout(t);
+  }, [highlightId, items]);
 
   // Filtros
   const filtered = useMemo(() => {
@@ -14686,7 +14717,7 @@ function CredentialsView({ user, isAdmin }) {
       <Header
         eyebrow={<><KeyRound size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Cofre</>}
         title="Credenciais de equipamentos"
-        subtitle="Guarda passwords e códigos dos equipamentos da loja (PCs, WiFi, alarmes, impressoras, contas). Acesso restrito a admins ou ao criador da credencial. Cada visualização/cópia fica registada no log."
+        subtitle="Guarda passwords e códigos dos equipamentos da loja (PCs, WiFi, alarmes, impressoras, contas). Só admins criam/editam credenciais; o acesso de leitura é configurado em Administração → Definições. Cada visualização/cópia fica registada no log."
         action={
           isAdmin && (
             <button onClick={() => setEditing({ name: '', type: 'other', username: '', password: '', url: '', notes: '', tags: [] })} style={{
@@ -14768,20 +14799,32 @@ function CredentialsView({ user, isAdmin }) {
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
-          {filtered.map(c => (
-            <CredentialCard
-              key={c.id}
-              credential={c}
-              isAdmin={isAdmin}
-              revealed={revealed.has(c.id)}
-              typeLabel={typeLabel(c.type)}
-              typeColor={typeColor(c.type)}
-              onToggleReveal={() => toggleReveal(c)}
-              onCopy={() => handleCopy(c)}
-              onEdit={() => setEditing(c)}
-              onDelete={() => handleDelete(c)}
-            />
-          ))}
+          {filtered.map(c => {
+            const isHighlighted = highlightId === c.id;
+            return (
+              <div
+                key={c.id}
+                ref={isHighlighted ? highlightRef : null}
+                style={{
+                  transition: 'box-shadow 0.3s, transform 0.3s',
+                  boxShadow: isHighlighted ? `0 0 0 3px ${T.accent}55, 0 8px 20px -8px ${T.accent}88` : 'none',
+                  borderRadius: 8,
+                }}
+              >
+                <CredentialCard
+                  credential={c}
+                  isAdmin={isAdmin}
+                  revealed={revealed.has(c.id)}
+                  typeLabel={typeLabel(c.type)}
+                  typeColor={typeColor(c.type)}
+                  onToggleReveal={() => toggleReveal(c)}
+                  onCopy={() => handleCopy(c)}
+                  onEdit={() => setEditing(c)}
+                  onDelete={() => handleDelete(c)}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -15319,12 +15362,25 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
 function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin, uiConfig, userProfile, onClose, onNavigatePeriod, onNavigateView }) {
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
+  const [credentials, setCredentials] = useState([]); // v3.15.3: lazy load on mount
   const inputRef = useRef(null);
   const listRef = useRef(null);
 
   useEffect(() => {
     inputRef.current && inputRef.current.focus();
   }, []);
+
+  // v3.15.3: carrega credenciais ao abrir o palette (best-effort, sem bloquear UI).
+  // RLS garante que só vemos as nossas (ou tudo, se admin). Mostramos apenas o
+  // nome no Cmd+K — passwords nunca aparecem aqui.
+  useEffect(() => {
+    let alive = true;
+    if (!canSeeMenuItem('credentials', userProfile?.role || 'user', isAdmin, uiConfig)) return;
+    cloudFetchCredentials().then(list => {
+      if (alive) setCredentials(Array.isArray(list) ? list : []);
+    }).catch(() => { /* silencioso */ });
+    return () => { alive = false; };
+  }, [isAdmin, userProfile?.role, uiConfig]);
 
   // Items navegáveis (atalhos para vistas)
   const userRole = userProfile?.role || 'user';
@@ -15340,6 +15396,7 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
       { id: 'images', label: 'Folhetos', kind: 'view' },
       { id: 'pdfs', label: 'PDFs', kind: 'view' },
       { id: 'notes', label: 'Notas', kind: 'view' },
+      { id: 'credentials', label: 'Cofre', kind: 'view' }, // v3.15.3
     ];
     if (isAdmin) all.push({ id: 'admin', label: 'Administração', kind: 'view' });
     return all.filter(it => canSeeMenuItem(it.id, userRole, isAdmin, uiConfig));
@@ -15418,8 +15475,29 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
       out.push(...prodOut);
     }
 
+    // 5. Credenciais (cofre) — v3.15.3
+    // Procura por nome, username, url, tags. Nunca mostra a password.
+    if (q && credentials.length > 0) {
+      const credOut = [];
+      for (const cred of credentials) {
+        const haystack = [
+          cred.name, cred.username, cred.url,
+          ...(Array.isArray(cred.tags) ? cred.tags : []),
+        ].filter(Boolean).join(' ').toLowerCase();
+        if (!haystack.includes(q)) continue;
+        const typeLabel = (CREDENTIAL_TYPES.find(t => t.id === cred.type)?.label) || 'Credencial';
+        credOut.push({
+          kind: 'credential', id: cred.id,
+          label: cred.name || 'Sem nome',
+          sub: typeLabel + (cred.username ? ' · ' + cred.username : '') + (cred.url ? ' · ' + cred.url : ''),
+        });
+        if (credOut.length >= 8) break;
+      }
+      out.push(...credOut);
+    }
+
     return out;
-  }, [query, campaigns, periods, viewItems]);
+  }, [query, campaigns, periods, viewItems, credentials]);
 
   // Reset índice activo quando muda a query
   useEffect(() => { setActiveIdx(0); }, [query]);
@@ -15447,6 +15525,11 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
       // Abre o período onde o produto está e leva ao listing
       if (r.periodId) onNavigatePeriod(r.periodId);
       else onNavigateView('campaigns');
+    } else if (r.kind === 'credential') {
+      // v3.15.3: vai para o cofre. A credencial não é auto-revelada;
+      // o utilizador clica no item para revelar (auditoria preservada).
+      try { sessionStorage.setItem('credentials.highlight', r.id); } catch {}
+      onNavigateView('credentials');
     }
   };
 
@@ -15477,7 +15560,7 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Pesquisar campanhas, períodos, EAN, produtos…"
+            placeholder="Pesquisar campanhas, períodos, EAN, produtos, cofre…"
             style={{
               flex: 1, border: 'none', background: 'transparent', outline: 'none',
               fontSize: 16, color: T.ink, fontFamily: 'inherit',
@@ -15522,11 +15605,13 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
                 r.kind === 'view' ? ChevronRight :
                 r.kind === 'period' ? Calendar :
                 r.kind === 'campaign' ? Layers :
+                r.kind === 'credential' ? KeyRound :
                 Tag; // product
               const kindColor =
                 r.kind === 'view' ? T.inkMute :
                 r.kind === 'period' ? T.green :
                 r.kind === 'campaign' ? T.accent :
+                r.kind === 'credential' ? '#7B5EA8' :
                 '#0ea5e9';
               return (
                 <button
@@ -15553,7 +15638,11 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
                     </div>
                   </div>
                   <span className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', flexShrink: 0 }}>
-                    {r.kind === 'view' ? 'Atalho' : r.kind === 'period' ? 'Período' : r.kind === 'campaign' ? 'Excel' : 'Produto'}
+                    {r.kind === 'view' ? 'Atalho'
+                      : r.kind === 'period' ? 'Período'
+                      : r.kind === 'campaign' ? 'Excel'
+                      : r.kind === 'credential' ? 'Cofre'
+                      : 'Produto'}
                   </span>
                 </button>
               );
@@ -16860,6 +16949,7 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
     images: { label: 'Folhetos', icon: ImageIcon },
     pdfs: { label: 'PDFs', icon: FileText },
     notes: { label: 'Notas', icon: NotebookPen },
+    credentials: { label: 'Cofre de credenciais', icon: KeyRound }, // v3.15.3
   };
 
   const toggleVisible = (menuId) => {
@@ -17008,16 +17098,27 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
         {Object.entries(MENU_LABELS).map(([id, info]) => {
           const Icon = info.icon;
           const cfg = draft[id] || { visible: true, roles: ['user'] };
+          const isSensitive = id === 'credentials'; // v3.15.3: aviso de segurança
+          const sensitiveActive = isSensitive && cfg.visible && (cfg.roles || []).length > 0;
           return (
             <div key={id} style={{
               display: 'grid', gridTemplateColumns: '1fr auto auto auto auto',
               padding: '12px 14px', alignItems: 'center',
               borderTop: `1px solid ${T.lineSoft}`,
-              background: !cfg.visible ? '#FFF8F5' : 'transparent',
+              background: sensitiveActive ? '#FFF4D6' : (!cfg.visible ? '#FFF8F5' : 'transparent'),
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <Icon size={14} style={{ color: cfg.visible ? T.ink : T.inkMute }} />
-                <span style={{ fontSize: 13, color: cfg.visible ? T.ink : T.inkMute }}>{info.label}</span>
+                <div>
+                  <span style={{ fontSize: 13, color: cfg.visible ? T.ink : T.inkMute }}>{info.label}</span>
+                  {isSensitive && (
+                    <div style={{ fontSize: 10, color: sensitiveActive ? T.orange : T.inkMute, marginTop: 2, lineHeight: 1.3 }}>
+                      {sensitiveActive
+                        ? '⚠ Utilizadores destes papéis poderão ver TODAS as credenciais (incluindo passwords). Activity log regista cada visualização.'
+                        : 'Conteúdo sensível — passwords visíveis. Activa apenas para papéis de confiança.'}
+                    </div>
+                  )}
+                </div>
               </div>
               <div style={{ width: 80, textAlign: 'center' }}>
                 <input type="checkbox" checked={cfg.visible} onChange={() => toggleVisible(id)} style={{ accentColor: T.accent, cursor: 'pointer' }} />
