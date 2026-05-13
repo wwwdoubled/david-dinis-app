@@ -528,8 +528,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.1';
-const APP_BUILD_DATE = '2026-05-13T11:30'; // Europe/Lisbon
+const APP_VERSION = '3.15.2';
+const APP_BUILD_DATE = '2026-05-13T12:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -539,6 +539,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.2', date: '2026-05-13', summary: 'Fix crítico de persistência (estado DESTAQUE/FEITO/etc nos slots não guardava ao mudar de campo): (A) updatePeriod passa a aceitar patch funcional (prev)=>obj para ler o estado mais recente do período; setFloors em CampaignDetail usa este updater e resolve baseFloors a partir do currentPeriod real, em vez de uma closure desactualizada. (B) Sync periódica (30s) lia periodsRef.current ANTES do await do fetch e depois sobrescrevia tudo via setPeriods(merged) — perdia edits locais durante o await. Agora o merge corre dentro de setPeriods(curr => mergePeriods(curr, cloud)). Aplicado também a setCampaigns.' },
   { version: '3.15.1', date: '2026-05-13', summary: 'Fixes pós-3.15.0: (1) crash "a.localeCompare is not a function" ao entrar em campanha com Excel carregado — sort em Vendas e Listagem agora coage ambos os operandos a String quando pelo menos um é string (Excel mistura tipos); (2) NotAllowedError ao auto-limpar clipboard 30s após copiar password — passou a apanhar a rejeição assíncrona do writeText() e a verificar document.hasFocus() antes; (3) 404 spam na consola por insert em `error_log` (tabela não existe) — desactivado o insert até a tabela ser criada, mantém-se apenas o console.error local.' },
   { version: '3.12.7', date: '2026-05-10', summary: 'Inventário (câmara): overlay tipo viewfinder com áreas escurecidas em volta de uma scan window central, 4 cantos L-shape brancos (verdes/vermelhos no momento de leitura), linha vermelha animada a oscilar (congela após pick), badge "✓ {EAN}" ou "✗ não encontrado" + texto guia. Lockout de 600ms entre quaisquer leituras (anteriormente só havia debounce de 2s para o MESMO EAN).' },
   { version: '3.12.6', date: '2026-05-10', summary: 'Tab switching dentro da campanha (Plano/Listagem/Saída/Pedido GU) agora instantâneo: productByEan (lookup EAN→produto com 8 campos: nome/família/preços/datas) construído UMA vez no CampaignsView e partilhado entre as 4 views — antes cada uma reconstruía o seu Map (3806 entries). Também usado pelo SlotRow.resolvedProduct (era .find() linear sobre 3806 rows por slot).' },
@@ -3286,29 +3287,36 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [user, campaignsLoaded, periodsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Periodic refresh of shared data (every 30s) — picks up edits from colleagues
+  //
+  // v3.15.2: merge feito DENTRO de setPeriods/setCampaigns (functional update)
+  // para evitar race condition crítica: se o utilizador editar entre o início
+  // do fetch e o setPeriods, o edit fica em fila à frente do setPeriods do
+  // refresh; depois o setPeriods do refresh (com base em periodsRef.current
+  // que foi lido ANTES do edit) sobrescrevia tudo e o edit perdia-se. Agora
+  // o merge é re-aplicado sempre sobre o ESTADO REAL, garantindo que edits
+  // locais com updatedAt mais recente vencem o cloudList do fetch.
   useEffect(() => {
     if (!user || !supabase || !cloudDataLoaded) return;
     const refresh = async () => {
       const [p, c] = await Promise.all([cloudFetchAllPeriods(), cloudFetchAllCampaigns()]);
-      // Always read current state via refs — avoids stale closure overwriting recent local edits
-      const currentPeriods = periodsRef.current;
-      const currentCampaigns = campaignsRef.current;
       // Defensive: don't blow away local state if cloud returns suddenly empty
-      if (p.length === 0 && c.length === 0 && (currentPeriods.length > 0 || currentCampaigns.length > 0)) {
+      if (p.length === 0 && c.length === 0 && (periodsRef.current.length > 0 || campaignsRef.current.length > 0)) {
         console.warn('[cloud-sync] periodic refresh got empty result — skipping update to avoid wiping local state');
         return;
       }
-      // MERGE instead of replace, same as initial load
-      const mergedP = mergePeriods(currentPeriods, p);
-      const mergedC = mergeCampaigns(currentCampaigns, c);
-      mergedP.sort((a, b) => {
-        if (!a.startDate && !b.startDate) return 0;
-        if (!a.startDate) return 1;
-        if (!b.startDate) return -1;
-        return new Date(b.startDate) - new Date(a.startDate);
+      // Merge dentro do setter funcional — lê o estado mais recente, mesmo que
+      // o utilizador tenha editado durante o await.
+      setPeriods(curr => {
+        const merged = mergePeriods(curr, p);
+        merged.sort((a, b) => {
+          if (!a.startDate && !b.startDate) return 0;
+          if (!a.startDate) return 1;
+          if (!b.startDate) return -1;
+          return new Date(b.startDate) - new Date(a.startDate);
+        });
+        return merged;
       });
-      setPeriods(mergedP);
-      setCampaigns(mergedC);
+      setCampaigns(curr => mergeCampaigns(curr, c));
     };
     const interval = setInterval(refresh, 30000);
     return () => clearInterval(interval);
@@ -3660,15 +3668,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     }
   }, [user]);
 
+  // v3.15.2: patch pode ser objeto OU função (prev) => patchObj.
+  // Aceitar função evita race condition quando setFloors compõe novo patch a
+  // partir de floors derivados (closure pode estar desactualizada se o
+  // utilizador edita 2 campos em <600ms — ver setFloors em CampaignDetail).
   const updatePeriod = useCallback((id, patch) => {
     setPeriods(ps => ps.map(p => {
       if (p.id !== id) return p;
-      const next = { ...p, ...patch, updatedAt: new Date().toISOString() };
+      const resolvedPatch = typeof patch === 'function' ? patch(p) : patch;
+      if (!resolvedPatch || typeof resolvedPatch !== 'object') return p;
+      const next = { ...p, ...resolvedPatch, updatedAt: new Date().toISOString() };
       // Update or create the pending persistence buffer for this period
       const existing = persistTimersRef.current.get(id);
       if (existing && existing.timer) clearTimeout(existing.timer);
       const changedKeys = existing ? new Set(existing.changedKeys) : new Set();
-      Object.keys(patch).forEach(k => changedKeys.add(k));
+      Object.keys(resolvedPatch).forEach(k => changedKeys.add(k));
       const timer = setTimeout(() => flushPeriodPersist(id), 600);
       persistTimersRef.current.set(id, { timer, latest: next, changedKeys });
       return next;
@@ -5974,14 +5988,33 @@ function CampaignsView({
 
   // setFloors writes to the PERIOD (cloud + IDB via onUpdatePeriod).
   // If no period is selected, fall back to defaultLayout (global).
+  //
+  // v3.15.2: usa updater funcional passado a onUpdatePeriod para ler o estado
+  // MAIS RECENTE do período em cada chamada. Antes da fix, quando o utilizador
+  // editava 2 campos do mesmo slot em <600ms, a segunda chamada lia `floors`
+  // de uma closure desactualizada (a primeira chamada já tinha despachado
+  // setPeriods mas o React ainda não tinha re-renderizado para atualizar o
+  // useMemo de `floors`). Resultado: a segunda escrita perdia a alteração do
+  // primeiro campo. Agora resolvemos sempre a partir do `currentPeriod` real.
   const setFloors = useCallback((updater) => {
     if (!selectedPeriod) {
       setDefaultLayout(prev => typeof updater === 'function' ? updater(prev) : updater);
       return;
     }
-    const next = typeof updater === 'function' ? updater(floors) : updater;
-    onUpdatePeriod && onUpdatePeriod(selectedPeriod.id, { floors: next });
-  }, [selectedPeriod, floors, onUpdatePeriod, setDefaultLayout]);
+    if (typeof updater === 'function') {
+      onUpdatePeriod && onUpdatePeriod(selectedPeriod.id, (currentPeriod) => {
+        const baseFloors =
+          (currentPeriod?.floors && Array.isArray(currentPeriod.floors) && currentPeriod.floors.length > 0)
+            ? currentPeriod.floors
+            : (primaryCampaign?.floors && Array.isArray(primaryCampaign.floors) && primaryCampaign.floors.length > 0)
+              ? primaryCampaign.floors
+              : defaultLayout;
+        return { floors: updater(baseFloors) };
+      });
+    } else {
+      onUpdatePeriod && onUpdatePeriod(selectedPeriod.id, { floors: updater });
+    }
+  }, [selectedPeriod, onUpdatePeriod, setDefaultLayout, primaryCampaign?.floors, defaultLayout]);
 
   const setOverride = (campaignId, field, header) => {
     setColumnOverrides(o => ({
