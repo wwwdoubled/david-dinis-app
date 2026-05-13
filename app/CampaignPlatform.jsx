@@ -528,8 +528,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.3';
-const APP_BUILD_DATE = '2026-05-13T13:30'; // Europe/Lisbon
+const APP_VERSION = '3.15.4';
+const APP_BUILD_DATE = '2026-05-13T15:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -539,6 +539,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.4', date: '2026-05-13', summary: 'Cmd+K mais útil + fix do Blueprint vazio. (A) Cmd+K → campanha agora abre directamente o detalhe (mode "detail"), não apenas a lista do período: openResult guarda o id em sessionStorage.campaigns.openCampaignId e CampaignsView chama setOnlyActive ao detectar a key. (B) Cmd+K → artigo agora navega para Alterações com o EAN pré-preenchido na pesquisa e linha destacada (outline accent + background subtil + scrollIntoView smooth) durante 3s. O resultado do artigo no Cmd+K também passou a mostrar inline o preço de campanha + desconto (ex: "17.99€ (-40%)") — visibilidade imediata sem precisar de abrir Alterações. (C) Fix do Blueprint a aparecer sem artigos quando os pisos/zonas tinham sido geridos via Admin → Layout da loja: o defaultLayout passou a usar UUIDs gerados pela DB, mas os períodos existentes mantinham IDs hardcoded (piso0/p1z1/etc), o que fazia o buildBlueprint perder todos os matches. Adicionado fallback por NAME (case-insensitive) em ingestFloors — agora o slot é colocado na zona certa quer o id bata quer não.' },
   { version: '3.15.3', date: '2026-05-13', summary: 'Cofre de credenciais — visibilidade controlada pelo admin + integração Cmd+K. (A) Admin → Definições → Visibilidade de menus agora inclui linha "Cofre de credenciais" com aviso visual destacado (laranja) quando activo para outros papéis. RLS de leitura passou a permitir qualquer utilizador autenticado (escrita continua só admins) — requer correr supabase/migrations/2026-05-13_credentials_share.sql. Por defeito permanece admin-only (visible: false). (B) Cmd+K passou a procurar também no cofre — mostra apenas nome/username/url/tags, nunca passwords. Atalho "Cofre" adicionado às vistas rápidas; navegação para o cofre via Cmd+K faz scroll automático e destaca a credencial 3s.' },
   { version: '3.15.2', date: '2026-05-13', summary: 'Fix crítico de persistência (estado DESTAQUE/FEITO/etc nos slots não guardava ao mudar de campo): (A) updatePeriod passa a aceitar patch funcional (prev)=>obj para ler o estado mais recente do período; setFloors em CampaignDetail usa este updater e resolve baseFloors a partir do currentPeriod real, em vez de uma closure desactualizada. (B) Sync periódica (30s) lia periodsRef.current ANTES do await do fetch e depois sobrescrevia tudo via setPeriods(merged) — perdia edits locais durante o await. Agora o merge corre dentro de setPeriods(curr => mergePeriods(curr, cloud)). Aplicado também a setCampaigns.' },
   { version: '3.15.1', date: '2026-05-13', summary: 'Fixes pós-3.15.0: (1) crash "a.localeCompare is not a function" ao entrar em campanha com Excel carregado — sort em Vendas e Listagem agora coage ambos os operandos a String quando pelo menos um é string (Excel mistura tipos); (2) NotAllowedError ao auto-limpar clipboard 30s após copiar password — passou a apanhar a rejeição assíncrona do writeText() e a verificar document.hasFocus() antes; (3) 404 spam na consola por insert em `error_log` (tabela não existe) — desactivado o insert até a tabela ser criada, mantém-se apenas o console.error local.' },
@@ -5867,6 +5868,27 @@ function CampaignsView({
     setActiveIds(ids => ids.filter(id => scopedCampaigns.some(c => c.id === id)));
   }, [scopedCampaigns]);
 
+  // v3.15.4: Cmd+K deep link — quando vimos de uma pesquisa global, activa
+  // só a campanha pedida (o detalhe abre automaticamente). O ID fica em
+  // sessionStorage para sobreviver à navegação onNavigatePeriod (que faz
+  // setView + reload de selectedPeriodId). Cleanup de 3s evita key órfã.
+  useEffect(() => {
+    let wantId;
+    try { wantId = sessionStorage.getItem('campaigns.openCampaignId'); } catch {}
+    if (!wantId) return;
+    if (scopedCampaigns.some(c => c.id === wantId)) {
+      setOnlyActive(wantId);
+      try { sessionStorage.removeItem('campaigns.openCampaignId'); } catch {}
+      return;
+    }
+    // Ainda não está populado — esperar próxima ronda do scopedCampaigns OU
+    // dar timeout de 3s para limpar key inválida (campanha apagada/sem acesso).
+    const t = setTimeout(() => {
+      try { sessionStorage.removeItem('campaigns.openCampaignId'); } catch {}
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [scopedCampaigns, setOnlyActive]);
+
   const activeCampaigns = useMemo(
     () => activeIds.map(id => scopedCampaigns.find(c => c.id === id)).filter(Boolean),
     [activeIds, scopedCampaigns]
@@ -10993,6 +11015,46 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   // Date filter (re-added in v3.11.1 as standalone <ChangesDateFilter/> component)
   const [dayFilter, setDayFilter] = useState('');
 
+  // v3.15.4: deep link a partir do Cmd+K (kind=product) — pré-preenche a
+  // pesquisa por EAN e destaca visualmente a linha durante 3s.
+  const [highlightEan, setHighlightEan] = useState(null);
+  const highlightRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const wantSearch = sessionStorage.getItem('changes.searchEan');
+      if (wantSearch) {
+        setSearch(wantSearch);
+        sessionStorage.removeItem('changes.searchEan');
+      }
+      const wantHL = sessionStorage.getItem('changes.highlightEan');
+      if (wantHL) {
+        setHighlightEan(wantHL);
+        sessionStorage.removeItem('changes.highlightEan');
+      }
+    } catch {}
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll para a linha + limpa highlight 3s depois. Espera-se que o diff
+  // já tenha sido calculado e a row renderizada; usamos requestAnimationFrame
+  // + um pequeno retry porque o filteredItems depende de useMemo que pode
+  // demorar 1 frame a estabilizar quando o search também acabou de mudar.
+  useEffect(() => {
+    if (!highlightEan) return;
+    let cancelled = false;
+    const tryScroll = (attempt = 0) => {
+      if (cancelled) return;
+      if (highlightRef.current && highlightRef.current.scrollIntoView) {
+        highlightRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+      if (attempt < 8) requestAnimationFrame(() => tryScroll(attempt + 1));
+    };
+    requestAnimationFrame(() => tryScroll(0));
+    const t = setTimeout(() => setHighlightEan(null), 3000);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [highlightEan]);
+
   // Load last uploaded snapshot from cloud (only relevant when source='upload')
   useEffect(() => {
     if (!user || !supabase) { setSnapshotLoading(false); return; }
@@ -11468,6 +11530,8 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               onClear={handleClear}
               onExport={exportDiff}
               stockRowsPO3={stockRowsPO3}
+              highlightEan={highlightEan}
+              highlightRef={highlightRef}
             />
           )}
         </>
@@ -11476,7 +11540,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3 }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
@@ -11631,9 +11695,18 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
                 </tr>
               </thead>
               <tbody>
-                {filteredItems.slice(0, 500).map((p, i) => (
-                  <ChangeRow key={`${p.kind}-${p.ean}-${i}`} item={p} />
-                ))}
+                {filteredItems.slice(0, 500).map((p, i) => {
+                  // v3.15.4: linha destacada quando deep link Cmd+K aponta para este EAN
+                  const isHL = highlightEan && p.ean === highlightEan;
+                  return (
+                    <ChangeRow
+                      key={`${p.kind}-${p.ean}-${i}`}
+                      item={p}
+                      rowRef={isHL ? highlightRef : null}
+                      isHighlighted={!!isHL}
+                    />
+                  );
+                })}
               </tbody>
             </table>
             {filteredItems.length > 500 && (
@@ -11676,7 +11749,7 @@ function SummaryCard({ label, value, color, active, dimmed, onClick }) {
   );
 }
 
-const ChangeRow = React.memo(function ChangeRow({ item }) {
+const ChangeRow = React.memo(function ChangeRow({ item, rowRef, isHighlighted }) {
   const kindStyles = {
     added: { bg: T.green, label: 'NOVO', icon: Plus },
     removed: { bg: T.red, label: 'REMOVIDO', icon: Minus },
@@ -11686,8 +11759,23 @@ const ChangeRow = React.memo(function ChangeRow({ item }) {
   const k = kindStyles[item.kind] || kindStyles.unchanged;
   const isUnchanged = item.kind === 'unchanged';
 
+  // v3.15.4: deep link visual — box-shadow accent durante 3s.
+  // Aplicado ao próprio <tr> via outline (box-shadow tem comportamento
+  // inconsistente em algumas browsers em <tr>) + background subtil.
+  const hlBg = isHighlighted ? `${T.accent}15` : 'transparent';
+  const hlOutline = isHighlighted ? `2px solid ${T.accent}` : 'none';
+
   return (
-    <tr style={{ borderBottom: `1px solid ${T.lineSoft}`, opacity: isUnchanged ? 0.6 : 1 }}>
+    <tr
+      ref={rowRef}
+      style={{
+        borderBottom: `1px solid ${T.lineSoft}`,
+        opacity: isUnchanged ? 0.6 : 1,
+        background: hlBg,
+        outline: hlOutline,
+        outlineOffset: isHighlighted ? -2 : 0,
+        transition: 'background 0.3s, outline-color 0.3s',
+      }}>
       <td style={ltdStyle}>
         <span style={{
           display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -15319,13 +15407,24 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
   // is NOT present in any campaign's rows are skipped — these are stale
   // assignments left behind after re-uploads/deletions and would otherwise
   // appear as "sem dados" entries that mislead the user. (v3.10.4)
+  //
+  // v3.15.4: match também por NAME (case-insensitive) quando o id não bate.
+  // Necessário porque após o admin correr cloudSeedDefaultLayout, o
+  // defaultLayout passa a ter UUIDs gerados pela DB, mas os períodos
+  // existentes ainda têm IDs hardcoded ('piso0', 'p1z1', etc). Sem este
+  // fallback, o Blueprint aparece vazio porque o base.find por id falha.
+  const normName = (s) => String(s || '').trim().toLowerCase();
   const ingestFloors = (floors, sourceLabel) => {
     if (!Array.isArray(floors)) return;
     floors.forEach(f => {
-      const baseFloor = base.find(bf => bf.id === f.id);
+      const baseFloor =
+        base.find(bf => bf.id === f.id) ||
+        base.find(bf => normName(bf.name) === normName(f.name));
       if (!baseFloor) return;
       (f.zones || []).forEach(z => {
-        const baseZone = baseFloor.zones.find(bz => bz.id === z.id);
+        const baseZone =
+          baseFloor.zones.find(bz => bz.id === z.id) ||
+          baseFloor.zones.find(bz => normName(bz.name) === normName(z.name));
         if (!baseZone) return;
         (z.slots || []).forEach(s => {
           const refKey = normalizeEAN(s.ref);
@@ -15463,10 +15562,22 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
           if (!match) continue;
           seen.add(eanK);
           const period = (periods || []).find(p => p.id === c.periodId);
+          // v3.15.4: incluir preço de campanha + desconto no sub (visibilidade
+          // imediata sem precisar de abrir Alterações). Se não houver preço,
+          // o subParts.filter(Boolean) descarta a string vazia.
+          const basePrice = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
+          const campPrice = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
+          const pct = (basePrice > 0 && campPrice > 0 && campPrice < basePrice)
+            ? Math.round((1 - campPrice / basePrice) * 100)
+            : 0;
+          const priceStr = campPrice
+            ? `${campPrice.toFixed(2)}€${pct ? ` (-${pct}%)` : ''}`
+            : (basePrice ? `${basePrice.toFixed(2)}€` : '');
+          const subParts = [ean, fam, period?.name, priceStr].filter(Boolean);
           prodOut.push({
             kind: 'product', id: eanK, ean,
             label: descr || ean,
-            sub: ean + (fam ? ' · ' + fam : '') + (period ? ' · ' + period.name : ''),
+            sub: subParts.join(' · '),
             periodId: c.periodId,
           });
           if (prodOut.length >= limit) break outer;
@@ -15519,12 +15630,19 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
     if (r.kind === 'view') onNavigateView(r.id);
     else if (r.kind === 'period') onNavigatePeriod(r.id);
     else if (r.kind === 'campaign') {
+      // v3.15.4: deep link — CampaignsView lê este id ao montar e activa só
+      // esta campanha (setOnlyActive), abrindo o detalhe automaticamente.
+      try { sessionStorage.setItem('campaigns.openCampaignId', r.id); } catch {}
       if (r.periodId) onNavigatePeriod(r.periodId);
       else onNavigateView('campaigns');
     } else if (r.kind === 'product') {
-      // Abre o período onde o produto está e leva ao listing
-      if (r.periodId) onNavigatePeriod(r.periodId);
-      else onNavigateView('campaigns');
+      // v3.15.4: navega para Alterações com o EAN pré-filtrado e
+      // destacado — o utilizador vê preço actual + última alteração.
+      try {
+        sessionStorage.setItem('changes.searchEan', r.ean);
+        sessionStorage.setItem('changes.highlightEan', r.ean);
+      } catch {}
+      onNavigateView('changes');
     } else if (r.kind === 'credential') {
       // v3.15.3: vai para o cofre. A credencial não é auto-revelada;
       // o utilizador clica no item para revelar (auditoria preservada).
