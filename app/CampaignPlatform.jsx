@@ -10,7 +10,7 @@ import {
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
   Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap,
-  KeyRound, EyeOff, Copy
+  KeyRound, EyeOff, Copy, FileDown, Printer
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -528,8 +528,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.4';
-const APP_BUILD_DATE = '2026-05-13T15:45'; // Europe/Lisbon
+const APP_VERSION = '3.15.5';
+const APP_BUILD_DATE = '2026-05-13T17:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -539,6 +539,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.5', date: '2026-05-13', summary: 'Inventário — códigos de barras EAN-13 + impressão. Cada EAN picado pode ser convertido para o seu código de barras visual EAN-13. Novo campo "Nome do conjunto" na toolbar para identificar a sessão (ex: "Reposição quinta-feira"). Botão "PDF códigos" gera um PDF A4 em grelha 3 colunas com barcode + descrição + família + preço por artigo. Botão "Imprimir" abre o PDF em nova tab com diálogo de impressão automático (fallback para download se popup bloqueado). Lib jsbarcode adicionada (lazy-imported, ~40KB) — só carrega quando o utilizador realmente exporta. Validação de checksum EAN-13 nativa antes da geração.' },
   { version: '3.15.4', date: '2026-05-13', summary: 'Cmd+K mais útil + fix do Blueprint vazio. (A) Cmd+K → campanha agora abre directamente o detalhe (mode "detail"), não apenas a lista do período: openResult guarda o id em sessionStorage.campaigns.openCampaignId e CampaignsView chama setOnlyActive ao detectar a key. (B) Cmd+K → artigo agora navega para Alterações com o EAN pré-preenchido na pesquisa e linha destacada (outline accent + background subtil + scrollIntoView smooth) durante 3s. O resultado do artigo no Cmd+K também passou a mostrar inline o preço de campanha + desconto (ex: "17.99€ (-40%)") — visibilidade imediata sem precisar de abrir Alterações. (C) Fix do Blueprint a aparecer sem artigos quando os pisos/zonas tinham sido geridos via Admin → Layout da loja: o defaultLayout passou a usar UUIDs gerados pela DB, mas os períodos existentes mantinham IDs hardcoded (piso0/p1z1/etc), o que fazia o buildBlueprint perder todos os matches. Adicionado fallback por NAME (case-insensitive) em ingestFloors — agora o slot é colocado na zona certa quer o id bata quer não.' },
   { version: '3.15.3', date: '2026-05-13', summary: 'Cofre de credenciais — visibilidade controlada pelo admin + integração Cmd+K. (A) Admin → Definições → Visibilidade de menus agora inclui linha "Cofre de credenciais" com aviso visual destacado (laranja) quando activo para outros papéis. RLS de leitura passou a permitir qualquer utilizador autenticado (escrita continua só admins) — requer correr supabase/migrations/2026-05-13_credentials_share.sql. Por defeito permanece admin-only (visible: false). (B) Cmd+K passou a procurar também no cofre — mostra apenas nome/username/url/tags, nunca passwords. Atalho "Cofre" adicionado às vistas rápidas; navegação para o cofre via Cmd+K faz scroll automático e destaca a credencial 3s.' },
   { version: '3.15.2', date: '2026-05-13', summary: 'Fix crítico de persistência (estado DESTAQUE/FEITO/etc nos slots não guardava ao mudar de campo): (A) updatePeriod passa a aceitar patch funcional (prev)=>obj para ler o estado mais recente do período; setFloors em CampaignDetail usa este updater e resolve baseFloors a partir do currentPeriod real, em vez de uma closure desactualizada. (B) Sync periódica (30s) lia periodsRef.current ANTES do await do fetch e depois sobrescrevia tudo via setPeriods(merged) — perdia edits locais durante o await. Agora o merge corre dentro de setPeriods(curr => mergePeriods(curr, cloud)). Aplicado também a setCampaigns.' },
@@ -13786,6 +13787,10 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   // para que fique disponível em qualquer sessão / dispositivo. localStorage é
   // mantido como buffer offline (sync rápido entre tabs e durante perda de rede).
   const [scannedRaw, setScannedRaw] = useStoredState('inventory.scanned', []);
+  // v3.15.5: nome do conjunto + estado busy para o gerador de PDF.
+  // Usado no PDF de códigos de barras (botões "PDF códigos de barras" e "Imprimir").
+  const [setName, setSetName] = useStoredState('inventory.setName', '');
+  const [pdfBusy, setPdfBusy] = useState(false);
   const scanned = useMemo(
     () => (scannedRaw || []).map(s => ({ ...s, ts: s.ts instanceof Date ? s.ts : new Date(s.ts) })),
     [scannedRaw]
@@ -14209,6 +14214,147 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
     XLSX.writeFile(wb, `inventario_${stamp}.xlsx`);
   };
 
+  // ──────────────────────────────────────────────────────────────────
+  // v3.15.5 — Códigos de barras EAN-13 + PDF + Imprimir
+  //
+  // Cada EAN do inventário pode ser convertido para o seu código de barras
+  // visual EAN-13 (PNG) via lib `jsbarcode` (dynamic import — só carrega
+  // quando o utilizador realmente exporta). PDF gerado com `jspdf` em
+  // grelha 3 colunas. Botão "Imprimir" abre o PDF numa nova tab com
+  // autoPrint() para disparar diálogo de impressão.
+  // ──────────────────────────────────────────────────────────────────
+  const isValidEAN13 = (ean) => {
+    const s = String(ean ?? '').replace(/[^\d]/g, '');
+    if (!/^\d{13}$/.test(s)) return false;
+    // Valida checksum EAN-13 (modulo 10 dos dígitos com pesos 1,3,1,3,...)
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += parseInt(s[i], 10) * (i % 2 === 0 ? 1 : 3);
+    const check = (10 - (sum % 10)) % 10;
+    return check === parseInt(s[12], 10);
+  };
+
+  const generateBarcodePNG = async (ean) => {
+    if (!isValidEAN13(ean)) return null;
+    try {
+      const mod = await import('jsbarcode');
+      const JsBarcode = mod.default || mod;
+      const canvas = document.createElement('canvas');
+      JsBarcode(canvas, String(ean), {
+        format: 'EAN13',
+        width: 2,
+        height: 60,
+        displayValue: true,
+        fontSize: 14,
+        margin: 6,
+      });
+      return canvas.toDataURL('image/png');
+    } catch (err) {
+      console.warn('[barcode] failed para', ean, err);
+      return null;
+    }
+  };
+
+  const buildBarcodesPDF = async (jsPDFCtor) => {
+    const pdf = new jsPDFCtor({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageW = 210, pageH = 297;
+    const margin = 12;
+    const cols = 3;
+    const cellW = (pageW - margin * 2) / cols;
+    const cellH = 42; // mm — barcode (22) + descrição (8) + meta (5) + spacing
+    const headerH = 20;
+
+    // Título
+    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(16);
+    pdf.text(setName || 'Inventário', margin, margin + 8);
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9);
+    pdf.setTextColor(100);
+    pdf.text(
+      `${scanned.length} códigos · ${new Date().toLocaleDateString('pt-PT')}`,
+      margin, margin + 14
+    );
+    pdf.setTextColor(0);
+
+    let row = 0, col = 0;
+    let skipped = 0;
+    for (const s of scanned) {
+      const png = await generateBarcodePNG(s.ean);
+      if (!png) { skipped++; continue; }
+      const x = margin + col * cellW;
+      const y = margin + headerH + row * cellH;
+      // Imagem do barcode
+      pdf.addImage(png, 'PNG', x + 4, y, cellW - 8, 22);
+      // Descrição abaixo (truncada a 38 chars)
+      pdf.setFontSize(8);
+      const desc = (s.descr || '').slice(0, 38);
+      if (desc) pdf.text(desc, x + cellW / 2, y + 28, { align: 'center' });
+      // Meta: família · preço
+      const meta = [
+        s.family,
+        (typeof s.price === 'number' && s.price > 0) ? `${s.price.toFixed(2)}€` : null,
+      ].filter(Boolean).join(' · ');
+      if (meta) {
+        pdf.setTextColor(110);
+        pdf.text(meta, x + cellW / 2, y + 33, { align: 'center' });
+        pdf.setTextColor(0);
+      }
+
+      col++;
+      if (col >= cols) { col = 0; row++; }
+      if (margin + headerH + (row + 1) * cellH > pageH - margin) {
+        pdf.addPage();
+        row = 0; col = 0;
+      }
+    }
+
+    if (skipped > 0) {
+      console.warn(`[inventory-pdf] ${skipped} EAN(s) inválido(s) saltados (checksum/formato).`);
+    }
+    return pdf;
+  };
+
+  const exportInventoryPDF = async () => {
+    if (scanned.length === 0 || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const mod = await import('jspdf');
+      const jsPDFCtor = mod.jsPDF || mod.default;
+      const pdf = await buildBarcodesPDF(jsPDFCtor);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const safeName = (setName || 'inventario').replace(/[^a-z0-9-_]+/gi, '_').slice(0, 40);
+      pdf.save(`${safeName}-${stamp}.pdf`);
+    } catch (err) {
+      console.error('[inventory-pdf] export falhou:', err);
+      alert('Não foi possível gerar o PDF: ' + (err?.message || 'erro desconhecido'));
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
+  const printInventoryBarcodes = async () => {
+    if (scanned.length === 0 || pdfBusy) return;
+    setPdfBusy(true);
+    try {
+      const mod = await import('jspdf');
+      const jsPDFCtor = mod.jsPDF || mod.default;
+      const pdf = await buildBarcodesPDF(jsPDFCtor);
+      pdf.autoPrint();
+      const url = pdf.output('bloburl');
+      const w = window.open(url, '_blank');
+      if (!w) {
+        // Popup bloqueado — fallback para download
+        const stamp = new Date().toISOString().slice(0, 10);
+        const safeName = (setName || 'inventario').replace(/[^a-z0-9-_]+/gi, '_').slice(0, 40);
+        pdf.save(`${safeName}-${stamp}.pdf`);
+        alert('Popup bloqueado pelo browser — o PDF foi descarregado em vez disso. Abre-o e imprime manualmente.');
+      }
+    } catch (err) {
+      console.error('[inventory-print] falhou:', err);
+      alert('Não foi possível preparar a impressão: ' + (err?.message || 'erro desconhecido'));
+    } finally {
+      setPdfBusy(false);
+    }
+  };
+
   const totalFound = scanned.filter(s => s.found).length;
   const totalNotFound = scanned.filter(s => !s.found).length;
 
@@ -14407,7 +14553,51 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
               </div>
             );
           })()}
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* v3.15.5: nome do conjunto + botões PDF/Imprimir códigos de barras */}
+            <input
+              type="text"
+              value={setName}
+              onChange={e => setSetName(e.target.value)}
+              placeholder="Nome do conjunto"
+              title="Nome que aparece como título no PDF de códigos de barras"
+              style={{
+                padding: '6px 10px', fontSize: 12,
+                background: T.paper || '#fff', color: T.ink,
+                border: `1px solid ${T.line}`, borderRadius: 6,
+                width: 170, outline: 'none', fontFamily: 'inherit',
+              }}
+            />
+            <button
+              onClick={exportInventoryPDF}
+              disabled={pdfBusy || scanned.length === 0}
+              title="Gera um PDF com os códigos de barras EAN-13 de todas as leituras (grelha 3 colunas com descrição, família e preço)"
+              style={{
+                padding: '6px 12px',
+                background: (pdfBusy || scanned.length === 0) ? T.lineSoft : T.ink,
+                color: (pdfBusy || scanned.length === 0) ? T.inkMute : T.bg,
+                border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                cursor: (pdfBusy || scanned.length === 0) ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+              }}
+            >
+              <FileDown size={12} /> {pdfBusy ? 'A gerar…' : 'PDF códigos'}
+            </button>
+            <button
+              onClick={printInventoryBarcodes}
+              disabled={pdfBusy || scanned.length === 0}
+              title="Abre os códigos de barras numa nova tab com o diálogo de impressão"
+              style={{
+                padding: '6px 12px',
+                background: 'transparent',
+                color: (pdfBusy || scanned.length === 0) ? T.inkMute : T.ink,
+                border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12,
+                cursor: (pdfBusy || scanned.length === 0) ? 'not-allowed' : 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+              }}
+            >
+              <Printer size={12} /> Imprimir
+            </button>
             <button onClick={exportXLSX} title="Exporta um Excel com 2 folhas: Histórico (1 linha por leitura) e Resumo por EAN com diferença vs PO2/PO3" style={{
               padding: '6px 12px', background: T.green, color: '#fff',
               border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
