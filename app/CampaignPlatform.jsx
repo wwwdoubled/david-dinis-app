@@ -80,25 +80,28 @@ const CLOUD_ONLY = true;
 // properties and force a re-render, all UI updates without prop drilling)
 // ─────────────────────────────────────────────────────────────────────────
 const THEMES = {
+  // ── Soft Spatial · light (Direction C) ──────────────────────────
+  // Off-white quente, lavanda como acento, geometria arredondada.
   light: {
-    bg: '#F5F2EC', bgEl: '#FAF8F4', ink: '#141210', inkSoft: '#5A554E',
-    inkMute: '#9B9690', line: '#E3DED5', lineSoft: '#EDE8DF',
-    accent: '#B8442A', accentSoft: '#F2D9D0',
-    green: '#5DA050', red: '#C94A3D', orange: '#E68A2E',
-    blue: '#5B9BD5', cyan: '#B8DDEE', yellow: '#F1C84B',
-    purple: '#7B5EA8',
-    cellAlt: '#F0EBE0',
-    paper: '#FFFFFF',
+    bg: '#EFECE3', bgEl: '#FAF7EE', ink: '#1A1814', inkSoft: '#5E594F',
+    inkMute: '#928D80', line: '#DCD5C4', lineSoft: '#E8E2D0',
+    accent: '#6B5BD8', accentSoft: '#E3DEFA',
+    green: '#3F8F5E', red: '#C8473A', orange: '#D17B2A',
+    blue: '#3F6FC8', cyan: '#CFE3F2', yellow: '#E8C268',
+    purple: '#6B5BD8',
+    cellAlt: '#E6E2D6',
+    paper: '#FAF7EE',
   },
+  // ── Soft Spatial · dark ─────────────────────────────────────────
   dark: {
-    bg: '#15140F', bgEl: '#1E1C16', ink: '#F0EBE0', inkSoft: '#B8B2A4',
-    inkMute: '#787469', line: '#2E2A21', lineSoft: '#26221A',
-    accent: '#E08560', accentSoft: '#3D2419',
-    green: '#7FBF7A', red: '#E26B5C', orange: '#F5A158',
-    blue: '#7BB3DC', cyan: '#2A4658', yellow: '#E8C268',
-    purple: '#9C82C2',
-    cellAlt: '#1A1812',
-    paper: '#26221A',
+    bg: '#13120E', bgEl: '#1E1C16', ink: '#F0EBE0', inkSoft: '#B0AA9A',
+    inkMute: '#7A7568', line: '#2A271F', lineSoft: '#221F18',
+    accent: '#9C8CF5', accentSoft: '#251F44',
+    green: '#74C28B', red: '#E26B5C', orange: '#E8A55A',
+    blue: '#8FB6E8', cyan: '#2A4658', yellow: '#E8C268',
+    purple: '#9C8CF5',
+    cellAlt: '#181610',
+    paper: '#1E1C16',
   },
   // FNAC Portugal — primary brand orange + black + white grid
   fnac: {
@@ -172,7 +175,7 @@ const DEFAULT_FLOORS = [
   },
 ];
 
-const fonts = `@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');`;
+const fonts = `@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');`;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Smart Excel parsing — auto-skips metadata rows above the real header row
@@ -2648,7 +2651,7 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
         @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap');
         * { box-sizing: border-box; }
         body { margin: 0; }
-        .display { font-family: 'Instrument Serif', serif; font-weight: 400; letter-spacing: -0.01em; }
+        .display { font-family: 'Fraunces', 'Instrument Serif', serif; font-weight: 500; letter-spacing: -0.02em; }
         .mono { font-family: 'Geist Mono', monospace; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
         @keyframes shake {
@@ -4064,7 +4067,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         * { box-sizing: border-box; }
         :root { color-scheme: ${theme === 'dark' ? 'dark' : 'light'}; }
         body { margin: 0; background: ${T.bg}; color: ${T.ink}; }
-        .display { font-family: 'Instrument Serif', serif; font-weight: 400; letter-spacing: -0.01em; }
+        .display { font-family: 'Fraunces', 'Instrument Serif', serif; font-weight: 500; letter-spacing: -0.02em; }
         .mono { font-family: 'Geist Mono', monospace; }
         button { font-family: inherit; cursor: pointer; }
         input, select, textarea { font-family: inherit; color: ${T.ink}; }
@@ -4764,11 +4767,12 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
               )}
               <button onClick={() => setView(id)} style={{
                 display: 'flex', alignItems: 'center', gap: 12,
-                padding: '10px 12px', border: 'none', borderRadius: 6,
-                background: active ? (accent ? T.accent : T.ink) : 'transparent',
+                padding: '10px 14px', border: 'none', borderRadius: 12,
+                background: active ? T.accent : 'transparent',
                 color: active ? '#fff' : (accent ? T.accent : T.inkSoft),
-                fontSize: 14, fontWeight: 500, textAlign: 'left',
-                transition: 'all 0.15s ease',
+                fontSize: 14, fontWeight: active ? 600 : 500, textAlign: 'left',
+                boxShadow: active ? `0 4px 14px ${T.accent}55` : 'none',
+                transition: 'all 0.18s ease',
               }}
                 onMouseEnter={e => { if (!active) e.currentTarget.style.background = T.lineSoft; }}
                 onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
@@ -4797,7 +4801,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
 
       {!isMobile && (
       <div className="sidebar-session-widget" style={{ position: 'absolute', bottom: 32, left: 24, right: 24 }}>
-        <div style={{ padding: 16, background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+        <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 16, boxShadow: `0 1px 0 ${T.line}, 0 8px 22px -14px rgba(0,0,0,0.08)` }}>
           <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 6 }}>
             {user ? 'Sessão' : 'Workspace'}
           </div>
