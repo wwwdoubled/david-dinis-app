@@ -2648,7 +2648,7 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
         <ThemeSwitcher theme={theme} setTheme={setTheme} compact />
       </div>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600&family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap');
         * { box-sizing: border-box; }
         body { margin: 0; }
         .display { font-family: 'Fraunces', 'Instrument Serif', serif; font-weight: 500; letter-spacing: -0.02em; }
@@ -2663,24 +2663,32 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
       `}</style>
 
       <div style={{
-        width: '100%', maxWidth: 400,
+        width: '100%', maxWidth: 420,
         animation: 'fadeUp 0.5s ease-out',
       }}>
-        <div style={{ textAlign: 'center', marginBottom: 36 }}>
-          <div className="display" style={{ fontSize: 56, lineHeight: 1, fontStyle: 'italic' }}>
-            David Dinis
+        <div style={{ textAlign: 'center', marginBottom: 32 }}>
+          <div style={{
+            width: 64, height: 64, borderRadius: 22, margin: '0 auto 18px',
+            background: `linear-gradient(135deg, ${T.accent}, ${T.orange || T.accent})`,
+            color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: 'Fraunces, serif', fontWeight: 600, fontSize: 32, letterSpacing: '-0.02em',
+            boxShadow: `0 16px 32px -10px ${T.accent}80`,
+          }}>F</div>
+          <div className="display" style={{ fontSize: 44, lineHeight: 1.02, letterSpacing: '-0.025em' }}>
+            Faveiro
           </div>
           <div className="mono" style={{
-            fontSize: 11, letterSpacing: '0.2em', color: T.inkMute,
-            marginTop: 10, textTransform: 'uppercase',
+            fontSize: 10.5, letterSpacing: '0.22em', color: T.inkMute,
+            marginTop: 8, textTransform: 'uppercase',
           }}>
-            Gestão de Campanhas
+            Campaign Studio
           </div>
         </div>
 
         <div style={{
           background: T.bgEl, border: `1px solid ${T.line}`,
-          borderRadius: 12, padding: 32,
+          borderRadius: 22, padding: 32,
+          boxShadow: `0 1px 0 ${T.line}, 0 24px 60px -28px rgba(0,0,0,0.22)`,
         }}>
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 22,
@@ -2781,13 +2789,14 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
               onClick={submit}
               disabled={busy}
               style={{
-                width: '100%', padding: '12px 16px',
-                background: busy ? T.line : T.ink,
-                color: busy ? T.inkMute : T.bg,
-                border: 'none', borderRadius: 8,
-                fontSize: 14, fontWeight: 500,
+                width: '100%', padding: '14px 18px',
+                background: busy ? T.line : T.accent,
+                color: busy ? T.inkMute : '#fff',
+                border: 'none', borderRadius: 14,
+                fontSize: 14, fontWeight: 600, letterSpacing: '0.01em',
                 cursor: busy ? 'not-allowed' : 'pointer',
-                transition: 'all 0.15s',
+                boxShadow: busy ? 'none' : `0 14px 28px -10px ${T.accent}90`,
+                transition: 'all 0.18s',
                 fontFamily: 'inherit',
               }}
             >
@@ -2845,8 +2854,8 @@ function authInputStyle(error) {
     fontFamily: "'Geist Mono', monospace",
     background: T.paper, color: T.ink,
     border: `1.5px solid ${error ? T.accent : T.line}`,
-    borderRadius: 8, outline: 'none',
-    transition: 'border-color 0.15s',
+    borderRadius: 14, outline: 'none',
+    transition: 'border-color 0.18s, box-shadow 0.18s',
   };
 }
 
@@ -4962,15 +4971,24 @@ function DropZone({ label, hint, accept, onFile, icon: Icon = Upload, compact = 
       onDrop={e => { e.preventDefault(); setDrag(false); e.dataTransfer.files[0] && onFile(e.dataTransfer.files[0]); }}
       onClick={() => inputRef.current?.click()}
       style={{
-        border: `1.5px dashed ${drag ? T.accent : T.line}`,
+        border: `2px dashed ${drag ? T.accent : T.line}`,
         background: drag ? T.accentSoft : T.bgEl,
-        borderRadius: 10, padding: compact ? '20px 24px' : '40px 32px',
-        cursor: 'pointer', textAlign: 'center', transition: 'all 0.2s',
+        borderRadius: 20, padding: compact ? '22px 24px' : '44px 32px',
+        cursor: 'pointer', textAlign: 'center', transition: 'all 0.22s ease',
+        boxShadow: drag ? `0 14px 32px -14px ${T.accent}66` : `0 1px 0 ${T.line}, 0 8px 22px -16px rgba(0,0,0,0.08)`,
+        transform: drag ? 'scale(1.005)' : 'none',
       }}>
       <input ref={inputRef} type="file" accept={accept} hidden onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
-      <Icon size={compact ? 20 : 28} strokeWidth={1.5} style={{ color: T.inkSoft, marginBottom: compact ? 6 : 12 }} />
-      <div style={{ fontSize: compact ? 14 : 16, fontWeight: 500, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 12, color: T.inkMute }}>{hint}</div>
+      <div style={{
+        width: compact ? 40 : 56, height: compact ? 40 : 56, borderRadius: compact ? 12 : 18,
+        background: T.accentSoft, color: T.accent,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        margin: `0 auto ${compact ? 8 : 14}px`,
+      }}>
+        <Icon size={compact ? 18 : 24} strokeWidth={1.8} />
+      </div>
+      <div style={{ fontSize: compact ? 14 : 17, fontWeight: 500, marginBottom: 4, color: T.ink, letterSpacing: '-0.005em' }}>{label}</div>
+      <div style={{ fontSize: 12.5, color: T.inkMute, lineHeight: 1.5 }}>{hint}</div>
     </div>
   );
 }
