@@ -531,8 +531,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.5';
-const APP_BUILD_DATE = '2026-05-13T17:00'; // Europe/Lisbon
+const APP_VERSION = '3.15.6';
+const APP_BUILD_DATE = '2026-05-15T10:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -542,6 +542,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.6', date: '2026-05-15', summary: 'Inventário (códigos de barras): fix para barcodes a aparecer em branco no PDF quando o EAN tinha menos de 13 dígitos (ex: códigos UPC-A com 12 dígitos) ou checksum incorrecto. Nova função normalizeToEAN13 faz padding com zeros à esquerda, usa os últimos 13 dígitos se for mais longo, e recalcula sempre o check digit antes de passar ao jsbarcode — preserva os 12 dígitos significativos do utilizador e garante que o barcode é sempre scanável. Inputs sem dígitos continuam a ser saltados (célula vazia em vez de crash).' },
   { version: '3.15.5', date: '2026-05-13', summary: 'Inventário — códigos de barras EAN-13 + impressão. Cada EAN picado pode ser convertido para o seu código de barras visual EAN-13. Novo campo "Nome do conjunto" na toolbar para identificar a sessão (ex: "Reposição quinta-feira"). Botão "PDF códigos" gera um PDF A4 em grelha 3 colunas com barcode + descrição + família + preço por artigo. Botão "Imprimir" abre o PDF em nova tab com diálogo de impressão automático (fallback para download se popup bloqueado). Lib jsbarcode adicionada (lazy-imported, ~40KB) — só carrega quando o utilizador realmente exporta. Validação de checksum EAN-13 nativa antes da geração.' },
   { version: '3.15.4', date: '2026-05-13', summary: 'Cmd+K mais útil + fix do Blueprint vazio. (A) Cmd+K → campanha agora abre directamente o detalhe (mode "detail"), não apenas a lista do período: openResult guarda o id em sessionStorage.campaigns.openCampaignId e CampaignsView chama setOnlyActive ao detectar a key. (B) Cmd+K → artigo agora navega para Alterações com o EAN pré-preenchido na pesquisa e linha destacada (outline accent + background subtil + scrollIntoView smooth) durante 3s. O resultado do artigo no Cmd+K também passou a mostrar inline o preço de campanha + desconto (ex: "17.99€ (-40%)") — visibilidade imediata sem precisar de abrir Alterações. (C) Fix do Blueprint a aparecer sem artigos quando os pisos/zonas tinham sido geridos via Admin → Layout da loja: o defaultLayout passou a usar UUIDs gerados pela DB, mas os períodos existentes mantinham IDs hardcoded (piso0/p1z1/etc), o que fazia o buildBlueprint perder todos os matches. Adicionado fallback por NAME (case-insensitive) em ingestFloors — agora o slot é colocado na zona certa quer o id bata quer não.' },
   { version: '3.15.3', date: '2026-05-13', summary: 'Cofre de credenciais — visibilidade controlada pelo admin + integração Cmd+K. (A) Admin → Definições → Visibilidade de menus agora inclui linha "Cofre de credenciais" com aviso visual destacado (laranja) quando activo para outros papéis. RLS de leitura passou a permitir qualquer utilizador autenticado (escrita continua só admins) — requer correr supabase/migrations/2026-05-13_credentials_share.sql. Por defeito permanece admin-only (visible: false). (B) Cmd+K passou a procurar também no cofre — mostra apenas nome/username/url/tags, nunca passwords. Atalho "Cofre" adicionado às vistas rápidas; navegação para o cofre via Cmd+K faz scroll automático e destaca a credencial 3s.' },
@@ -14257,23 +14258,46 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   // grelha 3 colunas. Botão "Imprimir" abre o PDF numa nova tab com
   // autoPrint() para disparar diálogo de impressão.
   // ──────────────────────────────────────────────────────────────────
+  // Validação estrita de EAN-13 (formato + checksum). Mantida para uso
+  // futuro (ex: validar input manual antes de aceitar). NÃO usada no
+  // caminho do PDF — esse usa normalizeToEAN13 (tolerante).
   const isValidEAN13 = (ean) => {
     const s = String(ean ?? '').replace(/[^\d]/g, '');
     if (!/^\d{13}$/.test(s)) return false;
-    // Valida checksum EAN-13 (modulo 10 dos dígitos com pesos 1,3,1,3,...)
     let sum = 0;
     for (let i = 0; i < 12; i++) sum += parseInt(s[i], 10) * (i % 2 === 0 ? 1 : 3);
     const check = (10 - (sum % 10)) % 10;
     return check === parseInt(s[12], 10);
   };
 
+  // v3.15.6: normalização tolerante — devolve sempre 13 dígitos com
+  // checksum válido (ou null se o input não tiver dígitos). Resolve o bug
+  // de barcodes em branco no PDF:
+  //   • EAN com < 13 dígitos (ex: UPC-A 12d) → padding com zeros à esquerda
+  //   • EAN com checksum errado (leitura parcial) → check digit recalculado
+  //   • EAN com > 13 dígitos → usa os últimos 13
+  // Preserva os 12 dígitos significativos do utilizador; o 13º é sempre
+  // determinado por eles, portanto recalcular nunca perde informação.
+  const normalizeToEAN13 = (raw) => {
+    let s = String(raw ?? '').replace(/[^\d]/g, '');
+    if (!s) return null;
+    if (s.length > 13) s = s.slice(-13);
+    if (s.length < 13) s = s.padStart(13, '0');
+    const data12 = s.slice(0, 12);
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += parseInt(data12[i], 10) * (i % 2 === 0 ? 1 : 3);
+    const check = (10 - (sum % 10)) % 10;
+    return data12 + String(check);
+  };
+
   const generateBarcodePNG = async (ean) => {
-    if (!isValidEAN13(ean)) return null;
+    const normalized = normalizeToEAN13(ean);
+    if (!normalized) return null;
     try {
       const mod = await import('jsbarcode');
       const JsBarcode = mod.default || mod;
       const canvas = document.createElement('canvas');
-      JsBarcode(canvas, String(ean), {
+      JsBarcode(canvas, normalized, {
         format: 'EAN13',
         width: 2,
         height: 60,
@@ -14283,7 +14307,7 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       });
       return canvas.toDataURL('image/png');
     } catch (err) {
-      console.warn('[barcode] failed para', ean, err);
+      console.warn('[barcode] falhou para', ean, '→ normalizado:', normalized, err);
       return null;
     }
   };
