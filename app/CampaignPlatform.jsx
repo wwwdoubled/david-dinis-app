@@ -4939,7 +4939,7 @@ function Header({ eyebrow, title, subtitle, action }) {
         <div className="mono" style={{ fontSize: 11, letterSpacing: '0.15em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 12 }}>
           {eyebrow}
         </div>
-        <h1 className="display" style={{ fontSize: 56, lineHeight: 1, margin: 0, fontStyle: 'italic' }}>
+        <h1 className="display" style={{ fontSize: 48, lineHeight: 1.02, margin: 0, letterSpacing: '-0.025em' }}>
           {title}
         </h1>
         {subtitle && <p style={{ fontSize: 16, color: T.inkSoft, marginTop: 14, maxWidth: 620 }}>{subtitle}</p>}
@@ -5205,19 +5205,22 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
             className="fade-up"
             style={{
               animationDelay: `${i * 60}ms`,
-              padding: '20px', background: T.bgEl,
-              border: `1px solid ${T.line}`, borderLeft: `3px solid ${s.color}`,
-              borderRadius: 10, textAlign: 'left', cursor: s.view ? 'pointer' : 'default',
-              transition: 'all 0.15s', fontFamily: 'inherit',
+              padding: '22px', background: T.bgEl,
+              border: `1px solid ${T.line}`,
+              borderRadius: 18, textAlign: 'left', cursor: s.view ? 'pointer' : 'default',
+              boxShadow: `0 1px 0 ${T.line}, 0 10px 24px -16px rgba(0,0,0,0.12)`,
+              transition: 'all 0.18s ease', fontFamily: 'inherit',
             }}
-            onMouseEnter={e => { if (s.view) e.currentTarget.style.borderColor = T.ink; }}
-            onMouseLeave={e => { if (s.view) e.currentTarget.style.borderColor = T.line; }}
+            onMouseEnter={e => { if (s.view) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 1px 0 ${T.line}, 0 18px 32px -16px rgba(0,0,0,0.18)`; } }}
+            onMouseLeave={e => { if (s.view) { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 1px 0 ${T.line}, 0 10px 24px -16px rgba(0,0,0,0.12)`; } }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 10 }}>
-              <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>{s.label}</div>
-              <s.icon size={14} strokeWidth={1.6} style={{ color: s.color }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+              <div style={{ width: 32, height: 32, borderRadius: 10, background: `${s.color}22`, color: s.color, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <s.icon size={15} strokeWidth={1.8} />
+              </div>
             </div>
-            <div className="display" style={{ fontSize: 40, lineHeight: 1, marginBottom: 4, color: s.color }}>{s.value}</div>
+            <div className="display" style={{ fontSize: 38, lineHeight: 1, marginBottom: 6, color: T.ink }}>{s.value}</div>
+            <div className="mono" style={{ fontSize: 10, letterSpacing: '0.16em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 4 }}>{s.label}</div>
             <div style={{ fontSize: 11, color: T.inkSoft }}>{s.sub}</div>
           </button>
         ))}
@@ -5302,16 +5305,17 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
             { v: 'inventory', icon: ScanLine,  label: 'Inventário',        hint: 'Picar EANs com câmara' },
           ].map(q => (
             <button key={q.v} onClick={() => setView(q.v)} style={{
-              padding: '14px 16px', background: T.bgEl, border: `1px solid ${T.line}`,
-              borderRadius: 8, textAlign: 'left', cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 12,
-              transition: 'all 0.15s', fontFamily: 'inherit',
+              padding: '16px 18px', background: T.bgEl, border: `1px solid ${T.line}`,
+              borderRadius: 16, textAlign: 'left', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 14,
+              boxShadow: `0 1px 0 ${T.line}, 0 6px 16px -12px rgba(0,0,0,0.08)`,
+              transition: 'all 0.18s ease', fontFamily: 'inherit',
             }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = T.accent; e.currentTarget.style.background = T.paper || '#fff'; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = T.line; e.currentTarget.style.background = T.bgEl; }}
+              onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 1px 0 ${T.line}, 0 16px 28px -14px ${T.accent}40`; e.currentTarget.style.borderColor = T.accent + '55'; }}
+              onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 1px 0 ${T.line}, 0 6px 16px -12px rgba(0,0,0,0.08)`; e.currentTarget.style.borderColor = T.line; }}
             >
-              <div style={{ width: 36, height: 36, borderRadius: 8, background: T.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <q.icon size={16} strokeWidth={1.5} style={{ color: T.ink }} />
+              <div style={{ width: 40, height: 40, borderRadius: 12, background: T.accentSoft, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <q.icon size={16} strokeWidth={1.7} style={{ color: T.accent }} />
               </div>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: T.ink }}>{q.label}</div>
@@ -10362,7 +10366,7 @@ const SlotRow = React.memo(function SlotRow({ slot, activeCampaign, candidates, 
       <td style={{ ...ztdStyle, padding: 4 }}>
         <select value={slot.state} onChange={e => onUpdate({ state: e.target.value })} style={{
           width: '100%', padding: '4px 6px', fontSize: 11, fontWeight: 600,
-          background: stateOpt.bg, color: stateOpt.fg, border: 'none', borderRadius: 3,
+          background: stateOpt.bg, color: stateOpt.fg, border: 'none', borderRadius: 999,
           textAlign: 'center', appearance: 'none', cursor: 'pointer',
         }}>
           {STATES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
