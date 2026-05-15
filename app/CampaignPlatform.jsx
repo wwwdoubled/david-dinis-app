@@ -4173,11 +4173,15 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             position: fixed !important;
             bottom: 0 !important; left: 0 !important; right: 0 !important;
             top: auto !important;
-            width: 100% !important; height: auto !important; max-height: 64px !important;
+            width: 100% !important; height: auto !important; max-height: 72px !important;
             flex-direction: row !important; align-items: center !important;
-            padding: 6px 8px !important;
+            padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px)) !important;
             border-right: none !important;
             border-top: 1px solid ${T.line} !important;
+            background: ${T.bgEl}f5 !important;
+            backdrop-filter: blur(16px) !important;
+            -webkit-backdrop-filter: blur(16px) !important;
+            box-shadow: 0 -2px 24px -10px rgba(0,0,0,0.18) !important;
             overflow-x: auto !important; overflow-y: hidden !important;
             z-index: 50;
             -webkit-overflow-scrolling: touch;
@@ -4208,10 +4212,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             pointer-events: none !important;
           }
           aside.no-print button {
-            padding: 6px 8px !important; font-size: 9px !important;
-            flex-shrink: 0 !important; min-width: 52px !important; min-height: 48px !important;
-            flex-direction: column !important; gap: 2px !important;
-            line-height: 1 !important; border-radius: 6px !important;
+            padding: 8px 10px !important; font-size: 9px !important;
+            flex-shrink: 0 !important; min-width: 56px !important; min-height: 52px !important;
+            flex-direction: column !important; gap: 3px !important;
+            line-height: 1 !important; border-radius: 14px !important;
           }
           aside.no-print button span {
             font-size: 9px !important; line-height: 1 !important; display: inline !important;
@@ -4221,7 +4225,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           aside.no-print nav > div { padding-top: 0 !important; margin: 0 !important; border-top: none !important; }
 
           main {
-            padding: 24px 14px 84px !important;
+            padding: 24px 14px calc(96px + env(safe-area-inset-bottom, 0px)) !important;
             max-width: 100% !important;
             box-sizing: border-box !important;
           }
@@ -4283,14 +4287,16 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           main button[style*="font-size: 9"], main button[style*="fontSize:9"],
           main button[style*="font-size: 10"], main button[style*="fontSize:10"],
           main button[style*="font-size: 11"], main button[style*="fontSize:11"] {
-            padding: 6px 8px !important;
+            padding: 6px 10px !important;
             font-size: 11px !important;
+            border-radius: 999px !important;
           }
           /* Inputs / selects compactos com texto legível para toque */
           main input, main select, main textarea {
             font-size: 14px !important;
-            padding: 8px 10px !important;
-            min-height: 36px !important;
+            padding: 10px 14px !important;
+            min-height: 40px !important;
+            border-radius: 12px !important;
             box-sizing: border-box !important;
           }
 
