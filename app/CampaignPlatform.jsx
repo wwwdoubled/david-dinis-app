@@ -5608,43 +5608,45 @@ function SalesView({ salesData, setSalesData, candidates, setCandidates }) {
       ) : (
         <>
           <div style={{ display: 'flex', gap: 12, marginBottom: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flex: '1 1 280px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 999, flex: '1 1 280px', boxShadow: `0 1px 0 ${T.line}` }}>
               <Search size={14} style={{ color: T.inkMute }} />
               <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar produto, referência…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
             </div>
-            <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+            <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 999 }}>
               {[{ id: 'qty', l: 'Quantidade' }, { id: 'revenue', l: 'Receita' }, { id: 'name', l: 'Nome' }].map(s => (
                 <button key={s.id} onClick={() => setSortBy(s.id)} style={{
-                  padding: '6px 12px', fontSize: 12, borderRadius: 4, border: 'none',
+                  padding: '6px 14px', fontSize: 12, borderRadius: 999, border: 'none',
                   background: sortBy === s.id ? T.ink : 'transparent',
                   color: sortBy === s.id ? T.bg : T.inkSoft,
+                  fontWeight: sortBy === s.id ? 600 : 400,
                 }}>{s.l}</button>
               ))}
               <button onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')} style={{
-                padding: '6px 8px', borderRadius: 4, border: 'none', background: 'transparent', color: T.inkSoft,
+                padding: '6px 10px', borderRadius: 999, border: 'none', background: 'transparent', color: T.inkSoft,
                 display: 'flex', alignItems: 'center',
               }}>
                 {sortDir === 'desc' ? <ArrowDown size={14} /> : <ArrowUp size={14} />}
               </button>
             </div>
             <button onClick={() => setTopOnly(t => !t)} style={{
-              padding: '8px 14px', fontSize: 12,
+              padding: '9px 16px', fontSize: 12, fontWeight: 500,
               background: topOnly ? T.accent : T.bgEl,
               color: topOnly ? '#fff' : T.ink,
               border: `1px solid ${topOnly ? T.accent : T.line}`,
-              borderRadius: 6, display: 'flex', alignItems: 'center', gap: 6,
+              borderRadius: 999, display: 'flex', alignItems: 'center', gap: 6,
+              boxShadow: topOnly ? `0 6px 14px -6px ${T.accent}80` : 'none',
             }}>
               <TrendingUp size={14} /> Top 20
             </button>
             <button onClick={() => setSalesData(null)} style={{
-              padding: '8px 12px', fontSize: 12, background: 'transparent', color: T.inkSoft,
-              border: `1px solid ${T.line}`, borderRadius: 6,
+              padding: '9px 14px', fontSize: 12, background: 'transparent', color: T.inkSoft,
+              border: `1px solid ${T.line}`, borderRadius: 999,
             }}>
               <RotateCcw size={12} style={{ display: 'inline', marginRight: 6 }} /> Substituir ficheiro
             </button>
           </div>
 
-          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 18, overflow: 'hidden', boxShadow: `0 1px 0 ${T.line}, 0 14px 28px -18px rgba(0,0,0,0.1)` }}>
             <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
               <div className="mono" style={{ color: T.inkMute, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                 {filtered.length} produtos · {salesData.filename}
@@ -14768,7 +14770,7 @@ function CalendarView({ periods = [], campaigns = [], onEnterPeriod }) {
       {/* Month nav */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <button onClick={() => navMonth(-1)} style={navBtnStyle}><ArrowLeft size={14} /></button>
-        <div className="display" style={{ fontSize: 22, fontStyle: 'italic', textTransform: 'capitalize', minWidth: 220 }}>{monthLabel}</div>
+        <div className="display" style={{ fontSize: 22, textTransform: 'capitalize', minWidth: 220, letterSpacing: '-0.02em' }}>{monthLabel}</div>
         <button onClick={() => navMonth(1)} style={navBtnStyle}><ArrowRight size={14} /></button>
         <button onClick={() => setCursor(new Date(new Date().getFullYear(), new Date().getMonth(), 1))} style={{ ...navBtnStyle, fontSize: 11, padding: '6px 12px' }}>Hoje</button>
         <div style={{ marginLeft: 'auto', fontSize: 11, color: T.inkMute }}>
@@ -14777,10 +14779,10 @@ function CalendarView({ periods = [], campaigns = [], onEnterPeriod }) {
       </div>
 
       {/* Calendar grid */}
-      <div style={{ background: T.bg, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', background: T.bgEl, borderBottom: `1px solid ${T.line}` }}>
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 18, overflow: 'hidden', boxShadow: `0 1px 0 ${T.line}, 0 14px 28px -18px rgba(0,0,0,0.12)` }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', background: T.bg, borderBottom: `1px solid ${T.line}` }}>
           {['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'].map(d => (
-            <div key={d} style={{ padding: '10px 8px', fontSize: 10, fontWeight: 600, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', textAlign: 'center' }}>{d}</div>
+            <div key={d} className="mono" style={{ padding: '12px 8px', fontSize: 10, fontWeight: 600, color: T.inkMute, letterSpacing: '0.16em', textTransform: 'uppercase', textAlign: 'center' }}>{d}</div>
           ))}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)' }}>
@@ -14789,21 +14791,23 @@ function CalendarView({ periods = [], campaigns = [], onEnterPeriod }) {
             const today = isToday(day);
             return (
               <div key={i} style={{
-                minHeight: 110, padding: 6,
+                minHeight: 112, padding: 8,
                 borderRight: (i + 1) % 7 !== 0 ? `1px solid ${T.lineSoft}` : 'none',
                 borderBottom: i < 35 ? `1px solid ${T.lineSoft}` : 'none',
-                background: today ? `${T.accent}08` : (day ? T.paper : T.bgEl),
+                background: today ? T.accentSoft : (day ? T.paper : T.bg),
+                position: 'relative',
               }}>
+                {today && <div style={{ position: 'absolute', inset: 0, boxShadow: `inset 0 0 0 2px ${T.accent}`, pointerEvents: 'none', borderRadius: 2 }}/>}
                 {day && (
                   <>
-                    <div style={{
-                      fontSize: 11, fontWeight: today ? 700 : 500,
-                      color: today ? T.accent : T.inkSoft,
-                      marginBottom: 4,
+                    <div className="display" style={{
+                      fontSize: 18, fontWeight: today ? 600 : 500,
+                      color: today ? T.accent : T.ink,
+                      lineHeight: 1, marginBottom: 8, letterSpacing: '-0.02em',
                     }}>
                       {day.getDate()}
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                       {periodsHere.slice(0, 3).map(p => {
                         const status = periodStatus(p);
                         const color = STATUS_COLOR[status];
@@ -14814,11 +14818,11 @@ function CalendarView({ periods = [], campaigns = [], onEnterPeriod }) {
                             onClick={() => onEnterPeriod && onEnterPeriod(p.id)}
                             title={`${p.name} · ${STATUS_LABEL[status]} · ${campCount} ficheiro${campCount === 1 ? '' : 's'}`}
                             style={{
-                              padding: '3px 6px', fontSize: 10,
-                              background: color, color: '#fff', borderRadius: 3,
+                              padding: '3px 8px', fontSize: 10,
+                              background: color, color: '#fff', borderRadius: 999,
                               border: 'none', cursor: 'pointer', textAlign: 'left',
                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                              fontWeight: 500,
+                              fontWeight: 600, letterSpacing: '0.01em',
                             }}
                           >
                             {p.name}
