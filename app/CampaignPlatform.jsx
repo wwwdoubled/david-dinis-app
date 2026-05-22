@@ -531,8 +531,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.7';
-const APP_BUILD_DATE = '2026-05-15T11:00'; // Europe/Lisbon
+const APP_VERSION = '3.15.8';
+const APP_BUILD_DATE = '2026-05-22T22:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -542,6 +542,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.8', date: '2026-05-22', summary: 'Inventário (PDF de códigos de barras): fix bullet-proof para células em branco. Apesar da normalizeToEAN13 da v3.15.6 estar correcta (testada), o JsBarcode 3.x falhava SILENCIOSAMENTE em alguns inputs em produção — não lançava excepção mas o canvas ficava 0×0 e o toDataURL devolvia PNG vazio que o jsPDF aceitava e renderizava em branco. Fix: (a) pré-dimensionar o canvas a 300×100 antes do render; (b) usar a callback `valid` do jsbarcode para detectar falha; (c) verificar dimensões do canvas pós-render; (d) sanity-check ao dataURL; (e) fallback automático para CODE128 (também scannable em qualquer leitor de POS) se o EAN13 falhar por qualquer razão; (f) console.warn explícitos para diagnóstico futuro.' },
   { version: '3.15.7', date: '2026-05-15', summary: 'Redução crítica de egress do Supabase (~99%). A sync periódica (30s) chamava cloudFetchAllCampaigns que descarregava as ROWS comprimidas de todas as campanhas a cada refresh — ~750 KB × 120/h × 8h = ~720 MB/dia/utilizador, soma facilmente para >17 GB/mês de egress no plano. Agora chama cloudFetchAllCampaignsMeta (só metadata, ~5 KB). mergeCampaigns ganha um parâmetro cloudStrictlyNewer: quando o cloud é estritamente mais recente (outro dispositivo editou) E só veio meta, as rows locais são invalidadas (_needsRows: true) → lazy hydration trata da re-fetch só quando o utilizador abrir a campanha. Comportamento idêntico para o utilizador final; egress baixa de ~720 MB/dia para ~5 MB/dia.' },
   { version: '3.15.6', date: '2026-05-15', summary: 'Inventário (códigos de barras): fix para barcodes a aparecer em branco no PDF quando o EAN tinha menos de 13 dígitos (ex: códigos UPC-A com 12 dígitos) ou checksum incorrecto. Nova função normalizeToEAN13 faz padding com zeros à esquerda, usa os últimos 13 dígitos se for mais longo, e recalcula sempre o check digit antes de passar ao jsbarcode — preserva os 12 dígitos significativos do utilizador e garante que o barcode é sempre scanável. Inputs sem dígitos continuam a ser saltados (célula vazia em vez de crash).' },
   { version: '3.15.5', date: '2026-05-13', summary: 'Inventário — códigos de barras EAN-13 + impressão. Cada EAN picado pode ser convertido para o seu código de barras visual EAN-13. Novo campo "Nome do conjunto" na toolbar para identificar a sessão (ex: "Reposição quinta-feira"). Botão "PDF códigos" gera um PDF A4 em grelha 3 colunas com barcode + descrição + família + preço por artigo. Botão "Imprimir" abre o PDF em nova tab com diálogo de impressão automático (fallback para download se popup bloqueado). Lib jsbarcode adicionada (lazy-imported, ~40KB) — só carrega quando o utilizador realmente exporta. Validação de checksum EAN-13 nativa antes da geração.' },
@@ -14315,6 +14316,10 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
     return data12 + String(check);
   };
 
+  // v3.15.8: render bullet-proof — pré-dimensiona o canvas, usa a callback
+  // `valid` do JsBarcode para detectar silent-fail, verifica dimensões e
+  // dataURL pós-render, e cai para fallback CODE128 (também scannable) se o
+  // EAN13 falhar. Resolve as células em branco no PDF do inventário.
   const generateBarcodePNG = async (ean) => {
     const normalized = normalizeToEAN13(ean);
     if (!normalized) return null;
@@ -14322,17 +14327,52 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
       const mod = await import('jsbarcode');
       const JsBarcode = mod.default || mod;
       const canvas = document.createElement('canvas');
-      JsBarcode(canvas, normalized, {
-        format: 'EAN13',
-        width: 2,
-        height: 60,
-        displayValue: true,
-        fontSize: 14,
-        margin: 6,
-      });
-      return canvas.toDataURL('image/png');
+      // Pré-dimensionar para evitar JsBarcode silent-fail em renderers que
+      // precisam de dimensões iniciais para medir o texto.
+      canvas.width = 300;
+      canvas.height = 100;
+
+      let renderedOk = false;
+      const tryRender = (format, code) => {
+        renderedOk = false;
+        try {
+          JsBarcode(canvas, code, {
+            format,
+            width: 2,
+            height: 60,
+            displayValue: true,
+            fontSize: 14,
+            margin: 6,
+            valid: (v) => { renderedOk = v; },
+          });
+        } catch (e) {
+          renderedOk = false;
+        }
+        if (canvas.width === 0 || canvas.height === 0) renderedOk = false;
+        return renderedOk;
+      };
+
+      // 1ª tentativa: EAN13 (formato visual de retalho).
+      if (!tryRender('EAN13', normalized)) {
+        // 2ª tentativa: CODE128 (scannable, aceita qualquer string de dígitos).
+        // Não é EAN13 puro mas é lido por qualquer leitor da loja.
+        tryRender('CODE128', normalized);
+      }
+
+      if (!renderedOk) {
+        console.warn('[barcode] JsBarcode falhou EAN13 e CODE128 para', ean, '→ normalizado:', normalized);
+        return null;
+      }
+
+      const url = canvas.toDataURL('image/png');
+      // Sanity check: dataURL válido começa com "data:image/png" e tem > 100 chars
+      if (!url || !url.startsWith('data:image/png') || url.length < 100) {
+        console.warn('[barcode] dataURL inválido para', ean, '→ len:', url?.length || 0);
+        return null;
+      }
+      return url;
     } catch (err) {
-      console.warn('[barcode] falhou para', ean, '→ normalizado:', normalized, err);
+      console.warn('[barcode] excepção para', ean, '→ normalizado:', normalized, err);
       return null;
     }
   };
