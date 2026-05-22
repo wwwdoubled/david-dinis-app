@@ -531,8 +531,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.6';
-const APP_BUILD_DATE = '2026-05-15T10:00'; // Europe/Lisbon
+const APP_VERSION = '3.15.7';
+const APP_BUILD_DATE = '2026-05-15T11:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -542,6 +542,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.15.7', date: '2026-05-15', summary: 'Redução crítica de egress do Supabase (~99%). A sync periódica (30s) chamava cloudFetchAllCampaigns que descarregava as ROWS comprimidas de todas as campanhas a cada refresh — ~750 KB × 120/h × 8h = ~720 MB/dia/utilizador, soma facilmente para >17 GB/mês de egress no plano. Agora chama cloudFetchAllCampaignsMeta (só metadata, ~5 KB). mergeCampaigns ganha um parâmetro cloudStrictlyNewer: quando o cloud é estritamente mais recente (outro dispositivo editou) E só veio meta, as rows locais são invalidadas (_needsRows: true) → lazy hydration trata da re-fetch só quando o utilizador abrir a campanha. Comportamento idêntico para o utilizador final; egress baixa de ~720 MB/dia para ~5 MB/dia.' },
   { version: '3.15.6', date: '2026-05-15', summary: 'Inventário (códigos de barras): fix para barcodes a aparecer em branco no PDF quando o EAN tinha menos de 13 dígitos (ex: códigos UPC-A com 12 dígitos) ou checksum incorrecto. Nova função normalizeToEAN13 faz padding com zeros à esquerda, usa os últimos 13 dígitos se for mais longo, e recalcula sempre o check digit antes de passar ao jsbarcode — preserva os 12 dígitos significativos do utilizador e garante que o barcode é sempre scanável. Inputs sem dígitos continuam a ser saltados (célula vazia em vez de crash).' },
   { version: '3.15.5', date: '2026-05-13', summary: 'Inventário — códigos de barras EAN-13 + impressão. Cada EAN picado pode ser convertido para o seu código de barras visual EAN-13. Novo campo "Nome do conjunto" na toolbar para identificar a sessão (ex: "Reposição quinta-feira"). Botão "PDF códigos" gera um PDF A4 em grelha 3 colunas com barcode + descrição + família + preço por artigo. Botão "Imprimir" abre o PDF em nova tab com diálogo de impressão automático (fallback para download se popup bloqueado). Lib jsbarcode adicionada (lazy-imported, ~40KB) — só carrega quando o utilizador realmente exporta. Validação de checksum EAN-13 nativa antes da geração.' },
   { version: '3.15.4', date: '2026-05-13', summary: 'Cmd+K mais útil + fix do Blueprint vazio. (A) Cmd+K → campanha agora abre directamente o detalhe (mode "detail"), não apenas a lista do período: openResult guarda o id em sessionStorage.campaigns.openCampaignId e CampaignsView chama setOnlyActive ao detectar a key. (B) Cmd+K → artigo agora navega para Alterações com o EAN pré-preenchido na pesquisa e linha destacada (outline accent + background subtil + scrollIntoView smooth) durante 3s. O resultado do artigo no Cmd+K também passou a mostrar inline o preço de campanha + desconto (ex: "17.99€ (-40%)") — visibilidade imediata sem precisar de abrir Alterações. (C) Fix do Blueprint a aparecer sem artigos quando os pisos/zonas tinham sido geridos via Admin → Layout da loja: o defaultLayout passou a usar UUIDs gerados pela DB, mas os períodos existentes mantinham IDs hardcoded (piso0/p1z1/etc), o que fazia o buildBlueprint perder todos os matches. Adicionado fallback por NAME (case-insensitive) em ingestFloors — agora o slot é colocado na zona certa quer o id bata quer não.' },
@@ -1737,15 +1738,27 @@ function mergeCampaigns(localList, cloudList) {
     const k = keyOf(cc);
     const local = map.get(k);
     // Helper: given a merged object, restore rows/itemCount from local when
-    // cloud has none. Cloud rows can be empty in two scenarios:
-    //   (a) meta-only fetch (_needsRows: true)
+    // cloud has none. Cloud rows can be empty em três cenários:
+    //   (a) meta-only fetch (_needsRows: true) — periodic refresh em v3.15.7+
     //   (b) full fetch but the upload to cloud hasn't completed yet (rows: [])
-    // In BOTH cases we should keep local rows if they exist — otherwise data
-    // gets silently wiped during 30s polling. (v3.9.8)
-    const restoreRows = (merged, src) => {
+    //   (c) outro dispositivo actualizou a campanha (cloudStrictlyNewer)
+    //
+    // v3.15.7: distinção crítica — se o cloud é ESTRITAMENTE mais recente
+    // (cenário c), as rows locais estão potencialmente desactualizadas;
+    // invalidamos e marcamos _needsRows para lazy re-hydration. Se o cloud
+    // é igual ou anterior (cenários a/b), mantemos as rows locais para não
+    // perder o que o utilizador acabou de fazer upload localmente.
+    const restoreRows = (merged, src, cloudStrictlyNewer = false) => {
       const cloudHasRows = Array.isArray(merged.rows) && merged.rows.length > 0;
       const localHasRows = src && Array.isArray(src.rows) && src.rows.length > 0;
-      if (!cloudHasRows && localHasRows) {
+      if (cloudHasRows) return merged; // cloud sent rows — use them
+      if (!localHasRows) return merged; // nothing to restore
+      if (cloudStrictlyNewer) {
+        // Outro device actualizou — flag para re-hydration na próxima view.
+        merged.rows = [];
+        merged.itemCount = -1;
+        merged._needsRows = true;
+      } else {
         merged.rows = src.rows;
         merged.itemCount = src.itemCount ?? src.rows.length;
         merged._needsRows = false;
@@ -1759,8 +1772,10 @@ function mergeCampaigns(localList, cloudList) {
       const localByKey = map.get(altKey);
       if (localByKey && altKey !== k) {
         // Same campaign, different id — prefer cloud version (it has cloud id)
+        const localT = localByKey.updatedAt ? new Date(localByKey.updatedAt).getTime() : 0;
+        const cloudT = cc.updatedAt ? new Date(cc.updatedAt).getTime() : 0;
         map.delete(altKey);
-        map.set(k, restoreRows({ ...localByKey, ...cc }, localByKey));
+        map.set(k, restoreRows({ ...localByKey, ...cc }, localByKey, cloudT > localT));
       } else {
         map.set(k, cc);
       }
@@ -1768,9 +1783,11 @@ function mergeCampaigns(localList, cloudList) {
       const localTime = local.updatedAt ? new Date(local.updatedAt).getTime() : (local.uploaded ? local.uploaded.getTime() : 0);
       const cloudTime = cc.updatedAt ? new Date(cc.updatedAt).getTime() : 0;
       if (cloudTime >= localTime) {
-        map.set(k, restoreRows({ ...local, ...cc }, local));
+        // Cloud >= local. Se estritamente maior, invalidar rows locais para
+        // re-hydration. Se igual, manter (mesmo conteúdo, sem necessidade).
+        map.set(k, restoreRows({ ...local, ...cc }, local, cloudTime > localTime));
       } else {
-        map.set(k, restoreRows({ ...cc, ...local }, local));
+        map.set(k, restoreRows({ ...cc, ...local }, local, false));
       }
     }
   }
@@ -3315,10 +3332,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // que foi lido ANTES do edit) sobrescrevia tudo e o edit perdia-se. Agora
   // o merge é re-aplicado sempre sobre o ESTADO REAL, garantindo que edits
   // locais com updatedAt mais recente vencem o cloudList do fetch.
+  //
+  // v3.15.7: usar cloudFetchAllCampaignsMeta() em vez de cloudFetchAllCampaigns()
+  // para o refresh periódico — antes baixava as ROWS comprimidas de TODAS as
+  // campanhas a cada 30s (~750 KB × 120/h × 8h = ~720 MB/dia/utilizador, =>
+  // ~17 GB/mês de egress). Agora baixa só metadata (~5 KB), e o
+  // mergeCampaigns detecta quando o updated_at de uma campanha mudou e marca
+  // _needsRows: true → lazy-hydration trata da re-fetch das rows só quando o
+  // utilizador realmente abrir essa campanha (já existe em CampaignsView).
   useEffect(() => {
     if (!user || !supabase || !cloudDataLoaded) return;
     const refresh = async () => {
-      const [p, c] = await Promise.all([cloudFetchAllPeriods(), cloudFetchAllCampaigns()]);
+      const [p, c] = await Promise.all([cloudFetchAllPeriods(), cloudFetchAllCampaignsMeta()]);
       // Defensive: don't blow away local state if cloud returns suddenly empty
       if (p.length === 0 && c.length === 0 && (periodsRef.current.length > 0 || campaignsRef.current.length > 0)) {
         console.warn('[cloud-sync] periodic refresh got empty result — skipping update to avoid wiping local state');
