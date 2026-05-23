@@ -531,8 +531,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.15.8';
-const APP_BUILD_DATE = '2026-05-22T22:00'; // Europe/Lisbon
+const APP_VERSION = '3.16.0';
+const APP_BUILD_DATE = '2026-05-22T23:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -542,6 +542,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.16.0', date: '2026-05-22', summary: 'Modelo de autenticação admin-only + rebrand. (A) Login: removidos os modos "Criar conta" e "Recuperar password" — só sign-in. (B) Admin → Utilizadores ganha botão "Criar utilizador" e acção "Reset pw" por linha: a Edge Function admin-user-mgmt (Deno) gera uma password temporária de 14 chars (com service-role do Supabase, autenticando o caller via JWT e verificando admins table), marca user_profiles.must_change_password=true, e devolve a temp pw num modal copiável. (C) ForcePasswordChangeModal bloqueia toda a app no próximo login do utilizador até definir password definitiva via supabase.auth.updateUser({password}); só desbloqueia depois de limpar a flag. Requer correr supabase/migrations/2026-05-22_force_password_change.sql e fazer deploy da Edge Function admin-user-mgmt em Supabase Dashboard → Edge Functions. (D) Rebrand: "Campaign Studio" → "Gestão de Campanhas" em layout.js (tab do browser) e no login screen.' },
   { version: '3.15.8', date: '2026-05-22', summary: 'Inventário (PDF de códigos de barras): fix bullet-proof para células em branco. Apesar da normalizeToEAN13 da v3.15.6 estar correcta (testada), o JsBarcode 3.x falhava SILENCIOSAMENTE em alguns inputs em produção — não lançava excepção mas o canvas ficava 0×0 e o toDataURL devolvia PNG vazio que o jsPDF aceitava e renderizava em branco. Fix: (a) pré-dimensionar o canvas a 300×100 antes do render; (b) usar a callback `valid` do jsbarcode para detectar falha; (c) verificar dimensões do canvas pós-render; (d) sanity-check ao dataURL; (e) fallback automático para CODE128 (também scannable em qualquer leitor de POS) se o EAN13 falhar por qualquer razão; (f) console.warn explícitos para diagnóstico futuro.' },
   { version: '3.15.7', date: '2026-05-15', summary: 'Redução crítica de egress do Supabase (~99%). A sync periódica (30s) chamava cloudFetchAllCampaigns que descarregava as ROWS comprimidas de todas as campanhas a cada refresh — ~750 KB × 120/h × 8h = ~720 MB/dia/utilizador, soma facilmente para >17 GB/mês de egress no plano. Agora chama cloudFetchAllCampaignsMeta (só metadata, ~5 KB). mergeCampaigns ganha um parâmetro cloudStrictlyNewer: quando o cloud é estritamente mais recente (outro dispositivo editou) E só veio meta, as rows locais são invalidadas (_needsRows: true) → lazy hydration trata da re-fetch só quando o utilizador abrir a campanha. Comportamento idêntico para o utilizador final; egress baixa de ~720 MB/dia para ~5 MB/dia.' },
   { version: '3.15.6', date: '2026-05-15', summary: 'Inventário (códigos de barras): fix para barcodes a aparecer em branco no PDF quando o EAN tinha menos de 13 dígitos (ex: códigos UPC-A com 12 dígitos) ou checksum incorrecto. Nova função normalizeToEAN13 faz padding com zeros à esquerda, usa os últimos 13 dígitos se for mais longo, e recalcula sempre o check digit antes de passar ao jsbarcode — preserva os 12 dígitos significativos do utilizador e garante que o barcode é sempre scanável. Inputs sem dígitos continuam a ser saltados (célula vazia em vez de crash).' },
@@ -2547,29 +2548,28 @@ function ThemeSwitcher({ theme, setTheme, compact = false }) {
 // Login screen
 // ─────────────────────────────────────────────────────────────────────────
 function Login({ onSuccess, theme, toggleTheme, setTheme }) {
-  // mode: 'signin' | 'signup' | 'forgot' | 'legacy' (when Supabase is missing)
-  const [mode, setMode] = useState(supabaseEnabled ? 'signin' : 'legacy');
+  // v3.16.0: só dois modos. Sign-up e recuperação por email foram removidos
+  // — contas são criadas e resetadas exclusivamente pelo admin (via
+  // AdminUsersTab + Edge Function admin-user-mgmt). Após reset, o utilizador
+  // entra com a temp password e é forçado a mudar via ForcePasswordChangeModal.
+  // mode: 'signin' | 'legacy' (when Supabase is missing)
+  const [mode] = useState(supabaseEnabled ? 'signin' : 'legacy');
   const [email, setEmail] = useState('');
   const [pwd, setPwd] = useState('');
-  const [pwdConfirm, setPwdConfirm] = useState('');
   const [error, setError] = useState('');
-  const [info, setInfo] = useState('');
   const [busy, setBusy] = useState(false);
   const emailRef = useRef();
   const pwdRef = useRef();
 
   useEffect(() => {
-    // Focus first relevant field on mode change
-    if (mode === 'legacy' || mode === 'signin') pwdRef.current?.focus();
+    // Focus first relevant field on mount
+    if (mode === 'legacy') pwdRef.current?.focus();
     else emailRef.current?.focus();
   }, [mode]);
 
-  // Reset error/info when changing mode
-  useEffect(() => { setError(''); setInfo(''); }, [mode]);
-
   const submit = async () => {
     if (busy) return;
-    setError(''); setInfo('');
+    setError('');
 
     // Legacy mode (Supabase not configured)
     if (mode === 'legacy') {
@@ -2587,61 +2587,14 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
       return;
     }
 
-    // From here: Supabase modes
+    // Supabase signin
     if (!supabase) {
       setError('Supabase não está configurado.');
       return;
     }
-
     if (!email) { setError('Indica o teu email.'); return; }
-
-    if (mode === 'forgot') {
-      setBusy(true);
-      try {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
-        });
-        if (error) throw error;
-        setInfo('Enviámos-te um email com instruções para redefinir a password.');
-      } catch (err) {
-        setError(err?.message || 'Não foi possível enviar o email.');
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
     if (!pwd) { setError('Indica a password.'); return; }
 
-    if (mode === 'signup') {
-      if (pwd.length < 6) { setError('A password tem de ter pelo menos 6 caracteres.'); return; }
-      if (pwd !== pwdConfirm) { setError('As passwords não coincidem.'); return; }
-      setBusy(true);
-      try {
-        const { data, error } = await supabase.auth.signUp({
-          email, password: pwd,
-          options: {
-            emailRedirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
-          },
-        });
-        if (error) throw error;
-        // If email confirmation is enabled in Supabase, no session is returned yet
-        if (!data.session) {
-          setInfo('Conta criada. Verifica o teu email para confirmar e depois faz login.');
-          setMode('signin');
-          setPwd('');
-          setPwdConfirm('');
-        }
-        // If session is returned (auto-confirm enabled), the auth listener picks it up
-      } catch (err) {
-        setError(err?.message || 'Não foi possível criar a conta.');
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-
-    // signin
     setBusy(true);
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password: pwd });
@@ -2700,7 +2653,7 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
             fontSize: 10.5, letterSpacing: '0.22em', color: T.inkMute,
             marginTop: 8, textTransform: 'uppercase',
           }}>
-            Campaign Studio
+            Gestão de Campanhas
           </div>
         </div>
 
@@ -2713,11 +2666,9 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
             display: 'flex', alignItems: 'center', gap: 8, marginBottom: 22,
             color: T.inkSoft,
           }}>
-            {mode === 'forgot' ? <Mail size={14} /> : (mode === 'signup' ? <UserPlus size={14} /> : <Lock size={14} />)}
+            <Lock size={14} />
             <span className="mono" style={{ fontSize: 11, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
-              {mode === 'signup' && 'Criar conta'}
               {mode === 'signin' && 'Entrar'}
-              {mode === 'forgot' && 'Recuperar password'}
               {mode === 'legacy' && 'Acesso restrito'}
             </span>
             {!supabaseEnabled && mode === 'legacy' && (
@@ -2726,8 +2677,8 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
           </div>
 
           <div className={isShake ? 'shake' : ''}>
-            {/* Email field — for all Supabase modes */}
-            {mode !== 'legacy' && (
+            {/* Email field — only Supabase signin mode */}
+            {mode === 'signin' && (
               <label style={{ display: 'block', marginBottom: 14 }}>
                 <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Email</div>
                 <input
@@ -2735,7 +2686,7 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
                   type="email"
                   value={email}
                   onChange={e => { setEmail(e.target.value); setError(''); }}
-                  onKeyDown={e => { if (e.key === 'Enter') (mode === 'forgot' ? submit() : pwdRef.current?.focus()); }}
+                  onKeyDown={e => { if (e.key === 'Enter') pwdRef.current?.focus(); }}
                   autoComplete="email"
                   disabled={busy}
                   style={authInputStyle(error)}
@@ -2746,44 +2697,23 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
               </label>
             )}
 
-            {/* Password field — not shown in forgot mode */}
-            {mode !== 'forgot' && (
-              <label style={{ display: 'block', marginBottom: mode === 'signup' ? 14 : 18 }}>
-                <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Password</div>
-                <input
-                  ref={pwdRef}
-                  type="password"
-                  value={pwd}
-                  onChange={e => { setPwd(e.target.value); setError(''); }}
-                  onKeyDown={e => { if (e.key === 'Enter') submit(); }}
-                  autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
-                  disabled={busy}
-                  style={authInputStyle(error)}
-                  onFocus={e => { if (!error) e.target.style.borderColor = T.ink; }}
-                  onBlur={e => { if (!error) e.target.style.borderColor = T.line; }}
-                  placeholder="••••••••"
-                />
-              </label>
-            )}
-
-            {/* Password confirm — signup only */}
-            {mode === 'signup' && (
-              <label style={{ display: 'block', marginBottom: 18 }}>
-                <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Confirmar password</div>
-                <input
-                  type="password"
-                  value={pwdConfirm}
-                  onChange={e => { setPwdConfirm(e.target.value); setError(''); }}
-                  onKeyDown={e => { if (e.key === 'Enter') submit(); }}
-                  autoComplete="new-password"
-                  disabled={busy}
-                  style={authInputStyle(error)}
-                  onFocus={e => { if (!error) e.target.style.borderColor = T.ink; }}
-                  onBlur={e => { if (!error) e.target.style.borderColor = T.line; }}
-                  placeholder="••••••••"
-                />
-              </label>
-            )}
+            {/* Password field */}
+            <label style={{ display: 'block', marginBottom: 18 }}>
+              <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Password</div>
+              <input
+                ref={pwdRef}
+                type="password"
+                value={pwd}
+                onChange={e => { setPwd(e.target.value); setError(''); }}
+                onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+                autoComplete="current-password"
+                disabled={busy}
+                style={authInputStyle(error)}
+                onFocus={e => { if (!error) e.target.style.borderColor = T.ink; }}
+                onBlur={e => { if (!error) e.target.style.borderColor = T.line; }}
+                placeholder="••••••••"
+              />
+            </label>
 
             {error && (
               <div style={{
@@ -2792,15 +2722,6 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
                 borderRadius: 6, fontSize: 12,
               }}>
                 <AlertCircle size={12} /> {error}
-              </div>
-            )}
-            {info && (
-              <div style={{
-                display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14,
-                padding: '8px 10px', background: '#E5F4E5', color: '#2E5E2A',
-                borderRadius: 6, fontSize: 12,
-              }}>
-                <Check size={12} /> {info}
               </div>
             )}
 
@@ -2819,37 +2740,18 @@ function Login({ onSuccess, theme, toggleTheme, setTheme }) {
                 fontFamily: 'inherit',
               }}
             >
-              {busy && 'A processar…'}
-              {!busy && mode === 'signin' && 'Entrar'}
-              {!busy && mode === 'signup' && 'Criar conta'}
-              {!busy && mode === 'forgot' && 'Enviar email de recuperação'}
-              {!busy && mode === 'legacy' && 'Entrar'}
+              {busy ? 'A processar…' : 'Entrar'}
             </button>
           </div>
 
-          {/* Links between modes */}
+          {/* v3.16.0: sem links de signup/recuperação. Contas são criadas
+              e resetadas exclusivamente por um admin. */}
           {supabaseEnabled && (
             <div style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               marginTop: 18, paddingTop: 16, borderTop: `1px solid ${T.line}`,
-              fontSize: 12,
+              fontSize: 11, color: T.inkMute, lineHeight: 1.5, textAlign: 'center',
             }}>
-              {mode === 'signin' && (
-                <>
-                  <button onClick={() => setMode('forgot')} style={authLink()}>Esqueci-me</button>
-                  <button onClick={() => setMode('signup')} style={authLink()}>Criar conta →</button>
-                </>
-              )}
-              {mode === 'signup' && (
-                <button onClick={() => setMode('signin')} style={authLink()}>
-                  <ArrowLeft size={11} style={{ display: 'inline', verticalAlign: 'middle' }} /> Já tenho conta
-                </button>
-              )}
-              {mode === 'forgot' && (
-                <button onClick={() => setMode('signin')} style={authLink()}>
-                  <ArrowLeft size={11} style={{ display: 'inline', verticalAlign: 'middle' }} /> Voltar ao login
-                </button>
-              )}
+              Esqueceste-te da password? Contacta o administrador para fazer reset.
             </div>
           )}
         </div>
@@ -4097,8 +3999,24 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return { success: true, count: incomingCampaigns.length };
   }, [campaigns, notes]);
 
+  // v3.16.0: força mudança de password ao 1º login após admin criar/resetar.
+  // userProfile.must_change_password fica TRUE depois da Edge Function
+  // admin-user-mgmt. O modal bloqueia toda a app até o utilizador definir
+  // uma password nova via supabase.auth.updateUser({password}).
+  const mustChangePassword = !!userProfile?.must_change_password;
+
   return (
     <div style={{ background: T.bg, color: T.ink, minHeight: '100vh', fontFamily: "'Geist', sans-serif" }}>
+      {mustChangePassword && (
+        <ForcePasswordChangeModal
+          userId={user?.id}
+          onChanged={async () => {
+            // Re-fetch profile para limpar mustChangePassword
+            const fresh = await upsertUserProfile(user.id, user.email);
+            setUserProfile(fresh);
+          }}
+        />
+      )}
       <style>{fonts}{`
         * { box-sizing: border-box; }
         :root { color-scheme: ${theme === 'dark' ? 'dark' : 'light'}; }
@@ -16920,6 +16838,9 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all'); // all | online | offline | admin | suspended
   const [now, setNow] = useState(Date.now());
+  // v3.16.0: criação/reset de utilizadores via Edge Function admin-user-mgmt
+  const [tempPwModal, setTempPwModal] = useState(null); // { email, tempPassword, action: 'create'|'reset' }
+  const [busyAction, setBusyAction] = useState(false);
 
   // Tick the clock every 15s for real-time online indicator
   useEffect(() => {
@@ -16964,6 +16885,70 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
   }), [enriched, filter]);
 
   const onlineCount = enriched.filter(u => u.online).length;
+
+  // v3.16.0: chamada autenticada à Edge Function admin-user-mgmt
+  const callAdminFn = useCallback(async (payload) => {
+    if (!supabase) throw new Error('Supabase não configurado');
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+    if (!accessToken) throw new Error('Sem sessão activa');
+    const fnUrl = `${SUPABASE_URL}/functions/v1/admin-user-mgmt`;
+    const res = await fetch(fnUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'apikey': SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify(payload),
+    });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+    return data;
+  }, []);
+
+  const handleCreateUser = async () => {
+    if (busyAction) return;
+    const email = prompt('Email do novo utilizador:\n(uma password temporária vai ser gerada e mostrada de seguida)');
+    if (!email || !email.trim()) return;
+    setBusyAction(true);
+    try {
+      const data = await callAdminFn({ action: 'create', email: email.trim() });
+      setTempPwModal({ email: data.email, tempPassword: data.tempPassword, action: 'create' });
+      await logActivity({
+        userId: currentUserId, userEmail: currentUserEmail,
+        action: 'create', resourceType: 'user', resourceName: data.email,
+        resourceId: data.userId,
+      });
+      refresh();
+    } catch (err) {
+      alert('Erro a criar utilizador: ' + err.message);
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  const handleResetPw = async (u) => {
+    if (busyAction) return;
+    if (!confirm(`Reset password de ${u.email}?\n\nUma password temporária vai ser gerada. No próximo login, o utilizador é obrigado a mudá-la.`)) return;
+    setBusyAction(true);
+    try {
+      const data = await callAdminFn({ action: 'reset', userId: u.user_id });
+      setTempPwModal({ email: u.email, tempPassword: data.tempPassword, action: 'reset' });
+      await logActivity({
+        userId: currentUserId, userEmail: currentUserEmail,
+        action: 'update', resourceType: 'user',
+        resourceId: u.user_id, resourceName: u.email,
+        metadata: { pw_reset: true },
+      });
+      refresh();
+    } catch (err) {
+      alert('Erro a fazer reset: ' + err.message);
+    } finally {
+      setBusyAction(false);
+    }
+  };
 
   const handleToggleAdmin = async (u) => {
     if (u.user_id === currentUserId) {
@@ -17026,22 +17011,38 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
         <AdminStatCard label="Suspensos" value={enriched.filter(u => u.suspended).length} accent={enriched.filter(u => u.suspended).length > 0 ? T.red : T.inkMute} />
       </div>
 
-      {/* Filters */}
-      <div style={{ display: 'flex', gap: 4, padding: 4, marginBottom: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content' }}>
-        {[
-          { id: 'all', l: 'Todos' },
-          { id: 'online', l: 'Online agora' },
-          { id: 'offline', l: 'Offline' },
-          { id: 'admin', l: 'Admins' },
-          { id: 'suspended', l: 'Suspensos' },
-        ].map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)} style={{
-            padding: '6px 12px', fontSize: 11, borderRadius: 4, border: 'none',
-            background: filter === f.id ? T.ink : 'transparent',
-            color: filter === f.id ? T.bg : T.inkSoft, cursor: 'pointer',
-            fontFamily: 'inherit',
-          }}>{f.l}</button>
-        ))}
+      {/* Filters + acção de criar utilizador (v3.16.0) */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content' }}>
+          {[
+            { id: 'all', l: 'Todos' },
+            { id: 'online', l: 'Online agora' },
+            { id: 'offline', l: 'Offline' },
+            { id: 'admin', l: 'Admins' },
+            { id: 'suspended', l: 'Suspensos' },
+          ].map(f => (
+            <button key={f.id} onClick={() => setFilter(f.id)} style={{
+              padding: '6px 12px', fontSize: 11, borderRadius: 4, border: 'none',
+              background: filter === f.id ? T.ink : 'transparent',
+              color: filter === f.id ? T.bg : T.inkSoft, cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}>{f.l}</button>
+          ))}
+        </div>
+        <button
+          onClick={handleCreateUser}
+          disabled={busyAction}
+          title="Cria um utilizador novo. Será gerada uma password temporária que tens de partilhar — no próximo login o utilizador é obrigado a mudá-la."
+          style={{
+            padding: '8px 14px', background: busyAction ? T.lineSoft : T.accent,
+            color: busyAction ? T.inkMute : '#fff',
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            cursor: busyAction ? 'wait' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}
+        >
+          <UserPlus size={12} /> {busyAction ? 'A criar…' : 'Criar utilizador'}
+        </button>
       </div>
 
       {/* User list */}
@@ -17059,15 +17060,27 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
               isLast={idx === filtered.length - 1}
               onToggleAdmin={() => handleToggleAdmin(u)}
               onToggleSuspend={() => handleToggleSuspend(u)}
+              onResetPw={() => handleResetPw(u)}
+              busyAction={busyAction}
             />
           ))}
         </div>
+      )}
+
+      {/* v3.16.0: Modal mostra a password temporária após criar/reset */}
+      {tempPwModal && (
+        <TempPasswordModal
+          email={tempPwModal.email}
+          tempPassword={tempPwModal.tempPassword}
+          action={tempPwModal.action}
+          onClose={() => setTempPwModal(null)}
+        />
       )}
     </div>
   );
 }
 
-function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend }) {
+function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend, onResetPw, busyAction }) {
   const lastSeen = user.last_seen_at ? new Date(user.last_seen_at) : null;
   const lastSeenText = !lastSeen ? 'nunca'
     : user.online ? 'online agora'
@@ -17138,7 +17151,18 @@ function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend }) {
 
       {/* Actions */}
       {!isCurrent && (
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {onResetPw && (
+            <button
+              onClick={onResetPw}
+              disabled={busyAction}
+              title="Gerar nova password temporária. O utilizador é obrigado a mudá-la no próximo login."
+              style={adminActionBtn(T.orange)}
+            >
+              <KeyRound size={11} />
+              Reset pw
+            </button>
+          )}
           <button
             onClick={onToggleSuspend}
             title={user.suspended ? 'Reativar' : 'Suspender'}
@@ -17171,12 +17195,205 @@ function adminActionBtn(color) {
   };
 }
 
+// v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
+// temporária gerada pela Edge Function. A password só aparece UMA vez —
+// admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// o ForcePasswordChangeModal força mudança.
+function TempPasswordModal({ email, tempPassword, action, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const isCreate = action === 'create';
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9000, padding: 20,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 28, maxWidth: 460, width: '100%',
+        boxShadow: '0 24px 60px -20px rgba(0,0,0,0.4)',
+      }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.green, textTransform: 'uppercase', marginBottom: 8 }}>
+          {isCreate ? 'Utilizador criado' : 'Password resetada'}
+        </div>
+        <h3 style={{ margin: '0 0 18px', fontSize: 18, fontWeight: 600, color: T.ink }}>
+          Password temporária gerada
+        </h3>
+        <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, marginBottom: 16 }}>
+          {isCreate
+            ? <>O utilizador <strong>{email}</strong> foi criado.</>
+            : <>A password de <strong>{email}</strong> foi resetada.</>}
+          {' '}Dá esta password ao utilizador. <strong>Não aparecerá outra vez</strong> — copia agora.
+          No próximo login, ele será obrigado a mudá-la.
+        </div>
+
+        <div style={{
+          padding: '14px 16px', background: T.bg, border: `1px dashed ${T.line}`,
+          borderRadius: 8, marginBottom: 16,
+          fontFamily: 'Geist Mono, monospace', fontSize: 16, fontWeight: 600,
+          color: T.ink, textAlign: 'center', letterSpacing: '0.05em',
+          userSelect: 'all',
+        }}>
+          {tempPassword}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handleCopy} style={{
+            flex: 1, padding: '10px 16px',
+            background: copied ? T.green : T.ink, color: T.bg,
+            border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500,
+            cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          }}>
+            {copied ? <><Check size={14} /> Copiado</> : <><Copy size={14} /> Copiar password</>}
+          </button>
+          <button onClick={onClose} style={{
+            padding: '10px 16px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 13,
+            cursor: 'pointer',
+          }}>
+            Fechar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminStatCard({ label, value, accent }) {
   return (
     <div style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
       <div className="mono" style={{ fontSize: 9, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase' }}>{label}</div>
       <div className="display" style={{ fontSize: 28, fontStyle: 'italic', lineHeight: 1, marginTop: 6, color: accent || T.ink }}>
         {value.toLocaleString('pt-PT')}
+      </div>
+    </div>
+  );
+}
+
+// v3.16.0: modal BLOQUEANTE mostrado quando user_profiles.must_change_password=true.
+// Aparece logo após login (com a temp password do admin) e força mudança antes
+// de permitir uso da app. Não dá para fechar com ESC nem clique fora.
+function ForcePasswordChangeModal({ userId, onChanged }) {
+  const [pw, setPw] = useState('');
+  const [pw2, setPw2] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError('');
+    if (pw.length < 8) { setError('Password tem de ter pelo menos 8 caracteres.'); return; }
+    if (pw !== pw2) { setError('As passwords não coincidem.'); return; }
+    if (!supabase) { setError('Supabase não configurado.'); return; }
+    setBusy(true);
+    try {
+      const { error: updErr } = await supabase.auth.updateUser({ password: pw });
+      if (updErr) throw updErr;
+      // Limpar flag no profile (a RLS policy "user_profiles update own must_change" permite)
+      const { error: profErr } = await supabase
+        .from('user_profiles')
+        .update({ must_change_password: false })
+        .eq('user_id', userId);
+      if (profErr) {
+        console.warn('[force-pw] flag clear failed:', profErr.message);
+        // Não bloqueante — a password foi mudada
+      }
+      await onChanged?.();
+    } catch (err) {
+      setError(err?.message || 'Não foi possível mudar a password.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.85)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9999, padding: 20,
+      backdropFilter: 'blur(4px)',
+    }}>
+      <div style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 32, maxWidth: 460, width: '100%',
+        boxShadow: '0 30px 80px -20px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 16, margin: '0 auto 18px',
+          background: T.accent, color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <KeyRound size={26} />
+        </div>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600, textAlign: 'center', color: T.ink }}>
+          Mudança de password obrigatória
+        </h2>
+        <p style={{ fontSize: 13, color: T.inkSoft, textAlign: 'center', marginTop: 10, marginBottom: 22, lineHeight: 1.5 }}>
+          O administrador atribuiu-te uma password temporária. Define agora a tua password definitiva para continuares.
+        </p>
+
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Nova password</div>
+          <input
+            type="password"
+            value={pw}
+            onChange={e => { setPw(e.target.value); setError(''); }}
+            onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+            autoComplete="new-password"
+            autoFocus
+            disabled={busy}
+            placeholder="Mínimo 8 caracteres"
+            style={authInputStyle(error)}
+          />
+        </label>
+        <label style={{ display: 'block', marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Confirmar nova password</div>
+          <input
+            type="password"
+            value={pw2}
+            onChange={e => { setPw2(e.target.value); setError(''); }}
+            onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+            autoComplete="new-password"
+            disabled={busy}
+            placeholder="Repete a password"
+            style={authInputStyle(error)}
+          />
+        </label>
+
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14,
+            padding: '8px 10px', background: '#FDECEA', color: '#A03028',
+            borderRadius: 6, fontSize: 12,
+          }}>
+            <AlertCircle size={12} /> {error}
+          </div>
+        )}
+
+        <button
+          onClick={submit}
+          disabled={busy || !pw || !pw2}
+          style={{
+            width: '100%', padding: '12px 18px',
+            background: (busy || !pw || !pw2) ? T.line : T.accent,
+            color: (busy || !pw || !pw2) ? T.inkMute : '#fff',
+            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 600,
+            cursor: (busy || !pw || !pw2) ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          }}
+        >
+          {busy ? 'A guardar…' : <><Check size={14} /> Definir password</>}
+        </button>
       </div>
     </div>
   );
