@@ -4802,7 +4802,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             cloudDataLoaded={cloudDataLoaded}
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
-          {view === 'sales' && isAdmin && <SalesView />}
+          {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
           {view === 'sales' && !isAdmin && (
             <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
               <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
@@ -5972,8 +5972,10 @@ function KpiCard({ label, value, subtitle, accent }) {
   );
 }
 
-// ── Sparkline ──────────────────────────────────────────────────────────
-function Sparkline({ data, width = 800, height = 80, accent }) {
+// ── Sparkline (with hover tooltip) ────────────────────────────────────
+function Sparkline({ data, width = 800, height = 100, accent, valueFormatter }) {
+  const svgRef = useRef(null);
+  const [hover, setHover] = useState(null); // { idx, x, y, d }
   if (!data || data.length < 2) return <div style={{ height, color: T.inkMute, fontSize: 11, textAlign: 'center', paddingTop: height / 2 - 6 }}>Sem dados</div>;
   const max = Math.max(...data.map(d => d.value));
   const min = Math.min(0, Math.min(...data.map(d => d.value)));
@@ -5983,17 +5985,57 @@ function Sparkline({ data, width = 800, height = 80, accent }) {
   const points = data.map((d, i) => `${i * stepX},${yFor(d.value)}`).join(' ');
   const areaPath = `M0,${height} L${points.split(' ').join(' L')} L${width},${height} Z`;
   const accentColor = accent || T.accent;
+  const gradId = useMemo(() => `sparkArea-${Math.random().toString(36).slice(2, 8)}`, []);
+
+  const onMove = (e) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * width;
+    const idx = Math.max(0, Math.min(data.length - 1, Math.round(relX / stepX)));
+    const d = data[idx];
+    setHover({ idx, x: idx * stepX, y: yFor(d.value), d });
+  };
+  const onLeave = () => setHover(null);
+
+  const fmt = valueFormatter || ((v) => Math.round(v).toLocaleString('pt-PT'));
+
   return (
-    <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
-      <defs>
-        <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={accentColor} stopOpacity="0.18" />
-          <stop offset="100%" stopColor={accentColor} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <path d={areaPath} fill="url(#sparkArea)" />
-      <polyline points={points} fill="none" stroke={accentColor} strokeWidth="1.5" />
-    </svg>
+    <div style={{ position: 'relative', width: '100%' }}>
+      <svg ref={svgRef} width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none"
+        style={{ display: 'block', cursor: 'crosshair' }}
+        onMouseMove={onMove} onMouseLeave={onLeave}>
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={accentColor} stopOpacity="0.18" />
+            <stop offset="100%" stopColor={accentColor} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <path d={areaPath} fill={`url(#${gradId})`} />
+        <polyline points={points} fill="none" stroke={accentColor} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        {hover && (
+          <g>
+            <line x1={hover.x} y1={0} x2={hover.x} y2={height} stroke={T.inkSoft} strokeWidth="0.5" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />
+            <circle cx={hover.x} cy={hover.y} r="3.5" fill={accentColor} stroke={T.bg} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+          </g>
+        )}
+      </svg>
+      {hover && (
+        <div style={{
+          position: 'absolute',
+          left: `${(hover.x / width) * 100}%`,
+          top: -8,
+          transform: hover.x > width * 0.7 ? 'translate(-100%, -100%)' : 'translate(-50%, -100%)',
+          background: T.ink, color: T.bg, padding: '6px 10px', borderRadius: 4,
+          fontSize: 11, lineHeight: 1.3, pointerEvents: 'none', whiteSpace: 'nowrap',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+          zIndex: 10,
+        }}>
+          <div style={{ opacity: 0.7, fontSize: 10 }}>{hover.d.date}</div>
+          <div style={{ fontWeight: 500 }}>{fmt(hover.d.value)}</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -6081,9 +6123,16 @@ function fmtNumberShort(n) {
 function fmtPctSigned(n) {
   return (n >= 0 ? '+' : '') + n.toFixed(1).replace('.', ',') + '%';
 }
+function daysBetween(fromIso, toIso) {
+  if (!fromIso || !toIso) return 0;
+  const a = new Date(fromIso).getTime();
+  const b = new Date(toIso).getTime();
+  if (isNaN(a) || isNaN(b)) return 0;
+  return Math.max(0, Math.round((b - a) / 86400000)) + 1;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
-function SalesView() {
+function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}) {
   const [snapshot, setSnapshot] = useState(null);
   const [loading, setLoading]   = useState(true);
   const [importing, setImporting] = useState(false);
@@ -6093,6 +6142,8 @@ function SalesView() {
   const [to, setTo]     = useState('');
   const [fam1Filter, setFam1Filter] = useState('all');
   const [drillPath, setDrillPath] = useState([]); // ex: ['TELECOMUNICACOES', 'TELEMOVEIS/ANDROID']
+  const [topMode, setTopMode] = useStoredState('sales.topMode', 'units'); // 'units' | 'value' | 'margin'
+  const [stockSort, setStockSort] = useStoredState('sales.stockSort', 'shortage'); // 'shortage' | 'excess' | 'sold'
 
   useEffect(() => {
     let alive = true;
@@ -6230,6 +6281,90 @@ function SalesView() {
     setDrillPath(p => [...p, item.key]);
   };
 
+  // ── Melhores dias (por receita e por margem) ────────────────────────
+  const bestDays = useMemo(() => {
+    const byDate = new Map();
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      const entry = byDate.get(r.date) || { date: r.date, revenue: 0, margin: 0, qty: 0 };
+      entry.revenue += r.revenue;
+      entry.margin  += r.revenue - r.qty * r.pmp;
+      entry.qty     += r.qty;
+      byDate.set(r.date, entry);
+    }
+    const arr = Array.from(byDate.values());
+    if (!arr.length) return null;
+    const byRev    = [...arr].sort((a, b) => b.revenue - a.revenue);
+    const byMargin = [...arr].sort((a, b) => b.margin  - a.margin);
+    return {
+      topRevenue: byRev[0],
+      topMargin:  byMargin[0],
+      worstRevenue: byRev[byRev.length - 1],
+    };
+  }, [filteredRows]);
+
+  // ── Top produtos (por unidades, valor, margem) ──────────────────────
+  const topProducts = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const key = r.ean;
+      const e = map.get(key) || { ean: r.ean, name: r.name, fam1: r.fam1, qty: 0, revenue: 0, margin: 0 };
+      e.qty     += r.qty;
+      e.revenue += r.revenue;
+      e.margin  += r.revenue - r.qty * r.pmp;
+      map.set(key, e);
+    }
+    const arr = Array.from(map.values());
+    const byUnits  = [...arr].sort((a, b) => b.qty - a.qty).slice(0, 20);
+    const byValue  = [...arr].sort((a, b) => b.revenue - a.revenue).slice(0, 20);
+    const byMargin = [...arr].sort((a, b) => b.margin - a.margin).slice(0, 20);
+    return { units: byUnits, value: byValue, margin: byMargin };
+  }, [filteredRows]);
+
+  // ── Stock vs Vendas (cruza vendas com stockPO2/PO3) ─────────────────
+  const stockVsSales = useMemo(() => {
+    if (!filteredRows.length) return [];
+    const idxPO2 = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
+    const idxPO3 = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
+    const map = new Map();
+    for (const r of filteredRows) {
+      if (r.qty <= 0) continue; // só vendas
+      const key = r.ean;
+      const e = map.get(key) || { ean: r.ean, name: r.name, fam1: r.fam1, qtySold: 0, revenue: 0 };
+      e.qtySold += r.qty;
+      e.revenue += r.revenue;
+      map.set(key, e);
+    }
+    const norm = (ean) => String(ean || '').trim();
+    const result = [];
+    for (const e of map.values()) {
+      const k = norm(e.ean);
+      const stockPO2 = idxPO2.index.get(k) ?? 0;
+      const stockPO3 = idxPO3.index.get(k) ?? 0;
+      const stockTotal = stockPO2 + stockPO3;
+      // Coverage = dias estimados que o stock cobre ao ritmo de vendas actual
+      const periodDays = filteredRows.length > 0 && from && to ? Math.max(1, daysBetween(from, to)) : 30;
+      const dailyAvg = e.qtySold / periodDays;
+      const coverageDays = dailyAvg > 0 ? stockTotal / dailyAvg : Infinity;
+      let flag = null;
+      if (stockTotal === 0 && e.qtySold > 0) flag = 'rupture';
+      else if (coverageDays < 7 && e.qtySold >= 3) flag = 'low';
+      else if (coverageDays > 90 && stockTotal > 5) flag = 'excess';
+      result.push({ ...e, stockPO2, stockPO3, stockTotal, coverageDays, flag });
+    }
+    // Ordenar conforme stockSort
+    if (stockSort === 'shortage') {
+      // Mais críticos primeiro: rupture > low > resto, dentro de cada por vendas DESC
+      const order = { rupture: 0, low: 1, null: 2, excess: 3 };
+      result.sort((a, b) => (order[a.flag] - order[b.flag]) || (b.qtySold - a.qtySold));
+    } else if (stockSort === 'excess') {
+      result.sort((a, b) => (b.coverageDays === Infinity ? Number.MAX_SAFE_INTEGER : b.coverageDays) - (a.coverageDays === Infinity ? Number.MAX_SAFE_INTEGER : a.coverageDays));
+    } else {
+      result.sort((a, b) => b.qtySold - a.qtySold);
+    }
+    return result.slice(0, 50);
+  }, [filteredRows, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, from, to, stockSort]);
+
   // ─── render ──────────────────────────────────────────────────────────
   if (loading) {
     return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>A carregar…</div>;
@@ -6304,10 +6439,12 @@ function SalesView() {
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: `1px solid ${T.line}` }}>
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: `1px solid ${T.line}`, overflowX: 'auto' }}>
         {[
           { id: 'overview', label: 'Visão Geral' },
+          { id: 'products', label: 'Top Produtos' },
           { id: 'top',      label: 'Top Famílias' },
+          { id: 'stock',    label: 'Stock vs Vendas' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             padding: '10px 18px', fontSize: 12, fontWeight: 500,
@@ -6329,15 +6466,24 @@ function SalesView() {
             <KpiCard label="Ticket Médio" value={fmtEur2(kpis.ticket)} subtitle={`${kpis.txCount.toLocaleString('pt-PT')} transações`} />
           </div>
 
-          {/* Sparkline */}
+          {/* Sparkline (com tooltip ao hover) */}
           <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
-            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Receita diária</div>
-            <Sparkline data={dailySeries} height={120} />
+            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Receita diária <span style={{ color: T.inkSoft, textTransform: 'none', letterSpacing: 0, fontSize: 10 }}>· passa o rato por cima</span></div>
+            <Sparkline data={dailySeries} height={120} valueFormatter={fmtEur} />
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.inkMute, marginTop: 6 }}>
               <span>{dailySeries[0]?.date || ''}</span>
               <span>{dailySeries[dailySeries.length - 1]?.date || ''}</span>
             </div>
           </div>
+
+          {/* Melhores / piores dias */}
+          {bestDays && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+              <BestDayCard label="Melhor dia (vendas)" date={bestDays.topRevenue.date} value={fmtEur(bestDays.topRevenue.revenue)} sub={`${bestDays.topRevenue.qty} unidades`} accent={T.green} />
+              <BestDayCard label="Melhor dia (margem)" date={bestDays.topMargin.date} value={fmtEur(bestDays.topMargin.margin)} sub={fmtEur(bestDays.topMargin.revenue) + ' em vendas'} accent={T.accent} />
+              <BestDayCard label="Pior dia (vendas)" date={bestDays.worstRevenue.date} value={fmtEur(bestDays.worstRevenue.revenue)} sub={`${bestDays.worstRevenue.qty} unidades`} accent={T.orange} />
+            </div>
+          )}
 
           {/* Donut + Top 5 famílias */}
           <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 24, padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
@@ -6363,6 +6509,134 @@ function SalesView() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {tab === 'products' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Toggle Unidades / Valor / Margem */}
+          <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content' }}>
+            {[
+              { id: 'units',  l: 'Unidades' },
+              { id: 'value',  l: 'Valor' },
+              { id: 'margin', l: 'Margem €' },
+            ].map(m => (
+              <button key={m.id} onClick={() => setTopMode(m.id)} style={{
+                padding: '6px 14px', fontSize: 11, borderRadius: 4, border: 'none',
+                background: topMode === m.id ? T.ink : 'transparent',
+                color: topMode === m.id ? T.bg : T.inkSoft, cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}>{m.l}</button>
+            ))}
+          </div>
+
+          {/* Top 20 */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: T.bg, color: T.inkMute }}>
+                  <th style={{ ...salesTh(), width: 32, textAlign: 'right' }}>#</th>
+                  <th style={salesTh()}>EAN</th>
+                  <th style={salesTh()}>Produto</th>
+                  <th style={salesTh()}>Família</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Margem</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(topProducts[topMode] || []).map((p, i) => {
+                  const maxVal = topMode === 'units' ? topProducts.units[0]?.qty : topMode === 'value' ? topProducts.value[0]?.revenue : topProducts.margin[0]?.margin;
+                  const cur = topMode === 'units' ? p.qty : topMode === 'value' ? p.revenue : p.margin;
+                  const pct = maxVal > 0 ? (cur / maxVal * 100) : 0;
+                  return (
+                    <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}`, position: 'relative' }}>
+                      <td style={{ ...salesTd(), textAlign: 'right', color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</td>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                      <td style={{ ...salesTd(), position: 'relative' }}>
+                        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: T.accent + '12', pointerEvents: 'none' }} />
+                        <span style={{ position: 'relative' }}>{p.name}</span>
+                      </td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{p.fam1}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: topMode === 'units' ? 600 : 400 }}>{p.qty.toLocaleString('pt-PT')}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: topMode === 'value' ? 600 : 400 }}>{fmtEur(p.revenue)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: p.margin >= 0 ? T.green : T.red, fontWeight: topMode === 'margin' ? 600 : 400 }}>{fmtEur(p.margin)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'stock' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Toggle ordering */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+              {[
+                { id: 'shortage', l: '🔴 Ruptura/Baixo' },
+                { id: 'excess',   l: '🟠 Excesso' },
+                { id: 'sold',     l: 'Mais vendidos' },
+              ].map(m => (
+                <button key={m.id} onClick={() => setStockSort(m.id)} style={{
+                  padding: '6px 12px', fontSize: 11, borderRadius: 4, border: 'none',
+                  background: stockSort === m.id ? T.ink : 'transparent',
+                  color: stockSort === m.id ? T.bg : T.inkSoft, cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}>{m.l}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute }}>
+              Stock PO2: {(stockRowsPO2 || []).length.toLocaleString('pt-PT')} · PO3: {(stockRowsPO3 || []).length.toLocaleString('pt-PT')} refs
+            </div>
+          </div>
+
+          {(stockRowsPO2 || []).length === 0 && (stockRowsPO3 || []).length === 0 ? (
+            <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, border: `1px dashed ${T.line}`, borderRadius: 6, fontSize: 13 }}>
+              Sem stock importado. Vai ao menu <strong>Stock</strong> e faz upload do ficheiro PO2 e/ou PO3 primeiro.
+            </div>
+          ) : (
+            <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>Estado</th>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Vendido</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>PO2</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>PO3</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Total stock</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Cobertura</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stockVsSales.map(it => {
+                    const flagColor = it.flag === 'rupture' ? T.red : it.flag === 'low' ? T.orange : it.flag === 'excess' ? '#8064A2' : T.inkMute;
+                    const flagLabel = it.flag === 'rupture' ? '🔴 RUPTURA' : it.flag === 'low' ? '🟠 BAIXO' : it.flag === 'excess' ? '🟣 EXCESSO' : 'OK';
+                    return (
+                      <tr key={it.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                        <td style={{ ...salesTd(), color: flagColor, fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap' }}>{flagLabel}</td>
+                        <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                        <td style={salesTd()}>{it.name}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.qtySold.toLocaleString('pt-PT')}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.stockPO2}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.stockPO3}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{it.stockTotal}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: it.coverageDays < 7 ? T.red : it.coverageDays > 90 ? '#8064A2' : T.inkSoft }}>
+                          {it.coverageDays === Infinity ? '∞' : `${Math.round(it.coverageDays)}d`}
+                        </td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.revenue)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -6431,6 +6705,19 @@ const salesFilterInput = () => ({
 });
 const salesTh = () => ({ padding: '10px 14px', textAlign: 'left', fontWeight: 500, fontSize: 11 });
 const salesTd = () => ({ padding: '8px 14px' });
+
+function BestDayCard({ label, date, value, sub, accent }) {
+  return (
+    <div style={{ padding: '14px 18px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${accent || T.accent}` }}>
+      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 500, color: accent || T.ink, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+      <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 4, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ color: T.ink, fontFamily: 'monospace' }}>{date}</span>
+        <span>{sub}</span>
+      </div>
+    </div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Campaigns — Store Layout Planner
