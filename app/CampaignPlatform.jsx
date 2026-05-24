@@ -361,6 +361,100 @@ function toIsoDate(ddmmyyyy) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// FNAC counter-sales parser — "Vendas de artigos detalhados ao mostrador"
+// 10 colunas: EAN, Descrição, Unidades, PVP Total, Funcionario, Nome, Data,
+// Familia 1, Familia 2, Familia 3.
+// Famílias com SEGUROS = seguro base. SEGUROS ADDON = PP/extensão.
+// Funcionario 994 = vendas anónimas (Nome vazio).
+// ─────────────────────────────────────────────────────────────────────────
+function parseCounterSalesExcel(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        const sheetName = wb.SheetNames.find(n => /vendas/i.test(n)) || wb.SheetNames[0];
+        if (!sheetName) return reject(new Error('Sem sheet no ficheiro'));
+        const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, blankrows: false, defval: null });
+        if (aoa.length < 5) return reject(new Error('Ficheiro vazio ou formato inesperado'));
+
+        const metaLine2 = (aoa[1] || []).filter(Boolean).join(' ');
+        const metaLine3 = (aoa[2] || []).filter(Boolean).join(' ');
+        const periodMatch = metaLine2.match(/Data:\s*(\d{2}-\d{2}-\d{4})\s*at[ée]\s*(\d{2}-\d{2}-\d{4})/i);
+        const storeMatch  = metaLine3.match(/Loja:\s*(.+?)(?:\s*(?:Valor|Unidades|$))/i);
+        const dateFrom = periodMatch ? toIsoDate(periodMatch[1]) : null;
+        const dateTo   = periodMatch ? toIsoDate(periodMatch[2]) : null;
+        const storeName = storeMatch ? storeMatch[1].trim() : '—';
+
+        const headers = (aoa[3] || []).map(h => String(h || '').trim().toLowerCase());
+        const idx = (patterns) => headers.findIndex(h => patterns.some(p => h.includes(p)));
+        const cEan   = idx(['ean']);
+        const cName  = idx(['descri']);
+        const cQty   = idx(['unidades', 'unid']);
+        const cPvp   = idx(['pvp']);
+        const cFunc  = idx(['funcion']);
+        const cWho   = idx(['nome']);
+        const cDate  = idx(['data']);
+        const cFam1  = idx(['famila 1', 'família 1', 'familia 1']);
+        const cFam2  = idx(['famila 2', 'família 2', 'familia 2']);
+        const cFam3  = idx(['famila 3', 'família 3', 'familia 3']);
+
+        if (cEan < 0 || cName < 0 || cQty < 0 || cPvp < 0 || cFunc < 0) {
+          return reject(new Error('Cabeçalho não tem as colunas esperadas.'));
+        }
+
+        const rows = [];
+        for (let r = 4; r < aoa.length; r++) {
+          const row = aoa[r];
+          if (!row) continue;
+          const ean = row[cEan];
+          if (ean == null || ean === '') continue;
+          const qty   = Number(row[cQty]) || 0;
+          const value = Number(row[cPvp]) || 0;
+          const fam1  = cFam1 >= 0 ? String(row[cFam1] || '').trim() : '';
+          // Tipo: produto / seguro / pp
+          let type = 'product';
+          if (/SEGUROS\s+ADDON/i.test(fam1) || /^PP\s/i.test(String(row[cName] || ''))) type = 'pp';
+          else if (/^SEGUROS$/i.test(fam1)) type = 'insurance';
+          const funcNum = row[cFunc];
+          const who = cWho >= 0 ? String(row[cWho] || '').trim() : '';
+          const isAnonymous = !who || String(funcNum) === '994';
+          let dateIso = null;
+          const rawDate = cDate >= 0 ? row[cDate] : null;
+          if (rawDate instanceof Date) dateIso = rawDate.toISOString().slice(0, 10);
+          else if (typeof rawDate === 'string' && rawDate.length >= 10) dateIso = rawDate.slice(0, 10);
+          rows.push({
+            ean: String(ean),
+            name: String(row[cName] || '').trim(),
+            qty,
+            value,
+            funcNum: funcNum != null ? String(funcNum) : '',
+            who: isAnonymous ? '— Anónimo' : who,
+            isAnonymous,
+            date: dateIso,
+            fam1,
+            fam2: cFam2 >= 0 ? String(row[cFam2] || '').trim() : '',
+            fam3: cFam3 >= 0 ? String(row[cFam3] || '').trim() : '',
+            type,
+          });
+        }
+
+        const importedAt = new Date().toISOString();
+        const id = `counter-${storeName.toLowerCase().replace(/\s+/g, '-')}-${importedAt.replace(/[:.]/g, '')}`;
+        resolve({
+          id, store: storeName, filename: file.name,
+          dateFrom, dateTo, importedAt, rowsCount: rows.length, rows,
+        });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // localStorage helpers — keep tight and safe (preferences, theme, light state)
 // ─────────────────────────────────────────────────────────────────────────
 const STORE_PREFIX = 'dd_';
@@ -457,11 +551,12 @@ function useStoredState(key, defaultValue) {
 //        + "zone_memory" store (keyed by ean) — remembers where each EAN was assigned
 // ─────────────────────────────────────────────────────────────────────────
 const IDB_NAME = 'dd_app';
-const IDB_VERSION = 3; // v3.20.0: added sales_snapshots store
+const IDB_VERSION = 4; // v3.20.3: added counter_sales_snapshots store
 const IDB_STORE = 'campaigns';
 const IDB_STORE_PERIODS = 'periods';
 const IDB_STORE_MEMORY = 'zone_memory';
 const IDB_STORE_SALES = 'sales_snapshots';
+const IDB_STORE_COUNTER_SALES = 'counter_sales_snapshots';
 
 let _idbPromise = null;
 function idbOpen() {
@@ -484,6 +579,12 @@ function idbOpen() {
       // 1 doc por upload; isActive: true marca o que aparece na vista.
       if (!db.objectStoreNames.contains(IDB_STORE_SALES)) {
         const store = db.createObjectStore(IDB_STORE_SALES, { keyPath: 'id' });
+        store.createIndex('isActive', 'isActive');
+      }
+      // v3.20.3: vendas ao mostrador (com colaborador). Estrutura igual ao sales,
+      // mas com campos diferentes: funcionario, name, sem PMP, etc.
+      if (!db.objectStoreNames.contains(IDB_STORE_COUNTER_SALES)) {
+        const store = db.createObjectStore(IDB_STORE_COUNTER_SALES, { keyPath: 'id' });
         store.createIndex('isActive', 'isActive');
       }
     };
@@ -675,6 +776,52 @@ async function idbDeleteSalesSnapshot(id) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE_SALES, 'readwrite');
     tx.objectStore(IDB_STORE_SALES).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ─── Counter sales snapshots store (v3.20.3) ───────────────────────────
+// Vendas ao mostrador (atribuídas a colaboradores).
+// Doc: { id, store, filename, dateFrom, dateTo, importedAt, rowsCount, rows, isActive }
+async function idbPutCounterSalesSnapshot(snap) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_COUNTER_SALES, 'readwrite');
+    const store = tx.objectStore(IDB_STORE_COUNTER_SALES);
+    const req = store.openCursor();
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        if (cursor.value.isActive) cursor.update({ ...cursor.value, isActive: false });
+        cursor.continue();
+      } else {
+        store.put({ ...snap, isActive: true });
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbGetActiveCounterSalesSnapshot() {
+  try {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_COUNTER_SALES, 'readonly');
+      const req = tx.objectStore(IDB_STORE_COUNTER_SALES).getAll();
+      req.onsuccess = () => {
+        const all = req.result || [];
+        resolve(all.find(s => s.isActive) || all[all.length - 1] || null);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return null; }
+}
+async function idbDeleteCounterSalesSnapshot(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_COUNTER_SALES, 'readwrite');
+    tx.objectStore(IDB_STORE_COUNTER_SALES).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -6288,6 +6435,13 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [priceRange, setPriceRange] = useState('all'); // all | <10 | 10-50 | 50-200 | >200
   const [marginCat, setMarginCat] = useState('all');  // all | profit | breakeven | loss
   const [timeView, setTimeView] = useStoredState('sales.timeView', 'heatmap'); // heatmap | hour | monthly | forecast
+  // v3.20.3: counter sales (vendas ao mostrador)
+  const [counterSnap, setCounterSnap] = useState(null);
+  const [counterImporting, setCounterImporting] = useState(false);
+  const [counterError, setCounterError] = useState(null);
+  const [teamFrom, setTeamFrom] = useState('');
+  const [teamTo, setTeamTo] = useState('');
+  const [selectedCollab, setSelectedCollab] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -6327,6 +6481,146 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     setSnapshot(null);
     setFrom(''); setTo('');
   };
+
+  // ── Counter sales (Equipa) ───────────────────────────────────────────
+  useEffect(() => {
+    let alive = true;
+    idbGetActiveCounterSalesSnapshot().then(s => {
+      if (!alive) return;
+      setCounterSnap(s);
+      if (s) {
+        setTeamFrom(s.dateFrom || '');
+        setTeamTo(s.dateTo || '');
+      }
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const handleCounterFile = async (file) => {
+    setCounterImporting(true);
+    setCounterError(null);
+    try {
+      const snap = await parseCounterSalesExcel(file);
+      await idbPutCounterSalesSnapshot(snap);
+      setCounterSnap(snap);
+      setTeamFrom(snap.dateFrom || '');
+      setTeamTo(snap.dateTo || '');
+      setSelectedCollab(null);
+    } catch (err) {
+      setCounterError(err.message || String(err));
+    } finally {
+      setCounterImporting(false);
+    }
+  };
+
+  const handleCounterClear = async () => {
+    if (!counterSnap || !confirm('Apagar o snapshot de vendas ao mostrador?')) return;
+    await idbDeleteCounterSalesSnapshot(counterSnap.id);
+    setCounterSnap(null);
+    setTeamFrom(''); setTeamTo(''); setSelectedCollab(null);
+  };
+
+  const counterFiltered = useMemo(() => {
+    if (!counterSnap) return [];
+    return counterSnap.rows.filter(r => {
+      if (teamFrom && r.date && r.date < teamFrom) return false;
+      if (teamTo   && r.date && r.date > teamTo)   return false;
+      return true;
+    });
+  }, [counterSnap, teamFrom, teamTo]);
+
+  const teamKpis = useMemo(() => {
+    let totalValue = 0, totalQty = 0;
+    let prodValue = 0, prodQty = 0;
+    let insValue = 0, insQty = 0;
+    let ppValue = 0, ppQty = 0;
+    let anonValue = 0, anonQty = 0;
+    for (const r of counterFiltered) {
+      totalValue += r.value; totalQty += r.qty;
+      if (r.isAnonymous) { anonValue += r.value; anonQty += r.qty; }
+      if (r.type === 'product') { prodValue += r.value; prodQty += r.qty; }
+      else if (r.type === 'insurance') { insValue += r.value; insQty += r.qty; }
+      else if (r.type === 'pp') { ppValue += r.value; ppQty += r.qty; }
+    }
+    // Taxa de anexação aproximada: PPs+Seguros / (produtos elegíveis)
+    // Heurística simples: ratio (insQty+ppQty) / prodQty
+    const attachRate = prodQty > 0 ? ((insQty + ppQty) / prodQty * 100) : 0;
+    const anonPct = totalValue > 0 ? (anonValue / totalValue * 100) : 0;
+    return { totalValue, totalQty, prodValue, prodQty, insValue, insQty, ppValue, ppQty, anonValue, anonQty, attachRate, anonPct };
+  }, [counterFiltered]);
+
+  const teamRanking = useMemo(() => {
+    const map = new Map();
+    for (const r of counterFiltered) {
+      if (r.isAnonymous) continue;
+      const key = r.funcNum + '|' + r.who;
+      const e = map.get(key) || {
+        funcNum: r.funcNum, who: r.who,
+        lines: 0, qty: 0, value: 0,
+        prodQty: 0, prodValue: 0,
+        insQty: 0, insValue: 0,
+        ppQty: 0, ppValue: 0,
+        famCount: new Map(),
+      };
+      e.lines += 1; e.qty += r.qty; e.value += r.value;
+      if (r.type === 'product')   { e.prodQty += r.qty; e.prodValue += r.value; }
+      else if (r.type === 'insurance') { e.insQty += r.qty; e.insValue += r.value; }
+      else if (r.type === 'pp')   { e.ppQty += r.qty; e.ppValue += r.value; }
+      if (r.fam1) e.famCount.set(r.fam1, (e.famCount.get(r.fam1) || 0) + r.qty);
+      map.set(key, e);
+    }
+    const arr = Array.from(map.values()).map(e => {
+      const topFam = Array.from(e.famCount.entries()).sort((a, b) => b[1] - a[1])[0];
+      return {
+        ...e,
+        attachRate: e.prodQty > 0 ? ((e.insQty + e.ppQty) / e.prodQty * 100) : 0,
+        topFam: topFam ? topFam[0] : '—',
+      };
+    });
+    arr.sort((a, b) => b.value - a.value);
+    return arr;
+  }, [counterFiltered]);
+
+  // Top tipos de seguros vendidos
+  const insuranceTypes = useMemo(() => {
+    const map = new Map();
+    for (const r of counterFiltered) {
+      if (r.type !== 'insurance' && r.type !== 'pp') continue;
+      const e = map.get(r.name) || { name: r.name, type: r.type, qty: 0, value: 0 };
+      e.qty += r.qty; e.value += r.value;
+      map.set(r.name, e);
+    }
+    return Array.from(map.values()).sort((a, b) => b.qty - a.qty).slice(0, 15);
+  }, [counterFiltered]);
+
+  // Drill-down do colaborador seleccionado
+  const collabDetail = useMemo(() => {
+    if (!selectedCollab) return null;
+    const myRows = counterFiltered.filter(r => r.funcNum === selectedCollab.funcNum && r.who === selectedCollab.who);
+    // Top produtos
+    const prodMap = new Map();
+    for (const r of myRows) {
+      const e = prodMap.get(r.ean) || { ean: r.ean, name: r.name, qty: 0, value: 0, type: r.type };
+      e.qty += r.qty; e.value += r.value;
+      prodMap.set(r.ean, e);
+    }
+    const topProds = Array.from(prodMap.values()).sort((a, b) => b.value - a.value).slice(0, 10);
+    // Daily
+    const dayMap = new Map();
+    for (const r of myRows) {
+      if (!r.date) continue;
+      dayMap.set(r.date, (dayMap.get(r.date) || 0) + r.value);
+    }
+    const daily = Array.from(dayMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, value }));
+    // Famílias
+    const famMap = new Map();
+    for (const r of myRows) {
+      const k = r.fam1 || '—';
+      famMap.set(k, (famMap.get(k) || 0) + r.value);
+    }
+    const famArr = Array.from(famMap.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+    return { rows: myRows, topProds, daily, famArr };
+  }, [selectedCollab, counterFiltered]);
 
   // ── Filtragem global (date range + família 1 + POS + price + margem) ─
   const filteredRows = useMemo(() => {
@@ -6903,6 +7197,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           { id: 'pos',      label: 'POS' },
           { id: 'basket',   label: 'Cestas' },
           { id: 'stock',    label: 'Stock & Devoluções' },
+          { id: 'team',     label: 'Equipa' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             padding: '10px 18px', fontSize: 12, fontWeight: 500,
@@ -7377,6 +7672,212 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {tab === 'team' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {!counterSnap ? (
+            <div>
+              <div style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, color: T.inkSoft, marginBottom: 16 }}>
+                Esta aba usa um <strong>ficheiro separado</strong>: "Vendas de artigos detalhados ao mostrador" do FNAC. Inclui colaborador, produtos, seguros e PPs.
+              </div>
+              <DropZone
+                label={counterImporting ? 'A processar…' : "Arrasta o Excel 'Vendas ao mostrador'"}
+                hint="aceita .xlsx — colunas EAN, Descrição, Unidades, PVP Total, Funcionário, Nome, Data, Famílias 1-3"
+                accept=".xlsx,.xls"
+                onFile={handleCounterFile}
+                icon={Users}
+              />
+              {counterError && (
+                <div style={{ marginTop: 16, padding: 14, background: T.red + '15', border: `1px solid ${T.red}40`, borderRadius: 6, fontSize: 12, color: T.red }}>
+                  Erro: {counterError}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* Meta bar */}
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '10px 14px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, color: T.inkSoft, flexWrap: 'wrap' }}>
+                <strong style={{ color: T.ink }}>{counterSnap.store}</strong>
+                <span>·</span>
+                <span>{counterSnap.dateFrom} → {counterSnap.dateTo}</span>
+                <span>·</span>
+                <span>{counterSnap.rowsCount.toLocaleString('pt-PT')} linhas</span>
+                <span style={{ flex: 1 }} />
+                <label style={{ cursor: 'pointer', padding: '5px 10px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                  <Upload size={10} /> Substituir
+                  <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleCounterFile(f); e.target.value = ''; }} />
+                </label>
+                <button onClick={handleCounterClear} style={{ padding: '5px 10px', background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <X size={10} /> Apagar
+                </button>
+              </div>
+
+              {/* Filtros próprios desta aba */}
+              <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>De</span>
+                  <input type="date" value={teamFrom} min={counterSnap.dateFrom || ''} max={counterSnap.dateTo || ''} onChange={e => setTeamFrom(e.target.value)} style={salesFilterInput()} />
+                </label>
+                <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Até</span>
+                  <input type="date" value={teamTo} min={counterSnap.dateFrom || ''} max={counterSnap.dateTo || ''} onChange={e => setTeamTo(e.target.value)} style={salesFilterInput()} />
+                </label>
+                <div style={{ flex: 1 }} />
+                <div style={{ fontSize: 11, color: T.inkMute, alignSelf: 'flex-end' }}>{counterFiltered.length.toLocaleString('pt-PT')} linhas · {teamRanking.length} colaboradores</div>
+              </div>
+
+              {/* KPIs */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                <KpiCard label="Total vendas" value={fmtEur(teamKpis.totalValue)} subtitle={`${teamKpis.totalQty.toLocaleString('pt-PT')} unidades`} />
+                <KpiCard label="Produtos" value={fmtEur(teamKpis.prodValue)} subtitle={`${teamKpis.prodQty.toLocaleString('pt-PT')} unid.`} accent={T.ink} />
+                <KpiCard label="Seguros base" value={fmtEur(teamKpis.insValue)} subtitle={`${teamKpis.insQty} contratos`} accent="#5B9BD5" />
+                <KpiCard label="Planos Proteção" value={fmtEur(teamKpis.ppValue)} subtitle={`${teamKpis.ppQty} PPs`} accent={T.green} />
+                <KpiCard label="Taxa anexação" value={teamKpis.attachRate.toFixed(1).replace('.', ',') + '%'} subtitle="(Seg+PP) ÷ produtos" accent={teamKpis.attachRate >= 30 ? T.green : teamKpis.attachRate >= 15 ? T.orange : T.red} />
+                <KpiCard label="Vendas anónimas" value={teamKpis.anonPct.toFixed(1).replace('.', ',') + '%'} subtitle={fmtEur(teamKpis.anonValue) + ' s/ colaborador'} accent={teamKpis.anonPct > 20 ? T.orange : T.inkSoft} />
+              </div>
+
+              {/* Ranking colaboradores */}
+              <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                  Ranking colaboradores ({teamRanking.length})
+                </div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: T.bg, color: T.inkMute }}>
+                      <th style={{ ...salesTh(), width: 32, textAlign: 'right' }}>#</th>
+                      <th style={salesTh()}>Colaborador</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Linhas</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Unidades</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Vendas €</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Seguros</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>PPs</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Anexação %</th>
+                      <th style={salesTh()}>Top família</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {teamRanking.map((c, i) => {
+                      const maxValue = teamRanking[0]?.value || 1;
+                      const pct = (c.value / maxValue) * 100;
+                      const isSelected = selectedCollab && selectedCollab.funcNum === c.funcNum && selectedCollab.who === c.who;
+                      return (
+                        <tr key={c.funcNum + '|' + c.who}
+                          onClick={() => setSelectedCollab(isSelected ? null : { funcNum: c.funcNum, who: c.who })}
+                          style={{ borderTop: `1px solid ${T.lineSoft}`, cursor: 'pointer', background: isSelected ? T.accent + '15' : 'transparent' }}>
+                          <td style={{ ...salesTd(), textAlign: 'right', color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</td>
+                          <td style={salesTd()}>
+                            <div style={{ fontWeight: 500 }}>{c.who}</div>
+                            <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {c.funcNum}</div>
+                          </td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.lines}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.qty.toLocaleString('pt-PT')}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', position: 'relative' }}>
+                            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: T.accent + '14', pointerEvents: 'none' }} />
+                            <span style={{ position: 'relative', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(c.value)}</span>
+                          </td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#5B9BD5' }}>{c.insQty}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.green, fontWeight: 500 }}>{c.ppQty}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: c.attachRate >= 30 ? T.green : c.attachRate >= 15 ? T.orange : T.red }}>{c.attachRate.toFixed(1)}%</td>
+                          <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{c.topFam}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Detalhe do colaborador seleccionado */}
+              {selectedCollab && collabDetail && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${T.accent}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Detalhe</div>
+                      <div style={{ fontSize: 18, fontWeight: 500 }}>{selectedCollab.who} <span style={{ color: T.inkMute, fontSize: 12, fontFamily: 'monospace', marginLeft: 8 }}>Func. {selectedCollab.funcNum}</span></div>
+                    </div>
+                    <button onClick={() => setSelectedCollab(null)} style={{ padding: '5px 10px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>✕ Fechar</button>
+                  </div>
+                  {/* Sparkline */}
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Vendas diárias</div>
+                    <Sparkline data={collabDetail.daily} height={90} valueFormatter={fmtEur} />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                    {/* Top produtos */}
+                    <div>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Top 10 produtos vendidos</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {collabDetail.topProds.map(p => {
+                          const tag = p.type === 'pp' ? { l: 'PP', c: T.green } : p.type === 'insurance' ? { l: 'SEG', c: '#5B9BD5' } : null;
+                          return (
+                            <div key={p.ean} style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', gap: 8, padding: '6px 8px', background: T.bg, borderRadius: 4, fontSize: 11, alignItems: 'center' }}>
+                              {tag ? <span style={{ padding: '1px 6px', borderRadius: 3, background: tag.c + '22', color: tag.c, fontSize: 9, fontWeight: 600 }}>{tag.l}</span> : <span style={{ width: 24 }} />}
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                              <span style={{ color: T.inkSoft, fontVariantNumeric: 'tabular-nums' }}>{p.qty}</span>
+                              <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(p.value)}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {/* Famílias */}
+                    <div>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Famílias vendidas</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {collabDetail.famArr.slice(0, 8).map(f => {
+                          const totalCollab = collabDetail.famArr.reduce((s, x) => s + x.value, 0);
+                          const pct = totalCollab > 0 ? (f.value / totalCollab * 100) : 0;
+                          return (
+                            <div key={f.label} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, padding: '4px 0', fontSize: 11 }}>
+                              <div>
+                                <div>{f.label}</div>
+                                <div style={{ height: 3, background: T.lineSoft, borderRadius: 2, marginTop: 4 }}>
+                                  <div style={{ height: '100%', width: `${pct}%`, background: T.accent, borderRadius: 2 }} />
+                                </div>
+                              </div>
+                              <div style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtEur(f.value)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Top tipos de seguros vendidos */}
+              {insuranceTypes.length > 0 && (
+                <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+                  <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    🛡 Top tipos de seguros vendidos
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: T.bg, color: T.inkMute }}>
+                        <th style={salesTh()}>Tipo</th>
+                        <th style={salesTh()}>Designação</th>
+                        <th style={{ ...salesTh(), textAlign: 'right' }}>Vendidos</th>
+                        <th style={{ ...salesTh(), textAlign: 'right' }}>Valor total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {insuranceTypes.map(it => (
+                        <tr key={it.name} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                          <td style={salesTd()}>
+                            <span style={{ padding: '2px 8px', borderRadius: 3, background: it.type === 'pp' ? T.green + '22' : '#5B9BD522', color: it.type === 'pp' ? T.green : '#5B9BD5', fontSize: 10, fontWeight: 600 }}>{it.type === 'pp' ? 'PP' : 'SEGURO'}</span>
+                          </td>
+                          <td style={salesTd()}>{it.name}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{it.qty}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.value)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
