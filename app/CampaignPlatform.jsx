@@ -6446,6 +6446,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [teamFrom, setTeamFrom] = useState('');
   const [teamTo, setTeamTo] = useState('');
   const [selectedCollab, setSelectedCollab] = useState(null);
+  const [whatIfN, setWhatIfN] = useState(20); // eliminar top N margem negativa
 
   useEffect(() => {
     let alive = true;
@@ -7092,6 +7093,192 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     return stockVsSales.filter(s => s.coverageDays < 3 && s.qtySold >= 5).slice(0, 15);
   }, [stockVsSales]);
 
+  // ── OTIMIZAÇÃO DE MARGEM ─────────────────────────────────────────────
+  // Agregação base por produto (para várias análises desta aba)
+  const productAgg = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const e = map.get(r.ean) || {
+        ean: r.ean, name: r.name, fam1: r.fam1, fam2: r.fam2,
+        qty: 0, revenue: 0, cost: 0, discComerc: 0, discFidel: 0, lines: 0,
+      };
+      e.qty       += r.qty;
+      e.revenue   += r.revenue;
+      e.cost      += r.qty * r.pmp;
+      e.discComerc += Math.abs(r.discComerc) * Math.sign(r.qty);
+      e.discFidel  += Math.abs(r.discFidel) * Math.sign(r.qty);
+      e.lines     += 1;
+      map.set(r.ean, e);
+    }
+    return Array.from(map.values()).map(p => ({
+      ...p,
+      margin: p.revenue - p.cost,
+      marginPct: p.revenue !== 0 ? ((p.revenue - p.cost) / p.revenue * 100) : 0,
+      discTotal: p.discComerc + p.discFidel,
+    }));
+  }, [filteredRows]);
+
+  // Top destruidores de margem: produtos que vendem MUITO E perdem dinheiro
+  // Ordenados por margem absoluta negativa (impacto total)
+  const marginKillers = useMemo(() => {
+    return productAgg
+      .filter(p => p.margin < 0 && p.qty >= 2)
+      .sort((a, b) => a.margin - b.margin) // mais negativos primeiro
+      .slice(0, 20);
+  }, [productAgg]);
+
+  // Margem perdida em descontos — total + por produto + por família
+  const discountLoss = useMemo(() => {
+    let totalComerc = 0, totalFidel = 0;
+    const byFamily = new Map();
+    for (const r of filteredRows) {
+      const c = Math.abs(r.discComerc);
+      const f = Math.abs(r.discFidel);
+      totalComerc += c;
+      totalFidel  += f;
+      const key = r.fam1 || '—';
+      const e = byFamily.get(key) || { fam1: key, comerc: 0, fidel: 0, revenue: 0 };
+      e.comerc  += c;
+      e.fidel   += f;
+      e.revenue += r.revenue;
+      byFamily.set(key, e);
+    }
+    const famArr = Array.from(byFamily.values())
+      .map(f => ({ ...f, total: f.comerc + f.fidel, pctOfRev: f.revenue > 0 ? ((f.comerc + f.fidel) / f.revenue * 100) : 0 }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+    // Top produtos mais descontados
+    const topDiscProd = [...productAgg]
+      .filter(p => p.discTotal > 0)
+      .sort((a, b) => b.discTotal - a.discTotal)
+      .slice(0, 15);
+    return { totalComerc, totalFidel, total: totalComerc + totalFidel, byFamily: famArr, topProducts: topDiscProd };
+  }, [filteredRows, productAgg]);
+
+  // Produtos perto do break-even (margem -5% a +5%) com volume razoável
+  // Pequenos ajustes de preço melhoram dramaticamente o resultado
+  const nearBreakeven = useMemo(() => {
+    return productAgg
+      .filter(p => p.marginPct >= -5 && p.marginPct <= 5 && p.qty >= 3 && p.revenue > 100)
+      .sort((a, b) => b.qty - a.qty) // por volume
+      .slice(0, 20);
+  }, [productAgg]);
+
+  // Famílias subperformers: margem média ponderada por receita
+  const familyMargin = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const key = r.fam1 || '—';
+      const e = map.get(key) || { fam1: key, revenue: 0, cost: 0, qty: 0, prodCount: new Set() };
+      e.revenue += r.revenue;
+      e.cost    += r.qty * r.pmp;
+      e.qty     += r.qty;
+      e.prodCount.add(r.ean);
+      map.set(key, e);
+    }
+    return Array.from(map.values())
+      .filter(f => f.revenue > 0)
+      .map(f => ({
+        ...f,
+        margin: f.revenue - f.cost,
+        marginPct: ((f.revenue - f.cost) / f.revenue) * 100,
+        products: f.prodCount.size,
+      }))
+      .sort((a, b) => a.marginPct - b.marginPct); // pior primeiro
+  }, [filteredRows]);
+
+  // What-if: se eliminasse top-N produtos margem negativa
+  const whatIfScenario = useMemo(() => {
+    const totalRev = productAgg.reduce((s, p) => s + p.revenue, 0);
+    const totalMar = productAgg.reduce((s, p) => s + p.margin, 0);
+    const totalPct = totalRev > 0 ? (totalMar / totalRev * 100) : 0;
+    const negSorted = [...productAgg].filter(p => p.margin < 0).sort((a, b) => a.margin - b.margin);
+    const eliminate = negSorted.slice(0, whatIfN);
+    const elimRev = eliminate.reduce((s, p) => s + p.revenue, 0);
+    const elimMar = eliminate.reduce((s, p) => s + p.margin, 0);
+    const newRev = totalRev - elimRev;
+    const newMar = totalMar - elimMar; // remover negativos AUMENTA margem total
+    const newPct = newRev > 0 ? (newMar / newRev * 100) : 0;
+    return {
+      eliminated: eliminate.length,
+      maxEliminate: negSorted.length,
+      lostRevenue: elimRev,
+      savedNegMargin: -elimMar,
+      currentRev: totalRev, currentMar: totalMar, currentPct: totalPct,
+      newRev, newMar, newPct,
+      pctImprovement: newPct - totalPct,
+    };
+  }, [productAgg, whatIfN]);
+
+  // Quick wins automáticos baseados em regras simples
+  const quickWins = useMemo(() => {
+    const wins = [];
+    // 1) Subir preço de break-even alto volume
+    const topBE = nearBreakeven.slice(0, 3);
+    if (topBE.length > 0) {
+      const totalQty = topBE.reduce((s, p) => s + p.qty, 0);
+      const avgMargin = topBE.reduce((s, p) => s + p.marginPct, 0) / topBE.length;
+      const potentialGain = topBE.reduce((s, p) => s + p.revenue * 0.05, 0); // +5% no preço
+      wins.push({
+        type: 'pricing',
+        icon: '💰',
+        title: 'Subir preço de produtos perto do break-even',
+        desc: `${topBE.length} produtos top-volume com margem ${avgMargin.toFixed(1)}%. Subir +5% no PVP gera ~${fmtEur(potentialGain)} extra (assumindo procura mantém-se).`,
+        items: topBE.map(p => p.name).slice(0, 3),
+      });
+    }
+    // 2) Eliminar top destruidores
+    const top3Kill = marginKillers.slice(0, 3);
+    if (top3Kill.length > 0) {
+      const totalLoss = top3Kill.reduce((s, p) => s - p.margin, 0);
+      wins.push({
+        type: 'eliminate',
+        icon: '🛑',
+        title: 'Rever produtos com margem mais negativa',
+        desc: `Top 3 produtos destruíram ${fmtEur(totalLoss)} de margem. Verificar preços, custos ou descontinuar.`,
+        items: top3Kill.map(p => `${p.name} (${fmtEur(p.margin)})`),
+      });
+    }
+    // 3) Família subperformer
+    const worstFam = familyMargin[0];
+    if (worstFam && worstFam.marginPct < 10 && worstFam.revenue > 1000) {
+      wins.push({
+        type: 'family',
+        icon: '📉',
+        title: `Família "${worstFam.fam1}" com margem fraca`,
+        desc: `Margem média de ${worstFam.marginPct.toFixed(1)}% em ${fmtEur(worstFam.revenue)} de vendas. Negociar com fornecedor ou reduzir foco.`,
+        items: [`${worstFam.products} produtos · ${worstFam.qty} unidades`],
+      });
+    }
+    // 4) Descontos pesados
+    if (discountLoss.total > 0 && filteredRows.length > 0) {
+      const totalRev = productAgg.reduce((s, p) => s + p.revenue, 0);
+      const discPct = totalRev > 0 ? (discountLoss.total / totalRev * 100) : 0;
+      if (discPct > 8) {
+        const topFamDisc = discountLoss.byFamily[0];
+        wins.push({
+          type: 'discount',
+          icon: '🎁',
+          title: `Descontos representam ${discPct.toFixed(1)}% da receita`,
+          desc: `${fmtEur(discountLoss.total)} dados em descontos. Maior peso: ${topFamDisc?.fam1} (${fmtEur(topFamDisc?.total)}). Avaliar se promoções compensam volume gerado.`,
+          items: discountLoss.byFamily.slice(0, 3).map(f => `${f.fam1}: ${fmtEur(f.total)} (${f.pctOfRev.toFixed(1)}% da receita)`),
+        });
+      }
+    }
+    // 5) Stock parado de margem alta
+    const stockHighMargin = stockIdle.length > 0 && productAgg.length > 0;
+    if (stockHighMargin && stockIdle.length >= 5) {
+      wins.push({
+        type: 'stock',
+        icon: '📦',
+        title: `${stockIdle.length} produtos parados em stock`,
+        desc: `Stock que não vendeu nada no período. Avaliar promoção dirigida (mesmo com pequeno desconto recupera capital empatado).`,
+        items: stockIdle.slice(0, 3).map(s => `${s.ean} (${s.stockTotal} unidades)`),
+      });
+    }
+    return wins;
+  }, [nearBreakeven, marginKillers, familyMargin, discountLoss, productAgg, stockIdle]);
+
   // ─── render ──────────────────────────────────────────────────────────
   if (loading) {
     return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>A carregar…</div>;
@@ -7198,6 +7385,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           { id: 'products', label: 'Top Produtos' },
           { id: 'top',      label: 'Top Famílias' },
           { id: 'margins',  label: 'Margens & ABC' },
+          { id: 'optimize', label: '🎯 Otimização' },
           { id: 'time',     label: 'Tempo' },
           { id: 'pos',      label: 'POS' },
           { id: 'basket',   label: 'Cestas' },
@@ -7570,6 +7758,225 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               </table>
             )}
           </div>
+        </div>
+      )}
+
+      {tab === 'optimize' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Quick Wins — recomendações automáticas */}
+          {quickWins.length > 0 && (
+            <div style={{ padding: 20, background: 'linear-gradient(135deg, ' + T.bgEl + ' 0%, ' + T.accent + '08 100%)', border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>🎯 Quick Wins — oportunidades detectadas</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+                {quickWins.map((w, i) => (
+                  <div key={i} style={{ padding: 14, background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, fontSize: 13, fontWeight: 600 }}>
+                      <span style={{ fontSize: 16 }}>{w.icon}</span>
+                      <span>{w.title}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 10, lineHeight: 1.5 }}>{w.desc}</div>
+                    {w.items && (
+                      <ul style={{ margin: 0, padding: '0 0 0 18px', fontSize: 11, color: T.inkMute, lineHeight: 1.6 }}>
+                        {w.items.slice(0, 3).map((it, j) => <li key={j}>{it}</li>)}
+                      </ul>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* What-if scenario */}
+          <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>🔮 Cenário "What-if" — eliminar top-N produtos margem negativa</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+              <label style={{ fontSize: 12, color: T.inkSoft }}>Eliminar top</label>
+              <input type="range" min="0" max={Math.min(100, whatIfScenario.maxEliminate)} value={whatIfN}
+                onChange={e => setWhatIfN(Number(e.target.value))}
+                style={{ flex: 1, accentColor: T.accent }} />
+              <span style={{ fontSize: 14, fontVariantNumeric: 'tabular-nums', minWidth: 50, textAlign: 'right', fontWeight: 500 }}>{whatIfScenario.eliminated} / {whatIfScenario.maxEliminate}</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <div style={{ padding: 12, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.inkSoft}` }}>
+                <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Receita</div>
+                <div style={{ fontSize: 14, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{fmtEur(whatIfScenario.currentRev)} → {fmtEur(whatIfScenario.newRev)}</div>
+                <div style={{ fontSize: 11, color: T.red, marginTop: 4 }}>perde {fmtEur(whatIfScenario.lostRevenue)}</div>
+              </div>
+              <div style={{ padding: 12, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.green}` }}>
+                <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Margem €</div>
+                <div style={{ fontSize: 14, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{fmtEur(whatIfScenario.currentMar)} → {fmtEur(whatIfScenario.newMar)}</div>
+                <div style={{ fontSize: 11, color: T.green, marginTop: 4 }}>recupera {fmtEur(whatIfScenario.savedNegMargin)}</div>
+              </div>
+              <div style={{ padding: 12, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.accent}` }}>
+                <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Margem %</div>
+                <div style={{ fontSize: 14, fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}>{whatIfScenario.currentPct.toFixed(2)}% → <strong style={{ color: T.green }}>{whatIfScenario.newPct.toFixed(2)}%</strong></div>
+                <div style={{ fontSize: 11, color: T.accent, marginTop: 4 }}>+{whatIfScenario.pctImprovement.toFixed(2)} p.p.</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Destruidores de margem */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              💸 Destruidores de margem ({marginKillers.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· produtos que vendem 2+ unidades com margem negativa</span>
+            </div>
+            {marginKillers.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Nenhum destruidor significativo no filtro actual 🎉</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem perdida</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {marginKillers.map(p => (
+                    <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                      <td style={salesTd()}>{p.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{p.fam1}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.qty}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(p.revenue)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.red }}>{fmtEur(p.margin)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.red }}>{p.marginPct.toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Perto do break-even (oportunidades de pricing) */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              ⚖️ Perto do break-even ({nearBreakeven.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· margem -5% a +5%, volume ≥3 · subir preço aqui dá mais retorno</span>
+            </div>
+            {nearBreakeven.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem produtos perto do break-even.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>+5% PVP → margem</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {nearBreakeven.map(p => {
+                    const newRev = p.revenue * 1.05;
+                    const newMar = newRev - p.cost;
+                    const newMarPct = newRev > 0 ? (newMar / newRev * 100) : 0;
+                    return (
+                      <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                        <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                        <td style={salesTd()}>{p.name}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.qty}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(p.revenue)}</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: p.marginPct >= 0 ? T.inkSoft : T.red }}>{p.marginPct.toFixed(1)}%</td>
+                        <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.green, fontWeight: 500 }}>{newMarPct.toFixed(1)}% ({fmtEur(newMar - p.margin)} +)</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Margem perdida em descontos */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>🎁 Margem perdida em descontos</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 13 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${T.lineSoft}` }}>
+                  <span>D. Comercial</span>
+                  <strong style={{ fontVariantNumeric: 'tabular-nums', color: T.red }}>{fmtEur(discountLoss.totalComerc)}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: `1px solid ${T.lineSoft}` }}>
+                  <span>D. Fidelidade</span>
+                  <strong style={{ fontVariantNumeric: 'tabular-nums', color: T.red }}>{fmtEur(discountLoss.totalFidel)}</strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '12px 0 0', fontSize: 15 }}>
+                  <strong>Total</strong>
+                  <strong style={{ fontVariantNumeric: 'tabular-nums', color: T.red }}>{fmtEur(discountLoss.total)}</strong>
+                </div>
+              </div>
+              <div style={{ marginTop: 16, fontSize: 11, color: T.inkSoft }}>
+                Top famílias com mais descontos:
+              </div>
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {discountLoss.byFamily.slice(0, 5).map(f => (
+                  <div key={f.fam1} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 8, fontSize: 11, padding: '4px 0' }}>
+                    <span>{f.fam1}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur(f.total)}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', color: T.inkMute, minWidth: 50, textAlign: 'right' }}>{f.pctOfRev.toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Famílias subperformers */}
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>📉 Famílias por margem (pior → melhor)</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {familyMargin.slice(0, 8).map(f => (
+                  <div key={f.fam1} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 8, padding: '8px 0', borderBottom: `1px solid ${T.lineSoft}`, fontSize: 12, alignItems: 'center' }}>
+                    <div>
+                      <div>{f.fam1}</div>
+                      <div style={{ fontSize: 10, color: T.inkMute }}>{f.products} produtos · {fmtEur(f.revenue)}</div>
+                    </div>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: f.marginPct >= 20 ? T.green : f.marginPct >= 5 ? T.orange : T.red }}>{f.marginPct.toFixed(1)}%</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', color: T.inkSoft, fontSize: 11 }}>{fmtEur(f.margin)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Top produtos descontados */}
+          {discountLoss.topProducts.length > 0 && (
+            <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+              <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+                🏷 Top produtos com mais descontos
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>D. Comercial</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>D. Fidelidade</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Total descontos</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem actual</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {discountLoss.topProducts.map(p => (
+                    <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={salesTd()}>
+                        <div>{p.name}</div>
+                        <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>{p.ean}</div>
+                      </td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.qty}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur(p.discComerc)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur(p.discFidel)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.red }}>{fmtEur(p.discTotal)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: p.margin >= 0 ? T.green : T.red }}>{fmtEur(p.margin)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
