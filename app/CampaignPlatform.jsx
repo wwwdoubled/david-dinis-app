@@ -931,12 +931,17 @@ async function deletePosterZone(id) {
 // Substitui o DEFAULT_FLOORS hardcoded. Schema: ver supabase/migrations/
 // 2026-05-12_store_layout.sql
 // ─────────────────────────────────────────────────────────────────────────
-async function cloudFetchStoreLayout() {
+async function cloudFetchStoreLayout(department) {
   if (!supabase) return null;
   try {
+    // store_floors são partilhados entre PTS/PES; zonas são per-dept.
+    // Para admins (que vêem todas via RLS) filtramos por department para
+    // mostrar apenas as do dept que está a "viewing as".
+    let zonesQ = supabase.from('store_zones').select('*').order('display_order', { ascending: true });
+    if (department) zonesQ = zonesQ.eq('department', department);
     const [floorsRes, zonesRes] = await Promise.all([
       supabase.from('store_floors').select('*').order('display_order', { ascending: true }),
-      supabase.from('store_zones').select('*').order('display_order', { ascending: true }),
+      zonesQ,
     ]);
     if (floorsRes.error) {
       console.warn('cloudFetchStoreLayout(floors):', floorsRes.error.message);
@@ -991,7 +996,7 @@ async function cloudDeleteFloor(id) {
   return { ok: !error, error: error?.message };
 }
 
-async function cloudCreateZone({ floorId, name, displayOrder, createdBy }) {
+async function cloudCreateZone({ floorId, name, displayOrder, createdBy, department }) {
   if (!supabase) return { ok: false };
   const { data, error } = await supabase
     .from('store_zones')
@@ -999,6 +1004,7 @@ async function cloudCreateZone({ floorId, name, displayOrder, createdBy }) {
       floor_id: floorId, name,
       display_order: displayOrder ?? 0,
       created_by: createdBy,
+      department: department || 'PTS',
     })
     .select()
     .single();
@@ -1018,7 +1024,7 @@ async function cloudDeleteZone(id) {
 }
 
 // Seed inicial: copia DEFAULT_FLOORS para a cloud (chamado uma vez via admin)
-async function cloudSeedDefaultLayout(createdBy) {
+async function cloudSeedDefaultLayout(createdBy, department) {
   if (!supabase) return { ok: false, error: 'Supabase indisponível' };
   let floorsCreated = 0;
   let zonesCreated = 0;
@@ -1039,7 +1045,7 @@ async function cloudSeedDefaultLayout(createdBy) {
     for (let j = 0; j < (f.zones || []).length; j++) {
       const z = f.zones[j];
       zonesAttempted++;
-      const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy });
+      const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy, department });
       if (zRes.ok) zonesCreated++;
       else errors.push(`Zona "${z.name}" em "${f.name}": ${zRes.error || 'erro'}`);
     }
@@ -3474,7 +3480,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     if (!supabase) return;
     let cancelled = false;
     const load = async () => {
-      const cloudLayout = await cloudFetchStoreLayout();
+      const cloudLayout = await cloudFetchStoreLayout(userDepartment);
       if (cancelled) return;
       if (cloudLayout && Array.isArray(cloudLayout) && cloudLayout.length > 0) {
         const next = layoutOnly(cloudLayout);
@@ -3492,7 +3498,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       cancelled = true;
       window.removeEventListener('dd:store-layout-changed', onChange);
     };
-  }, []);
+  }, [userDepartment]);
 
   // One-time migration (per session): for each period without floors,
   // copy floors from the oldest campaign in that period (legacy plan owned
@@ -4597,6 +4603,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               user={user}
               uiConfig={uiConfig}
               setUIConfig={setUIConfig}
+              userDepartment={userDepartment}
             />
           )}
           {view === 'admin' && !isAdmin && (
@@ -15131,17 +15138,17 @@ function NovidadesView({ user, userDepartment }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Carrega pisos + zonas para o dropdown de alocação
+  // Carrega pisos + zonas para o dropdown de alocação (filtrado pelo dept)
   useEffect(() => {
     let alive = true;
-    cloudFetchStoreLayout().then(layout => {
+    cloudFetchStoreLayout(userDepartment).then(layout => {
       if (!alive || !layout) return;
       setFloors(layout);
       const allZones = layout.flatMap(f => (f.zones || []).map(z => ({ ...z, floorId: f.id, floorName: f.name })));
       setZones(allZones);
     });
     return () => { alive = false; };
-  }, []);
+  }, [userDepartment]);
 
   const filtered = useMemo(() => {
     if (!items) return [];
@@ -17317,7 +17324,7 @@ function BPSlotFull({ slot }) {
 // AdminView — administration panel (only visible to admins)
 // Tabs: Utilizadores | Atividade | Configuração | Estatísticas
 // ─────────────────────────────────────────────────────────────────────────
-function AdminView({ user, uiConfig, setUIConfig }) {
+function AdminView({ user, uiConfig, setUIConfig, userDepartment }) {
   const [tab, setTab] = useStoredState('admin.tab', 'users');
 
   return (
@@ -17363,7 +17370,7 @@ function AdminView({ user, uiConfig, setUIConfig }) {
       {tab === 'users' && <AdminUsersTab currentUserId={user?.id} currentUserEmail={user?.email} />}
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
-      {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} />}
+      {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
@@ -19574,7 +19581,7 @@ const SummaryCampaignCard = React.memo(function SummaryCampaignCard({ period, se
 // AdminStoreLayoutTab — gestão de pisos + zonas/móveis (layout físico da loja)
 // Substitui o DEFAULT_FLOORS hardcoded por dados em Supabase, geríveis.
 // ─────────────────────────────────────────────────────────────────────────
-function AdminStoreLayoutTab({ currentUserId }) {
+function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
   const [layout, setLayout] = useState(null); // null while loading; [] when empty; [{...}] when loaded
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState(null);
@@ -19586,7 +19593,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const res = await cloudFetchStoreLayout();
+    const res = await cloudFetchStoreLayout(userDepartment);
     if (res == null) {
       setError('Não foi possível carregar o layout. Verifica se as tabelas store_floors / store_zones existem (corre o SQL em supabase/migrations/2026-05-12_store_layout.sql).');
       setLayout([]);
@@ -19594,7 +19601,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
       setLayout(res);
     }
     setLoading(false);
-  }, []);
+  }, [userDepartment]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -19609,7 +19616,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
   const handleSeed = async () => {
     if (!confirm('Importar layout default (PISO 1, PISO 0, DESTAQUES PORTÁTEIS) com todas as zonas predefinidas?')) return;
     setSeeding(true);
-    const res = await cloudSeedDefaultLayout(currentUserId);
+    const res = await cloudSeedDefaultLayout(currentUserId, userDepartment);
     setSeeding(false);
     if (res.ok) {
       fireChanged();
@@ -19657,6 +19664,7 @@ function AdminStoreLayoutTab({ currentUserId }) {
       res = await cloudCreateZone({
         floorId: data.floorId, name: data.name,
         displayOrder: data.displayOrder, createdBy: currentUserId,
+        department: userDepartment,
       });
     }
     if (res?.ok === true) { fireChanged(); setEditingZone(null); refresh(); }
