@@ -304,9 +304,19 @@ function parseFnacSalesExcel(file) {
           const margemPct = pvpNoVat !== 0 ? (margem / pvpNoVat * 100) : 0;
           const revenue   = qty * pvpNoVat; // negativo se devolução (qty < 0)
           let dateIso = null;
+          let hour = null;
+          let dow = null; // 0=domingo, 1=segunda, ..., 6=sábado
           const rawDate = cDate >= 0 ? row[cDate] : null;
-          if (rawDate instanceof Date) dateIso = rawDate.toISOString().slice(0, 10);
-          else if (typeof rawDate === 'string' && rawDate.length >= 10) dateIso = rawDate.slice(0, 10);
+          if (rawDate instanceof Date) {
+            dateIso = rawDate.toISOString().slice(0, 10);
+            hour = rawDate.getUTCHours();
+            dow  = rawDate.getUTCDay();
+          } else if (typeof rawDate === 'string' && rawDate.length >= 10) {
+            dateIso = rawDate.slice(0, 10);
+            if (rawDate.length >= 13) hour = parseInt(rawDate.slice(11, 13), 10);
+            const d = new Date(rawDate);
+            if (!isNaN(d.getTime())) dow = d.getUTCDay();
+          }
           rows.push({
             ean: String(ean),
             internal: cInt >= 0 ? String(row[cInt] || '').trim() : '',
@@ -316,7 +326,7 @@ function parseFnacSalesExcel(file) {
             discComerc, discFidel,
             margem, margemPct,
             revenue,
-            date: dateIso,
+            date: dateIso, hour, dow,
             pos: cPos >= 0 ? row[cPos] : null,
             transactionId: cTrx >= 0 ? row[cTrx] : null,
             fam1: cFam1 >= 0 ? String(row[cFam1] || '').trim() : '',
@@ -6107,6 +6117,136 @@ function HBarChart({ data, onItemClick, valueFormatter, accent }) {
   );
 }
 
+// ── VBarChart (vertical bars with hover tooltip, e.g. 24h) ─────────────
+function VBarChart({ data, height = 180, accent, valueFormatter }) {
+  const [hover, setHover] = useState(null);
+  if (!data || !data.length) return <div style={{ height, color: T.inkMute, fontSize: 11, textAlign: 'center', paddingTop: height / 2 - 6 }}>Sem dados</div>;
+  const max = Math.max(1, ...data.map(d => d.value));
+  const accentColor = accent || T.accent;
+  const fmt = valueFormatter || (v => Math.round(v).toLocaleString('pt-PT'));
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height, padding: '8px 0' }}>
+        {data.map((d, i) => {
+          const h = max > 0 ? (d.value / max) * (height - 24) : 0;
+          const hovered = hover === i;
+          return (
+            <div key={d.label || i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, cursor: 'pointer' }}
+              onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
+              <div style={{ width: '100%', height: h || 1, background: hovered ? T.ink : accentColor, borderRadius: 2, transition: 'background 0.15s' }} />
+              <div style={{ fontSize: 9, color: hovered ? T.ink : T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{d.label}</div>
+            </div>
+          );
+        })}
+      </div>
+      {hover !== null && (
+        <div style={{
+          position: 'absolute', top: -4, left: `${(hover / data.length) * 100}%`,
+          transform: 'translate(-50%, -100%)',
+          background: T.ink, color: T.bg, padding: '6px 10px', borderRadius: 4,
+          fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 10,
+        }}>
+          <div style={{ opacity: 0.7, fontSize: 10 }}>{data[hover].label}</div>
+          <div style={{ fontWeight: 500 }}>{fmt(data[hover].value)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Heatmap (7 dias × 24 horas) ────────────────────────────────────────
+function Heatmap({ matrix, valueFormatter }) {
+  // matrix: 2D array [7][24] of numbers
+  const [hover, setHover] = useState(null);
+  const fmt = valueFormatter || (v => Math.round(v).toLocaleString('pt-PT'));
+  let max = 0;
+  for (let d = 0; d < 7; d++) for (let h = 0; h < 24; h++) if (matrix[d][h] > max) max = matrix[d][h];
+  const daysLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '32px repeat(24, 1fr)', gap: 2, fontSize: 9 }}>
+        <div />
+        {Array.from({ length: 24 }, (_, h) => (
+          <div key={h} style={{ textAlign: 'center', color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{h % 3 === 0 ? h : ''}</div>
+        ))}
+        {daysLabels.map((dn, d) => (
+          <React.Fragment key={d}>
+            <div style={{ color: T.inkSoft, textAlign: 'right', paddingRight: 4, alignSelf: 'center' }}>{dn}</div>
+            {Array.from({ length: 24 }, (_, h) => {
+              const v = matrix[d][h] || 0;
+              const intensity = max > 0 ? v / max : 0;
+              const bg = intensity === 0 ? T.lineSoft : `rgba(91, 155, 213, ${0.12 + intensity * 0.88})`;
+              const isHover = hover && hover.d === d && hover.h === h;
+              return (
+                <div key={h}
+                  onMouseEnter={() => v > 0 && setHover({ d, h, v })}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ height: 22, background: bg, borderRadius: 2, cursor: v > 0 ? 'pointer' : 'default',
+                    outline: isHover ? `1.5px solid ${T.ink}` : 'none' }}
+                />
+              );
+            })}
+          </React.Fragment>
+        ))}
+      </div>
+      {hover && (
+        <div style={{
+          position: 'absolute', top: -8, left: `calc(${((hover.h + 1.5) / 25) * 100}%)`,
+          transform: 'translate(-50%, -100%)',
+          background: T.ink, color: T.bg, padding: '6px 10px', borderRadius: 4,
+          fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap',
+          boxShadow: '0 4px 12px rgba(0,0,0,0.15)', zIndex: 10,
+        }}>
+          <div style={{ opacity: 0.7, fontSize: 10 }}>{daysLabels[hover.d]} · {String(hover.h).padStart(2, '0')}h</div>
+          <div style={{ fontWeight: 500 }}>{fmt(hover.v)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ABC / Pareto chart (bars + cumulative line) ───────────────────────
+function ParetoChart({ data, height = 240, valueFormatter }) {
+  if (!data || !data.length) return <div style={{ height, color: T.inkMute, fontSize: 11, textAlign: 'center', paddingTop: height / 2 }}>Sem dados</div>;
+  const width = 800;
+  const total = data.reduce((s, d) => s + d.value, 0);
+  const max = Math.max(...data.map(d => d.value));
+  const barW = width / data.length;
+  let acc = 0;
+  const cumPoints = data.map((d, i) => {
+    acc += d.value;
+    const cumPct = total > 0 ? acc / total : 0;
+    const x = i * barW + barW / 2;
+    const y = height - cumPct * (height - 20) - 4;
+    return { x, y, pct: cumPct, label: d.label, value: d.value, cum: acc };
+  });
+  const polyPoints = cumPoints.map(p => `${p.x},${p.y}`).join(' ');
+  // Classes A (até 80%), B (80-95%), C (95-100%)
+  const classOf = (cumPct) => cumPct <= 0.80 ? 'A' : cumPct <= 0.95 ? 'B' : 'C';
+  const classColor = { A: '#5DA050', B: '#E89B3B', C: '#C0504D' };
+  return (
+    <div>
+      <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        {data.map((d, i) => {
+          const h = (d.value / max) * (height - 30);
+          const cls = classOf(cumPoints[i].pct);
+          return <rect key={i} x={i * barW + 1} y={height - h - 4} width={Math.max(0.5, barW - 2)} height={h} fill={classColor[cls]} opacity="0.85" />;
+        })}
+        {/* Linha cumulativa 80% e 95% */}
+        <line x1="0" x2={width} y1={height - 0.8 * (height - 20) - 4} y2={height - 0.8 * (height - 20) - 4} stroke={T.inkMute} strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+        <line x1="0" x2={width} y1={height - 0.95 * (height - 20) - 4} y2={height - 0.95 * (height - 20) - 4} stroke={T.inkMute} strokeWidth="0.5" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+        <polyline points={polyPoints} fill="none" stroke={T.ink} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 11, color: T.inkSoft, flexWrap: 'wrap' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 10, height: 10, background: classColor.A }} /> A — até 80% receita</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 10, height: 10, background: classColor.B }} /> B — 80-95%</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 10, height: 10, background: classColor.C }} /> C — últimos 5%</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Number formatters ──────────────────────────────────────────────────
 function fmtEur(n) {
   return '€' + Number(n || 0).toLocaleString('pt-PT', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -6144,6 +6284,10 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [drillPath, setDrillPath] = useState([]); // ex: ['TELECOMUNICACOES', 'TELEMOVEIS/ANDROID']
   const [topMode, setTopMode] = useStoredState('sales.topMode', 'units'); // 'units' | 'value' | 'margin'
   const [stockSort, setStockSort] = useStoredState('sales.stockSort', 'shortage'); // 'shortage' | 'excess' | 'sold'
+  const [posFilter, setPosFilter] = useState('all');
+  const [priceRange, setPriceRange] = useState('all'); // all | <10 | 10-50 | 50-200 | >200
+  const [marginCat, setMarginCat] = useState('all');  // all | profit | breakeven | loss
+  const [timeView, setTimeView] = useStoredState('sales.timeView', 'heatmap'); // heatmap | hour | monthly | forecast
 
   useEffect(() => {
     let alive = true;
@@ -6184,16 +6328,30 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     setFrom(''); setTo('');
   };
 
-  // ── Filtragem global (date range + família 1) ────────────────────────
+  // ── Filtragem global (date range + família 1 + POS + price + margem) ─
   const filteredRows = useMemo(() => {
     if (!snapshot) return [];
     return snapshot.rows.filter(r => {
       if (from && r.date && r.date < from) return false;
       if (to   && r.date && r.date > to)   return false;
       if (fam1Filter !== 'all' && r.fam1 !== fam1Filter) return false;
+      if (posFilter !== 'all' && String(r.pos) !== String(posFilter)) return false;
+      if (priceRange !== 'all') {
+        const p = r.pvpNoVat || 0;
+        if (priceRange === '<10'    && !(p < 10)) return false;
+        if (priceRange === '10-50'  && !(p >= 10 && p < 50)) return false;
+        if (priceRange === '50-200' && !(p >= 50 && p < 200)) return false;
+        if (priceRange === '>200'   && !(p >= 200)) return false;
+      }
+      if (marginCat !== 'all') {
+        const mp = r.margemPct || 0;
+        if (marginCat === 'profit'    && !(mp > 5)) return false;
+        if (marginCat === 'breakeven' && !(mp >= -5 && mp <= 5)) return false;
+        if (marginCat === 'loss'      && !(mp < -5)) return false;
+      }
       return true;
     });
-  }, [snapshot, from, to, fam1Filter]);
+  }, [snapshot, from, to, fam1Filter, posFilter, priceRange, marginCat]);
 
   // Lista de famílias 1 únicas (para dropdown)
   const allFam1 = useMemo(() => {
@@ -6201,6 +6359,14 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     const s = new Set();
     snapshot.rows.forEach(r => r.fam1 && s.add(r.fam1));
     return Array.from(s).sort();
+  }, [snapshot]);
+
+  // Lista de POS únicos (para dropdown)
+  const allPos = useMemo(() => {
+    if (!snapshot) return [];
+    const s = new Set();
+    snapshot.rows.forEach(r => r.pos != null && s.add(String(r.pos)));
+    return Array.from(s).sort((a, b) => Number(a) - Number(b));
   }, [snapshot]);
 
   // ── KPIs e agregados (Visão Geral) ───────────────────────────────────
@@ -6365,6 +6531,268 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     return result.slice(0, 50);
   }, [filteredRows, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, from, to, stockSort]);
 
+  // ── ABC / Pareto (cumulative revenue) ───────────────────────────────
+  const abcAnalysis = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const e = map.get(r.ean) || { ean: r.ean, name: r.name, value: 0 };
+      e.value += r.revenue;
+      map.set(r.ean, e);
+    }
+    const arr = Array.from(map.values()).filter(p => p.value > 0).sort((a, b) => b.value - a.value);
+    const total = arr.reduce((s, p) => s + p.value, 0);
+    let acc = 0;
+    const classified = arr.map(p => {
+      acc += p.value;
+      const cumPct = total > 0 ? acc / total : 0;
+      const cls = cumPct <= 0.80 ? 'A' : cumPct <= 0.95 ? 'B' : 'C';
+      return { ...p, cumPct, cls };
+    });
+    const counts = { A: 0, B: 0, C: 0 };
+    classified.forEach(p => counts[p.cls]++);
+    return { items: classified, total, counts };
+  }, [filteredRows]);
+
+  // ── Outliers de margem (>100% ou <-50%) ─────────────────────────────
+  const marginOutliers = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const e = map.get(r.ean) || { ean: r.ean, name: r.name, fam1: r.fam1, qty: 0, revenue: 0, cost: 0 };
+      e.qty     += r.qty;
+      e.revenue += r.revenue;
+      e.cost    += r.qty * r.pmp;
+      map.set(r.ean, e);
+    }
+    const arr = [];
+    for (const e of map.values()) {
+      if (e.revenue === 0) continue;
+      const marginPct = ((e.revenue - e.cost) / e.revenue) * 100;
+      if (marginPct > 100 || marginPct < -50) {
+        arr.push({ ...e, marginPct, margin: e.revenue - e.cost });
+      }
+    }
+    arr.sort((a, b) => Math.abs(b.marginPct) - Math.abs(a.marginPct));
+    return arr.slice(0, 30);
+  }, [filteredRows]);
+
+  // ── Lift de promoções (com vs sem desconto) ─────────────────────────
+  const promoLift = useMemo(() => {
+    let withDisc = { qty: 0, revenue: 0, margin: 0, count: 0 };
+    let without  = { qty: 0, revenue: 0, margin: 0, count: 0 };
+    for (const r of filteredRows) {
+      const hasDisc = (Math.abs(r.discComerc) + Math.abs(r.discFidel)) > 0;
+      const target = hasDisc ? withDisc : without;
+      target.qty += r.qty;
+      target.revenue += r.revenue;
+      target.margin += r.revenue - r.qty * r.pmp;
+      target.count += 1;
+    }
+    const totalLines = withDisc.count + without.count;
+    return {
+      withDisc, without, totalLines,
+      withPctRev: totalLines > 0 ? (withDisc.revenue / (withDisc.revenue + without.revenue)) * 100 : 0,
+    };
+  }, [filteredRows]);
+
+  // ── Heatmap dia-da-semana × hora (receita) ──────────────────────────
+  const heatmapMatrix = useMemo(() => {
+    const m = Array.from({ length: 7 }, () => Array(24).fill(0));
+    for (const r of filteredRows) {
+      if (r.dow == null || r.hour == null) continue;
+      m[r.dow][r.hour] += r.revenue;
+    }
+    return m;
+  }, [filteredRows]);
+
+  // ── Vendas e margem por hora do dia ─────────────────────────────────
+  const hourlySeries = useMemo(() => {
+    const arr = Array.from({ length: 24 }, (_, h) => ({ hour: h, revenue: 0, margin: 0, qty: 0 }));
+    for (const r of filteredRows) {
+      if (r.hour == null) continue;
+      arr[r.hour].revenue += r.revenue;
+      arr[r.hour].margin  += r.revenue - r.qty * r.pmp;
+      arr[r.hour].qty     += r.qty;
+    }
+    return arr;
+  }, [filteredRows]);
+
+  // ── Sazonalidade mensal ─────────────────────────────────────────────
+  const monthlySeries = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      const m = r.date.slice(0, 7); // yyyy-mm
+      map.set(m, (map.get(m) || 0) + r.revenue);
+    }
+    return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, value }));
+  }, [filteredRows]);
+
+  // ── Forecast 30 dias (regressão linear simples sobre dailySeries) ───
+  const forecast = useMemo(() => {
+    if (dailySeries.length < 7) return null;
+    const n = dailySeries.length;
+    let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+    for (let i = 0; i < n; i++) {
+      sumX += i;
+      sumY += dailySeries[i].value;
+      sumXY += i * dailySeries[i].value;
+      sumX2 += i * i;
+    }
+    const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+    const intercept = (sumY - slope * sumX) / n;
+    const lastDate = dailySeries[n - 1].date;
+    const forecast = [];
+    const lastTs = new Date(lastDate).getTime();
+    for (let i = 1; i <= 30; i++) {
+      const d = new Date(lastTs + i * 86400000).toISOString().slice(0, 10);
+      const v = Math.max(0, intercept + slope * (n + i - 1));
+      forecast.push({ date: d, value: v });
+    }
+    const totalForecast = forecast.reduce((s, p) => s + p.value, 0);
+    return { points: forecast, totalForecast, slope };
+  }, [dailySeries]);
+
+  // ── Period-over-period (1ª metade vs 2ª metade) ─────────────────────
+  const periodOverPeriod = useMemo(() => {
+    if (!filteredRows.length) return null;
+    const dates = filteredRows.map(r => r.date).filter(Boolean).sort();
+    if (dates.length < 2) return null;
+    const first = dates[0];
+    const last  = dates[dates.length - 1];
+    const firstTs = new Date(first).getTime();
+    const lastTs  = new Date(last).getTime();
+    const midTs   = firstTs + (lastTs - firstTs) / 2;
+    const midIso  = new Date(midTs).toISOString().slice(0, 10);
+    let prev = { revenue: 0, margin: 0, qty: 0, tx: new Set() };
+    let curr = { revenue: 0, margin: 0, qty: 0, tx: new Set() };
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      const target = r.date <= midIso ? prev : curr;
+      target.revenue += r.revenue;
+      target.margin  += r.revenue - r.qty * r.pmp;
+      target.qty     += r.qty;
+      if (r.transactionId != null) target.tx.add(`${r.pos}-${r.transactionId}-${r.date}`);
+    }
+    const pctChange = (cur, prv) => prv === 0 ? 0 : ((cur - prv) / Math.abs(prv)) * 100;
+    return {
+      prevPeriod: { from: first, to: midIso, ...prev, txCount: prev.tx.size },
+      currPeriod: { from: midIso, to: last,  ...curr, txCount: curr.tx.size },
+      revenueChange: pctChange(curr.revenue, prev.revenue),
+      marginChange:  pctChange(curr.margin,  prev.margin),
+      qtyChange:     pctChange(curr.qty,     prev.qty),
+      ticketChange:  pctChange(curr.tx.size > 0 ? curr.revenue / curr.tx.size : 0, prev.tx.size > 0 ? prev.revenue / prev.tx.size : 0),
+    };
+  }, [filteredRows]);
+
+  // ── Cestas (pares de produtos comprados juntos) ─────────────────────
+  const basketAnalysis = useMemo(() => {
+    // Agrupar por transação. Limit a 2000 transactions para perf
+    const txMap = new Map();
+    for (const r of filteredRows) {
+      if (r.qty <= 0) continue;
+      if (r.transactionId == null || r.pos == null || !r.date) continue;
+      const k = `${r.pos}-${r.transactionId}-${r.date}`;
+      if (!txMap.has(k)) txMap.set(k, []);
+      txMap.get(k).push({ ean: r.ean, name: r.name });
+    }
+    // Só transações com 2+ produtos
+    const multi = Array.from(txMap.values()).filter(items => items.length >= 2);
+    const sample = multi.slice(0, 3000);
+    const pairCount = new Map();
+    const nameByEan = new Map();
+    for (const items of sample) {
+      // Dedupe por EAN
+      const eans = [...new Set(items.map(i => i.ean))];
+      items.forEach(i => nameByEan.set(i.ean, i.name));
+      for (let i = 0; i < eans.length; i++) {
+        for (let j = i + 1; j < eans.length; j++) {
+          const a = eans[i], b = eans[j];
+          const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+          pairCount.set(key, (pairCount.get(key) || 0) + 1);
+        }
+      }
+    }
+    const arr = Array.from(pairCount.entries())
+      .map(([k, count]) => {
+        const [a, b] = k.split('|');
+        return { eanA: a, nameA: nameByEan.get(a) || a, eanB: b, nameB: nameByEan.get(b) || b, count };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
+    return { pairs: arr, txAnalysed: sample.length, txTotal: multi.length };
+  }, [filteredRows]);
+
+  // ── Análise por POS ─────────────────────────────────────────────────
+  const posAnalysis = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      if (r.pos == null) continue;
+      const key = String(r.pos);
+      const e = map.get(key) || { pos: key, revenue: 0, margin: 0, qty: 0, tx: new Set() };
+      e.revenue += r.revenue;
+      e.margin  += r.revenue - r.qty * r.pmp;
+      e.qty     += r.qty;
+      if (r.transactionId != null) e.tx.add(`${r.pos}-${r.transactionId}-${r.date}`);
+      map.set(key, e);
+    }
+    const arr = Array.from(map.values()).map(e => ({
+      ...e,
+      txCount: e.tx.size,
+      ticket: e.tx.size > 0 ? e.revenue / e.tx.size : 0,
+      marginPct: e.revenue !== 0 ? (e.margin / e.revenue * 100) : 0,
+    }));
+    arr.sort((a, b) => b.revenue - a.revenue);
+    return arr;
+  }, [filteredRows]);
+
+  // ── Top devoluções ──────────────────────────────────────────────────
+  const topReturns = useMemo(() => {
+    const map = new Map();
+    let totalReturned = 0;
+    let totalSold = 0;
+    for (const r of filteredRows) {
+      if (r.qty < 0) {
+        const e = map.get(r.ean) || { ean: r.ean, name: r.name, fam1: r.fam1, returned: 0, value: 0 };
+        e.returned += Math.abs(r.qty);
+        e.value    += Math.abs(r.revenue);
+        map.set(r.ean, e);
+        totalReturned += Math.abs(r.qty);
+      } else {
+        totalSold += r.qty;
+      }
+    }
+    const arr = Array.from(map.values()).sort((a, b) => b.returned - a.returned).slice(0, 20);
+    const returnRate = totalSold > 0 ? (totalReturned / totalSold) * 100 : 0;
+    return { items: arr, totalReturned, totalSold, returnRate };
+  }, [filteredRows]);
+
+  // ── Stock parado (stock>0 mas zero vendas no período) ───────────────
+  const stockIdle = useMemo(() => {
+    const idxPO2 = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
+    const idxPO3 = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
+    const soldEans = new Set();
+    for (const r of filteredRows) {
+      if (r.qty > 0) soldEans.add(String(r.ean).trim());
+    }
+    const all = new Set([...idxPO2.index.keys(), ...idxPO3.index.keys()]);
+    const result = [];
+    for (const ean of all) {
+      if (soldEans.has(ean)) continue;
+      const s2 = idxPO2.index.get(ean) || 0;
+      const s3 = idxPO3.index.get(ean) || 0;
+      if (s2 + s3 <= 0) continue;
+      result.push({ ean, stockPO2: s2, stockPO3: s3, stockTotal: s2 + s3 });
+    }
+    result.sort((a, b) => b.stockTotal - a.stockTotal);
+    return result.slice(0, 30);
+  }, [filteredRows, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
+
+  // ── Alertas de ruptura iminente (cobertura < 3 dias para top-vendidos) ─
+  const ruptureSoon = useMemo(() => {
+    // Reusa stockVsSales mas filtra coverageDays < 3 e qtySold >= 5
+    return stockVsSales.filter(s => s.coverageDays < 3 && s.qtySold >= 5).slice(0, 15);
+  }, [stockVsSales]);
+
   // ─── render ──────────────────────────────────────────────────────────
   if (loading) {
     return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>A carregar…</div>;
@@ -6416,7 +6844,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       </div>
 
       {/* Filtros */}
-      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', marginBottom: 20, flexWrap: 'wrap' }}>
         <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>De</span>
           <input type="date" value={from || ''} min={snapshot.dateFrom || ''} max={snapshot.dateTo || ''} onChange={e => setFrom(e.target.value)} style={salesFilterInput()} />
@@ -6432,9 +6860,35 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
             {allFam1.map(f => <option key={f} value={f}>{f}</option>)}
           </select>
         </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>POS</span>
+          <select value={posFilter} onChange={e => setPosFilter(e.target.value)} style={salesFilterInput()}>
+            <option value="all">Todos ({allPos.length})</option>
+            {allPos.map(p => <option key={p} value={p}>POS {p}</option>)}
+          </select>
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Preço (s/IVA)</span>
+          <select value={priceRange} onChange={e => setPriceRange(e.target.value)} style={salesFilterInput()}>
+            <option value="all">Todos</option>
+            <option value="<10">&lt; €10</option>
+            <option value="10-50">€10–50</option>
+            <option value="50-200">€50–200</option>
+            <option value=">200">&gt; €200</option>
+          </select>
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Margem</span>
+          <select value={marginCat} onChange={e => setMarginCat(e.target.value)} style={salesFilterInput()}>
+            <option value="all">Todas</option>
+            <option value="profit">🟢 Rentável (&gt;5%)</option>
+            <option value="breakeven">🟡 Break-even (±5%)</option>
+            <option value="loss">🔴 Prejuízo (&lt;-5%)</option>
+          </select>
+        </label>
         <div style={{ flex: 1 }} />
-        <div style={{ fontSize: 11, color: T.inkMute }}>
-          {filteredRows.length.toLocaleString('pt-PT')} linhas no filtro
+        <div style={{ fontSize: 11, color: T.inkMute, alignSelf: 'flex-end' }}>
+          {filteredRows.length.toLocaleString('pt-PT')} linhas
         </div>
       </div>
 
@@ -6444,7 +6898,11 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           { id: 'overview', label: 'Visão Geral' },
           { id: 'products', label: 'Top Produtos' },
           { id: 'top',      label: 'Top Famílias' },
-          { id: 'stock',    label: 'Stock vs Vendas' },
+          { id: 'margins',  label: 'Margens & ABC' },
+          { id: 'time',     label: 'Tempo' },
+          { id: 'pos',      label: 'POS' },
+          { id: 'basket',   label: 'Cestas' },
+          { id: 'stock',    label: 'Stock & Devoluções' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             padding: '10px 18px', fontSize: 12, fontWeight: 500,
@@ -6482,6 +6940,22 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               <BestDayCard label="Melhor dia (vendas)" date={bestDays.topRevenue.date} value={fmtEur(bestDays.topRevenue.revenue)} sub={`${bestDays.topRevenue.qty} unidades`} accent={T.green} />
               <BestDayCard label="Melhor dia (margem)" date={bestDays.topMargin.date} value={fmtEur(bestDays.topMargin.margin)} sub={fmtEur(bestDays.topMargin.revenue) + ' em vendas'} accent={T.accent} />
               <BestDayCard label="Pior dia (vendas)" date={bestDays.worstRevenue.date} value={fmtEur(bestDays.worstRevenue.revenue)} sub={`${bestDays.worstRevenue.qty} unidades`} accent={T.orange} />
+            </div>
+          )}
+
+          {/* Period-over-period (1ª metade vs 2ª metade do intervalo filtrado) */}
+          {periodOverPeriod && (
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>Comparação 1ª vs 2ª metade do período</div>
+              <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 16 }}>
+                {periodOverPeriod.prevPeriod.from} → {periodOverPeriod.prevPeriod.to} <span style={{ margin: '0 6px' }}>vs</span> {periodOverPeriod.currPeriod.from} → {periodOverPeriod.currPeriod.to}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                <PoPCard label="Vendas" prev={periodOverPeriod.prevPeriod.revenue} curr={periodOverPeriod.currPeriod.revenue} change={periodOverPeriod.revenueChange} fmt={fmtEur} />
+                <PoPCard label="Margem" prev={periodOverPeriod.prevPeriod.margin} curr={periodOverPeriod.currPeriod.margin} change={periodOverPeriod.marginChange} fmt={fmtEur} />
+                <PoPCard label="Unidades" prev={periodOverPeriod.prevPeriod.qty} curr={periodOverPeriod.currPeriod.qty} change={periodOverPeriod.qtyChange} fmt={v => Math.round(v).toLocaleString('pt-PT')} />
+                <PoPCard label="Ticket médio" prev={periodOverPeriod.prevPeriod.txCount > 0 ? periodOverPeriod.prevPeriod.revenue / periodOverPeriod.prevPeriod.txCount : 0} curr={periodOverPeriod.currPeriod.txCount > 0 ? periodOverPeriod.currPeriod.revenue / periodOverPeriod.currPeriod.txCount : 0} change={periodOverPeriod.ticketChange} fmt={fmtEur2} />
+              </div>
             </div>
           )}
 
@@ -6637,6 +7111,314 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               </table>
             </div>
           )}
+
+          {/* Ruptura iminente */}
+          {ruptureSoon.length > 0 && (
+            <div style={{ background: '#fff5f5', border: `1px solid ${T.red}40`, borderRadius: 6, padding: 16 }}>
+              <div style={{ fontSize: 11, color: T.red, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, fontWeight: 600 }}>⚠ Ruptura iminente ({ruptureSoon.length})</div>
+              <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 12 }}>Top-vendidos com cobertura &lt; 3 dias ao ritmo actual.</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {ruptureSoon.map(it => (
+                  <div key={it.ean} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 12, padding: '8px 12px', background: T.bg, borderRadius: 4, fontSize: 12 }}>
+                    <div><span style={{ fontFamily: 'monospace', color: T.inkMute, marginRight: 8 }}>{it.ean}</span>{it.name}</div>
+                    <div style={{ color: T.inkSoft, fontVariantNumeric: 'tabular-nums' }}>vendeu {it.qtySold} · stock {it.stockTotal}</div>
+                    <div style={{ color: T.red, fontWeight: 600 }}>{Math.round(it.coverageDays)}d</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Stock parado */}
+          {stockIdle.length > 0 && (
+            <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+              <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+                🟣 Stock parado ({stockIdle.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· stock disponível mas zero vendas no período</span>
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>PO2</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>PO3</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Total stock parado</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stockIdle.map(it => (
+                    <tr key={it.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.stockPO2}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.stockPO3}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500, color: '#8064A2' }}>{it.stockTotal}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Top devoluções */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${T.line}` }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>↩ Top devoluções</div>
+              <div style={{ fontSize: 11, color: T.inkSoft }}>
+                Taxa global: <strong style={{ color: topReturns.returnRate > 5 ? T.orange : T.green }}>{topReturns.returnRate.toFixed(1)}%</strong> · {topReturns.totalReturned} devolvidos de {topReturns.totalSold} vendidos
+              </div>
+            </div>
+            {topReturns.items.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem devoluções no período.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Unidades devolvidas</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Valor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topReturns.items.map(it => (
+                    <tr key={it.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                      <td style={salesTd()}>{it.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{it.fam1}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.orange }}>{it.returned}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.red }}>{fmtEur(it.value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'margins' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* ABC / Pareto */}
+          <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <div>
+                <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Análise ABC (Pareto)</div>
+                <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 4 }}>
+                  <strong style={{ color: T.green }}>{abcAnalysis.counts.A}</strong> produtos classe A geram 80% das vendas ·{' '}
+                  <strong style={{ color: T.orange }}>{abcAnalysis.counts.B}</strong> classe B ·{' '}
+                  <strong style={{ color: T.red }}>{abcAnalysis.counts.C}</strong> classe C
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{fmtEur(abcAnalysis.total)} total</div>
+            </div>
+            <ParetoChart data={abcAnalysis.items.slice(0, 150).map(p => ({ label: p.name, value: p.value }))} />
+          </div>
+
+          {/* Lift de promoções */}
+          <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Impacto de descontos</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div style={{ padding: 16, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.accent}` }}>
+                <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Com desconto ({promoLift.withDisc.count.toLocaleString('pt-PT')} linhas)</div>
+                <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>{fmtEur(promoLift.withDisc.revenue)}</div>
+                <div style={{ fontSize: 11, color: T.inkSoft }}>margem: <strong style={{ color: promoLift.withDisc.margin >= 0 ? T.green : T.red }}>{fmtEur(promoLift.withDisc.margin)}</strong> · {promoLift.withDisc.qty} un.</div>
+              </div>
+              <div style={{ padding: 16, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.inkSoft}` }}>
+                <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Sem desconto ({promoLift.without.count.toLocaleString('pt-PT')} linhas)</div>
+                <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>{fmtEur(promoLift.without.revenue)}</div>
+                <div style={{ fontSize: 11, color: T.inkSoft }}>margem: <strong style={{ color: promoLift.without.margin >= 0 ? T.green : T.red }}>{fmtEur(promoLift.without.margin)}</strong> · {promoLift.without.qty} un.</div>
+              </div>
+            </div>
+            <div style={{ marginTop: 12, fontSize: 11, color: T.inkSoft }}>
+              <strong>{promoLift.withPctRev.toFixed(1)}%</strong> da receita veio de linhas com desconto.
+            </div>
+          </div>
+
+          {/* Outliers de margem */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              ⚠ Outliers de margem ({marginOutliers.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· margem &gt;100% ou &lt;-50% (preços errados?)</span>
+            </div>
+            {marginOutliers.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem outliers no período filtrado.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem €</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {marginOutliers.map(it => (
+                    <tr key={it.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                      <td style={salesTd()}>{it.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{it.fam1}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.qty}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.revenue)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: it.margin >= 0 ? T.green : T.red }}>{fmtEur(it.margin)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: it.marginPct > 100 ? '#8064A2' : T.red }}>{it.marginPct.toFixed(0)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'time' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* Sub-toggle */}
+          <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content' }}>
+            {[
+              { id: 'heatmap',  l: 'Heatmap dia × hora' },
+              { id: 'hour',     l: 'Por hora' },
+              { id: 'monthly',  l: 'Mensal' },
+              { id: 'forecast', l: 'Forecast 30d' },
+            ].map(m => (
+              <button key={m.id} onClick={() => setTimeView(m.id)} style={{
+                padding: '6px 14px', fontSize: 11, borderRadius: 4, border: 'none',
+                background: timeView === m.id ? T.ink : 'transparent',
+                color: timeView === m.id ? T.bg : T.inkSoft, cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}>{m.l}</button>
+            ))}
+          </div>
+
+          {timeView === 'heatmap' && (
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16 }}>Receita por dia da semana × hora</div>
+              <Heatmap matrix={heatmapMatrix} valueFormatter={fmtEur} />
+              <div style={{ fontSize: 10, color: T.inkMute, marginTop: 12 }}>Quanto mais escuro, mais vendas. Passa o rato por cima das células.</div>
+            </div>
+          )}
+
+          {timeView === 'hour' && (
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Receita por hora do dia</div>
+              <VBarChart data={hourlySeries.map(h => ({ label: String(h.hour).padStart(2, '0'), value: h.revenue }))} valueFormatter={fmtEur} />
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginTop: 24, marginBottom: 12 }}>Margem por hora do dia</div>
+              <VBarChart data={hourlySeries.map(h => ({ label: String(h.hour).padStart(2, '0'), value: h.margin }))} accent={T.green} valueFormatter={fmtEur} />
+            </div>
+          )}
+
+          {timeView === 'monthly' && (
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Sazonalidade mensal</div>
+              <VBarChart data={monthlySeries.map(m => ({ label: m.date.slice(2), value: m.value }))} valueFormatter={fmtEur} />
+            </div>
+          )}
+
+          {timeView === 'forecast' && (
+            <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Forecast 30 dias (regressão linear simples)</div>
+              {!forecast ? (
+                <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem dados suficientes (precisa de pelo menos 7 dias).</div>
+              ) : (
+                <>
+                  <div style={{ display: 'flex', gap: 24, marginBottom: 16, fontSize: 12, color: T.inkSoft, flexWrap: 'wrap' }}>
+                    <div>Projetado próximos 30 dias: <strong style={{ color: T.ink }}>{fmtEur(forecast.totalForecast)}</strong></div>
+                    <div>Tendência diária: <strong style={{ color: forecast.slope >= 0 ? T.green : T.red }}>{forecast.slope >= 0 ? '↑' : '↓'} {fmtEur(Math.abs(forecast.slope))}/dia</strong></div>
+                  </div>
+                  <Sparkline data={[...dailySeries, ...forecast.points]} height={140} valueFormatter={fmtEur} />
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6 }}>Histórico ({dailySeries.length} dias) seguido de projeção (30 dias).</div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'pos' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* KPIs por POS */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+              Performance por POS ({posAnalysis.length} caixas)
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: T.bg, color: T.inkMute }}>
+                  <th style={salesTh()}>POS</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Transações</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Unidades</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Ticket médio</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Margem</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {posAnalysis.map((p, i) => {
+                  const maxRev = posAnalysis[0]?.revenue || 1;
+                  const pct = (p.revenue / maxRev) * 100;
+                  return (
+                    <tr key={p.pos} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontWeight: 500 }}>POS {p.pos}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.txCount.toLocaleString('pt-PT')}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.qty.toLocaleString('pt-PT')}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', position: 'relative' }}>
+                        <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: T.accent + '14', pointerEvents: 'none' }} />
+                        <span style={{ position: 'relative', fontVariantNumeric: 'tabular-nums', fontWeight: i === 0 ? 600 : 400 }}>{fmtEur(p.revenue)}</span>
+                      </td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur2(p.ticket)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: p.margin >= 0 ? T.green : T.red }}>{fmtEur(p.margin)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: p.marginPct >= 0 ? T.green : T.red }}>{p.marginPct.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'basket' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 12, color: T.inkSoft }}>
+            Top 20 pares de produtos comprados juntos. Analisadas <strong style={{ color: T.ink }}>{basketAnalysis.txAnalysed.toLocaleString('pt-PT')}</strong> transações com ≥2 produtos (de {basketAnalysis.txTotal.toLocaleString('pt-PT')} totais).
+          </div>
+          {basketAnalysis.pairs.length === 0 ? (
+            <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 12, border: `1px dashed ${T.line}`, borderRadius: 6 }}>
+              Sem transações multi-produto suficientes no filtro actual.
+            </div>
+          ) : (
+            <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={{ ...salesTh(), width: 32, textAlign: 'right' }}>#</th>
+                    <th style={salesTh()}>Produto A</th>
+                    <th style={salesTh()}>Produto B</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Vezes juntos</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {basketAnalysis.pairs.map((p, i) => (
+                    <tr key={i} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), textAlign: 'right', color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{i + 1}</td>
+                      <td style={salesTd()}>
+                        <div style={{ fontFamily: 'monospace', color: T.inkSoft, fontSize: 10 }}>{p.eanA}</div>
+                        <div>{p.nameA}</div>
+                      </td>
+                      <td style={salesTd()}>
+                        <div style={{ fontFamily: 'monospace', color: T.inkSoft, fontSize: 10 }}>{p.eanB}</div>
+                        <div>{p.nameB}</div>
+                      </td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.accent }}>{p.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -6715,6 +7497,21 @@ function BestDayCard({ label, date, value, sub, accent }) {
         <span style={{ color: T.ink, fontFamily: 'monospace' }}>{date}</span>
         <span>{sub}</span>
       </div>
+    </div>
+  );
+}
+
+function PoPCard({ label, prev, curr, change, fmt }) {
+  const isUp = change >= 0;
+  const accent = isUp ? T.green : T.red;
+  return (
+    <div style={{ padding: '12px 16px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+        <div style={{ fontSize: 18, fontWeight: 500, color: T.ink, fontVariantNumeric: 'tabular-nums' }}>{fmt(curr)}</div>
+        <div style={{ fontSize: 12, color: accent, fontWeight: 600 }}>{isUp ? '↑' : '↓'} {Math.abs(change).toFixed(1)}%</div>
+      </div>
+      <div style={{ fontSize: 11, color: T.inkSoft, fontVariantNumeric: 'tabular-nums' }}>antes: {fmt(prev)}</div>
     </div>
   );
 }
