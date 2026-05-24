@@ -235,6 +235,122 @@ function parseExcelSmart(arrayBuffer, expectedHeaders = []) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// FNAC sales export parser — formato "Vendas detalhadas com margem"
+// Estrutura fixa: linha 1 título, linha 2 "Data: dd-mm-yyyy até dd-mm-yyyy",
+// linha 3 "Loja: X", linha 4 headers (17 cols), dados a partir da linha 5.
+// ─────────────────────────────────────────────────────────────────────────
+function parseFnacSalesExcel(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        const sheetName = wb.SheetNames.find(n => /vendas/i.test(n)) || wb.SheetNames[0];
+        if (!sheetName) return reject(new Error('Sem sheet no ficheiro'));
+        const sheet = wb.Sheets[sheetName];
+        const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: null });
+        if (aoa.length < 5) return reject(new Error('Ficheiro vazio ou formato inesperado'));
+
+        // Meta — linhas 1, 2, 3 (índices 0,1,2)
+        const metaLine2 = (aoa[1] || []).filter(Boolean).join(' ');
+        const metaLine3 = (aoa[2] || []).filter(Boolean).join(' ');
+        const periodMatch = metaLine2.match(/Data:\s*(\d{2}-\d{2}-\d{4})\s*at[ée]\s*(\d{2}-\d{2}-\d{4})/i);
+        const storeMatch  = metaLine3.match(/Loja:\s*(.+?)(?:\s*(?:Valor|Margem|Descontos|$))/i);
+        const dateFrom = periodMatch ? toIsoDate(periodMatch[1]) : null;
+        const dateTo   = periodMatch ? toIsoDate(periodMatch[2]) : null;
+        const storeName = storeMatch ? storeMatch[1].trim() : '—';
+
+        // Headers — linha 4 (índice 3). Posicionais com fuzzy fallback.
+        const headers = (aoa[3] || []).map(h => String(h || '').trim().toLowerCase());
+        const colIdx = (patterns) => {
+          for (let i = 0; i < headers.length; i++) {
+            if (patterns.some(p => headers[i].includes(p))) return i;
+          }
+          return -1;
+        };
+        const cEan    = colIdx(['ean']);
+        const cInt    = colIdx(['interno', 'cód', 'cod']);
+        const cName   = colIdx(['descri', 'nome']);
+        const cQty    = colIdx(['qtd', 'quant']);
+        const cPvp    = colIdx(['pvp s/iva', 'pvp sem']);                    // procura "PVP S/IVA" antes
+        const cPvpVat = colIdx(['pvp']) !== cPvp ? colIdx(['pvp']) : -1;     // depois o outro PVP (com IVA)
+        const cPmp    = colIdx(['pmp']);
+        const cDcom   = colIdx(['d.comercial', 'd. comercial', 'comerc']);
+        const cDfid   = colIdx(['d.fidelidade', 'd. fidelidade', 'fidel']);
+        const cDate   = colIdx(['data']);
+        const cPos    = colIdx(['pos']);
+        const cTrx    = colIdx(['transa']);
+        const cFam1   = colIdx(['famila 1', 'família 1', 'familia 1']);
+        const cFam2   = colIdx(['famila 2', 'família 2', 'familia 2']);
+        const cFam3   = colIdx(['famila 3', 'família 3', 'familia 3']);
+
+        if (cEan < 0 || cName < 0 || cQty < 0 || cPvp < 0 || cPmp < 0) {
+          return reject(new Error('Cabeçalho não tem as colunas esperadas (EAN, Descrição, Qtd, PVP S/IVA, PMP).'));
+        }
+
+        const rows = [];
+        for (let r = 4; r < aoa.length; r++) {
+          const row = aoa[r];
+          if (!row) continue;
+          const ean = row[cEan];
+          if (ean == null || ean === '') continue;
+          const qty       = Number(row[cQty]) || 0;
+          const pvpNoVat  = Number(row[cPvp]) || 0;
+          const pvp       = cPvpVat >= 0 ? (Number(row[cPvpVat]) || 0) : pvpNoVat;
+          const pmp       = Number(row[cPmp]) || 0;
+          const discComerc = cDcom >= 0 ? (Number(row[cDcom]) || 0) : 0;
+          const discFidel  = cDfid >= 0 ? (Number(row[cDfid]) || 0) : 0;
+          const margem    = pvpNoVat - pmp;
+          const margemPct = pvpNoVat !== 0 ? (margem / pvpNoVat * 100) : 0;
+          const revenue   = qty * pvpNoVat; // negativo se devolução (qty < 0)
+          let dateIso = null;
+          const rawDate = cDate >= 0 ? row[cDate] : null;
+          if (rawDate instanceof Date) dateIso = rawDate.toISOString().slice(0, 10);
+          else if (typeof rawDate === 'string' && rawDate.length >= 10) dateIso = rawDate.slice(0, 10);
+          rows.push({
+            ean: String(ean),
+            internal: cInt >= 0 ? String(row[cInt] || '').trim() : '',
+            name: String(row[cName] || '').trim(),
+            qty,
+            pvp, pvpNoVat, pmp,
+            discComerc, discFidel,
+            margem, margemPct,
+            revenue,
+            date: dateIso,
+            pos: cPos >= 0 ? row[cPos] : null,
+            transactionId: cTrx >= 0 ? row[cTrx] : null,
+            fam1: cFam1 >= 0 ? String(row[cFam1] || '').trim() : '',
+            fam2: cFam2 >= 0 ? String(row[cFam2] || '').trim() : '',
+            fam3: cFam3 >= 0 ? String(row[cFam3] || '').trim() : '',
+          });
+        }
+
+        const importedAt = new Date().toISOString();
+        const id = `${storeName.toLowerCase().replace(/\s+/g, '-')}-${importedAt.replace(/[:.]/g, '')}`;
+        resolve({
+          id,
+          store: storeName,
+          filename: file.name,
+          dateFrom, dateTo, importedAt,
+          rowsCount: rows.length,
+          rows,
+        });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function toIsoDate(ddmmyyyy) {
+  // "01-01-2026" → "2026-01-01"
+  const m = ddmmyyyy.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // localStorage helpers — keep tight and safe (preferences, theme, light state)
 // ─────────────────────────────────────────────────────────────────────────
 const STORE_PREFIX = 'dd_';
@@ -331,10 +447,11 @@ function useStoredState(key, defaultValue) {
 //        + "zone_memory" store (keyed by ean) — remembers where each EAN was assigned
 // ─────────────────────────────────────────────────────────────────────────
 const IDB_NAME = 'dd_app';
-const IDB_VERSION = 2;
+const IDB_VERSION = 3; // v3.20.0: added sales_snapshots store
 const IDB_STORE = 'campaigns';
 const IDB_STORE_PERIODS = 'periods';
 const IDB_STORE_MEMORY = 'zone_memory';
+const IDB_STORE_SALES = 'sales_snapshots';
 
 let _idbPromise = null;
 function idbOpen() {
@@ -352,6 +469,12 @@ function idbOpen() {
       }
       if (!db.objectStoreNames.contains(IDB_STORE_MEMORY)) {
         db.createObjectStore(IDB_STORE_MEMORY, { keyPath: 'ean' });
+      }
+      // v3.20.0: snapshot completo de vendas detalhadas (uma loja, um período).
+      // 1 doc por upload; isActive: true marca o que aparece na vista.
+      if (!db.objectStoreNames.contains(IDB_STORE_SALES)) {
+        const store = db.createObjectStore(IDB_STORE_SALES, { keyPath: 'id' });
+        store.createIndex('isActive', 'isActive');
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -468,6 +591,80 @@ async function idbBulkPutMemory(items) {
     const tx = db.transaction(IDB_STORE_MEMORY, 'readwrite');
     const store = tx.objectStore(IDB_STORE_MEMORY);
     items.forEach(it => store.put(it));
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ─── Sales snapshots store ─────────────────────────────────────────────
+// v3.20.0: análise detalhada de vendas com margens (ficheiro FNAC).
+// 1 doc por upload: { id, store, filename, dateFrom, dateTo, importedAt,
+//                     rowsCount, rows: [...], isActive }
+async function idbPutSalesSnapshot(snap) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_SALES, 'readwrite');
+    const store = tx.objectStore(IDB_STORE_SALES);
+    // Desactiva todos os snapshots existentes antes de marcar o novo como activo
+    const req = store.openCursor();
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        if (cursor.value.isActive) {
+          const v = { ...cursor.value, isActive: false };
+          cursor.update(v);
+        }
+        cursor.continue();
+      } else {
+        store.put({ ...snap, isActive: true });
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbGetActiveSalesSnapshot() {
+  try {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_SALES, 'readonly');
+      const req = tx.objectStore(IDB_STORE_SALES).getAll();
+      req.onsuccess = () => {
+        const all = req.result || [];
+        const active = all.find(s => s.isActive) || all[all.length - 1] || null;
+        resolve(active);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return null; }
+}
+
+async function idbListSalesSnapshotsMeta() {
+  try {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE_SALES, 'readonly');
+      const req = tx.objectStore(IDB_STORE_SALES).getAll();
+      req.onsuccess = () => {
+        const meta = (req.result || []).map(s => ({
+          id: s.id, store: s.store, filename: s.filename,
+          dateFrom: s.dateFrom, dateTo: s.dateTo,
+          importedAt: s.importedAt, rowsCount: s.rowsCount,
+          isActive: !!s.isActive,
+        }));
+        resolve(meta);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch { return []; }
+}
+
+async function idbDeleteSalesSnapshot(id) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_SALES, 'readwrite');
+    tx.objectStore(IDB_STORE_SALES).delete(id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -823,7 +1020,8 @@ async function markActivityReverted(activityId, reverterId) {
 // Default menu config — all visible
 const DEFAULT_MENU_VISIBILITY = {
   dashboard: { roles: ['user', 'manager', 'viewer'], visible: true },
-  sales: { roles: ['user', 'manager'], visible: true },
+  // v3.20.0: Análise de Vendas é agora admin-only (parser FNAC com margens)
+  sales: { roles: [], visible: false },
   campaigns: { roles: ['user', 'manager', 'viewer'], visible: true },
   calendar: { roles: ['user', 'manager', 'viewer'], visible: true },
   changes: { roles: ['user', 'manager'], visible: true },
@@ -4604,7 +4802,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             cloudDataLoaded={cloudDataLoaded}
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
-          {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
+          {view === 'sales' && isAdmin && <SalesView />}
+          {view === 'sales' && !isAdmin && (
+            <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
+              <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
+              <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
+            </div>
+          )}
           {view === 'changes' && <ChangesView campaigns={filteredCampaigns} periods={filteredPeriods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
             stockRowsPO2={stockRowsPO2} setStockRowsPO2={setStockRowsPO2}
@@ -4872,7 +5076,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
   // - showFor: se presente, APENAS estes depts vêem (além de admin)
   const allItems = [
     { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
-    { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, badge: candidates.length || null },
+    { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, hideFor: ['PES'] },
     { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
@@ -5021,9 +5225,11 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
               </span>
             </button>
           )}
-          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, marginBottom: 12 }}>
-            {candidates.length} candidatos
-          </div>
+          {candidates.length > 0 && (
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, marginBottom: 12 }}>
+              {candidates.length} candidatos
+            </div>
+          )}
           {user && supabaseEnabled && (
             <SyncIndicator status={syncStatus} isOnline={isOnline} />
           )}
@@ -5745,191 +5951,486 @@ function DashboardCard({ title, icon: Icon, children, empty, footer, action }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Sales Analysis
+// Sales Analysis v2 (v3.20.0) — parser FNAC + IDB + charts SVG
+// Substitui a vista antiga simples. Admin-only, PTS-only.
 // ─────────────────────────────────────────────────────────────────────────
-function SalesView({ salesData, setSalesData, candidates, setCandidates }) {
-  const [search, setSearch] = useStoredState('sales.search', '');
-  const [sortBy, setSortBy] = useStoredState('sales.sortBy', 'qty');
-  const [sortDir, setSortDir] = useStoredState('sales.sortDir', 'desc');
-  const [topOnly, setTopOnly] = useStoredState('sales.topOnly', false);
+
+// Cores para chart segments (cycling). Usam T.accent + paleta neutra.
+const CHART_COLORS = ['#5B9BD5', '#5DA050', '#E89B3B', '#C0504D', '#8064A2', '#4BACC6', '#F79646', '#9BBB59'];
+
+// ── KpiCard ────────────────────────────────────────────────────────────
+function KpiCard({ label, value, subtitle, accent }) {
+  return (
+    <div style={{
+      padding: '18px 20px', border: `1px solid ${T.line}`, borderRadius: 8,
+      background: T.bgEl,
+    }}>
+      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 500, color: accent || T.ink, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+      {subtitle && <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 6 }}>{subtitle}</div>}
+    </div>
+  );
+}
+
+// ── Sparkline ──────────────────────────────────────────────────────────
+function Sparkline({ data, width = 800, height = 80, accent }) {
+  if (!data || data.length < 2) return <div style={{ height, color: T.inkMute, fontSize: 11, textAlign: 'center', paddingTop: height / 2 - 6 }}>Sem dados</div>;
+  const max = Math.max(...data.map(d => d.value));
+  const min = Math.min(0, Math.min(...data.map(d => d.value)));
+  const range = max - min || 1;
+  const stepX = data.length > 1 ? width / (data.length - 1) : 0;
+  const yFor = v => height - ((v - min) / range) * (height - 8) - 4;
+  const points = data.map((d, i) => `${i * stepX},${yFor(d.value)}`).join(' ');
+  const areaPath = `M0,${height} L${points.split(' ').join(' L')} L${width},${height} Z`;
+  const accentColor = accent || T.accent;
+  return (
+    <svg width="100%" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={accentColor} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={accentColor} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill="url(#sparkArea)" />
+      <polyline points={points} fill="none" stroke={accentColor} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+// ── DonutChart ──────────────────────────────────────────────────────────
+function DonutChart({ segments, size = 180 }) {
+  const total = segments.reduce((s, x) => s + x.value, 0);
+  if (total <= 0) return <div style={{ width: size, height: size, color: T.inkMute, fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>Sem dados</div>;
+  const r = size / 2 - 12;
+  const cx = size / 2;
+  const cy = size / 2;
+  const stroke = 22;
+  let acc = 0;
+  const slices = segments.map((seg, i) => {
+    const start = (acc / total) * Math.PI * 2 - Math.PI / 2;
+    acc += seg.value;
+    const end = (acc / total) * Math.PI * 2 - Math.PI / 2;
+    const x1 = cx + r * Math.cos(start);
+    const y1 = cy + r * Math.sin(start);
+    const x2 = cx + r * Math.cos(end);
+    const y2 = cy + r * Math.sin(end);
+    const large = (end - start) > Math.PI ? 1 : 0;
+    const color = seg.color || CHART_COLORS[i % CHART_COLORS.length];
+    return <path key={i} d={`M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`} fill="none" stroke={color} strokeWidth={stroke} strokeLinecap="butt" />;
+  });
+  return (
+    <svg width={size} height={size}>
+      {slices}
+      <text x={cx} y={cy - 4} textAnchor="middle" style={{ fontSize: 10, fill: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Total</text>
+      <text x={cx} y={cy + 14} textAnchor="middle" style={{ fontSize: 16, fill: T.ink, fontWeight: 500 }}>{fmtNumberShort(total)}</text>
+    </svg>
+  );
+}
+
+// ── HBarChart (horizontal bars with click handler) ─────────────────────
+function HBarChart({ data, onItemClick, valueFormatter, accent }) {
+  if (!data || !data.length) return <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem dados</div>;
+  const max = Math.max(...data.map(d => d.value));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {data.map((d, i) => {
+        const pct = max > 0 ? (d.value / max) * 100 : 0;
+        const color = d.color || accent || T.accent;
+        const clickable = !!onItemClick;
+        return (
+          <div key={d.key || i}
+            onClick={() => clickable && onItemClick(d)}
+            style={{
+              padding: '8px 12px', borderRadius: 6, background: T.bgEl,
+              border: `1px solid ${T.line}`,
+              cursor: clickable ? 'pointer' : 'default',
+              display: 'grid', gridTemplateColumns: '1fr auto', gap: 12, alignItems: 'center',
+            }}
+            onMouseEnter={e => clickable && (e.currentTarget.style.borderColor = color)}
+            onMouseLeave={e => clickable && (e.currentTarget.style.borderColor = T.line)}
+          >
+            <div>
+              <div style={{ fontSize: 12, color: T.ink, marginBottom: 4, fontWeight: 500 }}>{d.label}</div>
+              <div style={{ height: 4, background: T.lineSoft, borderRadius: 2, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${pct}%`, background: color, transition: 'width 0.2s' }} />
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: T.ink, fontVariantNumeric: 'tabular-nums', minWidth: 80, textAlign: 'right' }}>
+              {valueFormatter ? valueFormatter(d.value) : d.value}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Number formatters ──────────────────────────────────────────────────
+function fmtEur(n) {
+  return '€' + Number(n || 0).toLocaleString('pt-PT', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+function fmtEur2(n) {
+  return '€' + Number(n || 0).toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtNumberShort(n) {
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return (n / 1_000_000).toFixed(1).replace('.0', '') + 'M';
+  if (abs >= 1_000) return (n / 1_000).toFixed(1).replace('.0', '') + 'k';
+  return String(Math.round(n));
+}
+function fmtPctSigned(n) {
+  return (n >= 0 ? '+' : '') + n.toFixed(1).replace('.', ',') + '%';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+function SalesView() {
+  const [snapshot, setSnapshot] = useState(null);
+  const [loading, setLoading]   = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState(null);
+  const [tab, setTab] = useStoredState('sales.tab', 'overview');
+  const [from, setFrom] = useState('');
+  const [to, setTo]     = useState('');
+  const [fam1Filter, setFam1Filter] = useState('all');
+  const [drillPath, setDrillPath] = useState([]); // ex: ['TELECOMUNICACOES', 'TELEMOVEIS/ANDROID']
+
+  useEffect(() => {
+    let alive = true;
+    idbGetActiveSalesSnapshot().then(s => {
+      if (!alive) return;
+      setSnapshot(s);
+      if (s) {
+        setFrom(s.dateFrom || '');
+        setTo(s.dateTo || '');
+      }
+      setLoading(false);
+    });
+    return () => { alive = false; };
+  }, []);
 
   const handleFile = async (file) => {
-    const buf = await file.arrayBuffer();
-    const { headers, rows } = parseExcelSmart(buf, ['EAN', 'ref', 'descrição', 'quantidade']);
-
-    const findCol = (...patterns) => headers.find(h => patterns.some(p => h.toLowerCase().includes(p)));
-    const refCol = findCol('ean', 'ref', 'sku', 'cód', 'cod');
-    const nameCol = findCol('descri', 'título', 'titulo', 'nome', 'produto', 'artigo');
-    const qtyCol = findCol('qtd', 'quant', 'unid', 'pcs', 'venda');
-    const revCol = findCol('valor', 'total', 'receita', 'faturação', 'faturacao', 'eur', '€');
-
-    const parsed = rows.map((r, i) => ({
-      id: `s-${i}`,
-      ref: refCol ? String(r[refCol]) : `#${i + 1}`,
-      name: nameCol ? String(r[nameCol]) : 'Produto',
-      qty: qtyCol ? Number(r[qtyCol]) || 0 : 0,
-      revenue: revCol ? Number(r[revCol]) || 0 : 0,
-      raw: r,
-    }));
-
-    setSalesData({
-      filename: file.name, headers, rows: parsed,
-      detected: { refCol, nameCol, qtyCol, revCol },
-    });
+    setImporting(true);
+    setImportError(null);
+    try {
+      const snap = await parseFnacSalesExcel(file);
+      await idbPutSalesSnapshot(snap);
+      setSnapshot(snap);
+      setFrom(snap.dateFrom || '');
+      setTo(snap.dateTo || '');
+      setDrillPath([]);
+      setFam1Filter('all');
+    } catch (err) {
+      setImportError(err.message || String(err));
+    } finally {
+      setImporting(false);
+    }
   };
 
-  const filtered = useMemo(() => {
-    if (!salesData) return [];
-    let r = salesData.rows.filter(p =>
-      !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.ref.toLowerCase().includes(search.toLowerCase())
-    );
-    r = [...r].sort((a, b) => {
-      const av = a[sortBy] ?? 0; const bv = b[sortBy] ?? 0;
-      // v3.15.1: coerce qualquer valor para string se um dos dois for string
-      // (Excel mistura tipos — alguns nomes vêm como números, etc).
-      if (typeof av === 'string' || typeof bv === 'string') {
-        const sa = String(av); const sb = String(bv);
-        return sortDir === 'desc' ? sb.localeCompare(sa) : sa.localeCompare(sb);
+  const handleClear = async () => {
+    if (!snapshot || !confirm('Apagar o snapshot importado? Esta acção é local (não afecta outros admins).')) return;
+    await idbDeleteSalesSnapshot(snapshot.id);
+    setSnapshot(null);
+    setFrom(''); setTo('');
+  };
+
+  // ── Filtragem global (date range + família 1) ────────────────────────
+  const filteredRows = useMemo(() => {
+    if (!snapshot) return [];
+    return snapshot.rows.filter(r => {
+      if (from && r.date && r.date < from) return false;
+      if (to   && r.date && r.date > to)   return false;
+      if (fam1Filter !== 'all' && r.fam1 !== fam1Filter) return false;
+      return true;
+    });
+  }, [snapshot, from, to, fam1Filter]);
+
+  // Lista de famílias 1 únicas (para dropdown)
+  const allFam1 = useMemo(() => {
+    if (!snapshot) return [];
+    const s = new Set();
+    snapshot.rows.forEach(r => r.fam1 && s.add(r.fam1));
+    return Array.from(s).sort();
+  }, [snapshot]);
+
+  // ── KPIs e agregados (Visão Geral) ───────────────────────────────────
+  const kpis = useMemo(() => {
+    let revenue = 0, cost = 0, returnsRev = 0;
+    const transactions = new Set();
+    for (const r of filteredRows) {
+      revenue += r.revenue;
+      cost    += r.qty * r.pmp;
+      if (r.qty < 0) returnsRev += r.revenue;
+      if (r.transactionId != null) transactions.add(`${r.pos}-${r.transactionId}-${r.date}`);
+    }
+    const margin = revenue - cost;
+    const marginPct = revenue !== 0 ? (margin / revenue * 100) : 0;
+    const returnsRate = revenue !== 0 ? (Math.abs(returnsRev) / Math.abs(revenue) * 100) : 0;
+    const ticket = transactions.size > 0 ? revenue / transactions.size : 0;
+    return { revenue, margin, marginPct, returnsRev, returnsRate, ticket, txCount: transactions.size };
+  }, [filteredRows]);
+
+  // Sparkline diário (receita por data)
+  const dailySeries = useMemo(() => {
+    const byDate = new Map();
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      byDate.set(r.date, (byDate.get(r.date) || 0) + r.revenue);
+    }
+    return Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, value }));
+  }, [filteredRows]);
+
+  // Donut por Família 1 + top 5 lista
+  const fam1Aggregated = useMemo(() => {
+    const map = new Map();
+    for (const r of filteredRows) {
+      const key = r.fam1 || '—';
+      map.set(key, (map.get(key) || 0) + r.revenue);
+    }
+    const arr = Array.from(map.entries())
+      .map(([label, value]) => ({ label, value }))
+      .filter(s => s.value > 0)
+      .sort((a, b) => b.value - a.value);
+    const top = arr.slice(0, 6);
+    const rest = arr.slice(6).reduce((s, x) => s + x.value, 0);
+    if (rest > 0) top.push({ label: 'Outros', value: rest });
+    return { segments: top.map((s, i) => ({ ...s, color: CHART_COLORS[i % CHART_COLORS.length] })), full: arr };
+  }, [filteredRows]);
+
+  // ── Drill-down (Top Famílias) ────────────────────────────────────────
+  const drillData = useMemo(() => {
+    if (!snapshot) return { items: [], level: 0 };
+    const level = drillPath.length; // 0 = fam1, 1 = fam2, 2 = fam3, 3 = produtos
+    const map = new Map();
+    for (const r of filteredRows) {
+      if (level >= 1 && r.fam1 !== drillPath[0]) continue;
+      if (level >= 2 && r.fam2 !== drillPath[1]) continue;
+      if (level >= 3 && r.fam3 !== drillPath[2]) continue;
+      let key, label;
+      if (level === 0) { key = r.fam1 || '—'; label = key; }
+      else if (level === 1) { key = r.fam2 || '—'; label = key; }
+      else if (level === 2) { key = r.fam3 || '—'; label = key; }
+      else { key = r.ean; label = r.name || r.ean; }
+      const existing = map.get(key);
+      if (existing) {
+        existing.value += r.revenue;
+        existing.qty   += r.qty;
+        existing.margin += r.revenue - r.qty * r.pmp;
+      } else {
+        map.set(key, { key, label, value: r.revenue, qty: r.qty, margin: r.revenue - r.qty * r.pmp, ean: r.ean, name: r.name });
       }
-      return sortDir === 'desc' ? bv - av : av - bv;
-    });
-    return topOnly ? r.slice(0, 20) : r;
-  }, [salesData, search, sortBy, sortDir, topOnly]);
+    }
+    const items = Array.from(map.values()).sort((a, b) => b.value - a.value).slice(0, 20);
+    return { items, level };
+  }, [snapshot, filteredRows, drillPath]);
 
-  const isMarked = (id) => candidates.some(c => c.id === id);
-  const toggleCandidate = (item) => {
-    setCandidates(c => isMarked(item.id) ? c.filter(x => x.id !== item.id) : [...c, item]);
+  const handleDrillBack = () => setDrillPath(p => p.slice(0, -1));
+  const handleDrillReset = () => setDrillPath([]);
+  const handleDrillInto = (item) => {
+    if (drillData.level >= 3) return; // já no fim
+    setDrillPath(p => [...p, item.key]);
   };
 
-  const maxQty = useMemo(() => salesData ? Math.max(...salesData.rows.map(r => r.qty)) : 0, [salesData]);
+  // ─── render ──────────────────────────────────────────────────────────
+  if (loading) {
+    return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>A carregar…</div>;
+  }
+
+  if (!snapshot) {
+    return (
+      <div className="fade-up" style={{ padding: '24px 32px', maxWidth: 900, margin: '0 auto' }}>
+        <Header
+          eyebrow={<><BarChart3 size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Análise de Vendas</>}
+          title="Importa o ficheiro detalhado FNAC"
+          subtitle="Esperamos o formato 'Vendas detalhadas com margem' com colunas EAN, descrição, qtd, PVP S/IVA, PMP, datas e famílias. Os dados ficam em IndexedDB local."
+        />
+        <DropZone
+          label={importing ? 'A processar…' : 'Arrasta o Excel de vendas'}
+          hint="aceita .xlsx — 86k+ linhas processadas localmente em ~3-5s"
+          accept=".xlsx,.xls"
+          onFile={handleFile}
+          icon={BarChart3}
+        />
+        {importError && (
+          <div style={{ marginTop: 16, padding: 14, background: T.red + '15', border: `1px solid ${T.red}40`, borderRadius: 6, fontSize: 12, color: T.red }}>
+            Erro: {importError}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div className="fade-up">
-      <Header
-        eyebrow="Performance"
-        title="Análise de vendas"
-        subtitle="Carrega o Excel de vendas. Detetamos quantidades e receitas, ordenamos por mais vendidos, e marcas candidatos para a próxima campanha."
-      />
+    <div className="fade-up" style={{ padding: '24px 32px', maxWidth: 1400, margin: '0 auto' }}>
+      {/* Meta bar */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 20, padding: '12px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, color: T.inkSoft, flexWrap: 'wrap' }}>
+        <strong style={{ color: T.ink }}>{snapshot.store}</strong>
+        <span>·</span>
+        <span>{snapshot.dateFrom} → {snapshot.dateTo}</span>
+        <span>·</span>
+        <span>{snapshot.rowsCount.toLocaleString('pt-PT')} linhas</span>
+        <span>·</span>
+        <span style={{ color: T.inkMute, fontSize: 11 }}>{snapshot.filename}</span>
+        <span style={{ flex: 1 }} />
+        <label style={{ cursor: 'pointer', padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <Upload size={11} /> Substituir
+          <input type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
+        </label>
+        <button onClick={handleClear} style={{ padding: '6px 12px', background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <X size={11} /> Apagar
+        </button>
+      </div>
 
-      {!salesData ? (
-        <div>
-          <DropZone
-            label="Arrasta o Excel de vendas"
-            hint="aceita .xlsx, .xls, .csv — colunas detetadas: referência, nome, quantidade, valor"
-            accept=".xlsx,.xls,.csv"
-            onFile={handleFile}
-            icon={BarChart3}
-          />
-          <div style={{ marginTop: 24, padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 13, color: T.inkSoft, lineHeight: 1.7 }}>
-            <strong style={{ color: T.ink }}>Como deve estar o Excel:</strong> uma linha por produto, com colunas que contenham palavras como <span className="mono" style={{ background: T.bg, padding: '2px 6px', borderRadius: 3, fontSize: 11 }}>ref</span> / <span className="mono" style={{ background: T.bg, padding: '2px 6px', borderRadius: 3, fontSize: 11 }}>nome</span> / <span className="mono" style={{ background: T.bg, padding: '2px 6px', borderRadius: 3, fontSize: 11 }}>quantidade</span> / <span className="mono" style={{ background: T.bg, padding: '2px 6px', borderRadius: 3, fontSize: 11 }}>valor</span>. Os nomes não têm de ser exatos.
+      {/* Filtros */}
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 20, flexWrap: 'wrap' }}>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>De</span>
+          <input type="date" value={from || ''} min={snapshot.dateFrom || ''} max={snapshot.dateTo || ''} onChange={e => setFrom(e.target.value)} style={salesFilterInput()} />
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Até</span>
+          <input type="date" value={to || ''} min={snapshot.dateFrom || ''} max={snapshot.dateTo || ''} onChange={e => setTo(e.target.value)} style={salesFilterInput()} />
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Família</span>
+          <select value={fam1Filter} onChange={e => setFam1Filter(e.target.value)} style={salesFilterInput()}>
+            <option value="all">Todas ({allFam1.length})</option>
+            {allFam1.map(f => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </label>
+        <div style={{ flex: 1 }} />
+        <div style={{ fontSize: 11, color: T.inkMute }}>
+          {filteredRows.length.toLocaleString('pt-PT')} linhas no filtro
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: `1px solid ${T.line}` }}>
+        {[
+          { id: 'overview', label: 'Visão Geral' },
+          { id: 'top',      label: 'Top Famílias' },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: '10px 18px', fontSize: 12, fontWeight: 500,
+            background: 'transparent', border: 'none',
+            color: tab === t.id ? T.ink : T.inkSoft,
+            borderBottom: `2px solid ${tab === t.id ? T.accent : 'transparent'}`,
+            cursor: 'pointer', marginBottom: -1,
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab === 'overview' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {/* KPIs */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+            <KpiCard label="Total Vendas" value={fmtEur(kpis.revenue)} subtitle={`${filteredRows.length.toLocaleString('pt-PT')} unidades`} />
+            <KpiCard label="Margem Total" value={fmtEur(kpis.margin)} subtitle={fmtPctSigned(kpis.marginPct) + ' média'} accent={kpis.margin >= 0 ? T.green : T.red} />
+            <KpiCard label="Devoluções" value={kpis.returnsRate.toFixed(1).replace('.', ',') + '%'} subtitle={fmtEur(Math.abs(kpis.returnsRev)) + ' devolvidos'} accent={kpis.returnsRate > 5 ? T.orange : T.inkSoft} />
+            <KpiCard label="Ticket Médio" value={fmtEur2(kpis.ticket)} subtitle={`${kpis.txCount.toLocaleString('pt-PT')} transações`} />
+          </div>
+
+          {/* Sparkline */}
+          <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Receita diária</div>
+            <Sparkline data={dailySeries} height={120} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.inkMute, marginTop: 6 }}>
+              <span>{dailySeries[0]?.date || ''}</span>
+              <span>{dailySeries[dailySeries.length - 1]?.date || ''}</span>
+            </div>
+          </div>
+
+          {/* Donut + Top 5 famílias */}
+          <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 24, padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+            <div>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Família 1</div>
+              <DonutChart segments={fam1Aggregated.segments} size={180} />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Top categorias</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {fam1Aggregated.segments.map((s, i) => {
+                  const total = fam1Aggregated.segments.reduce((a, x) => a + x.value, 0);
+                  const pct = total > 0 ? (s.value / total * 100) : 0;
+                  return (
+                    <div key={i} style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', gap: 10, alignItems: 'center', fontSize: 12 }}>
+                      <span style={{ width: 10, height: 10, borderRadius: 2, background: s.color }} />
+                      <span style={{ color: T.ink }}>{s.label}</span>
+                      <span style={{ color: T.inkSoft, fontVariantNumeric: 'tabular-nums' }}>{fmtEur(s.value)}</span>
+                      <span style={{ color: T.inkMute, fontSize: 10, minWidth: 40, textAlign: 'right' }}>{pct.toFixed(1)}%</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
-      ) : (
-        <>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 24, alignItems: 'center', flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 999, flex: '1 1 280px', boxShadow: `0 1px 0 ${T.line}` }}>
-              <Search size={14} style={{ color: T.inkMute }} />
-              <SearchInput value={search} onCommit={setSearch} placeholder="Pesquisar produto, referência…" style={{ border: 'none', background: 'transparent', outline: 'none', fontSize: 13, width: '100%' }} />
-            </div>
-            <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 999 }}>
-              {[{ id: 'qty', l: 'Quantidade' }, { id: 'revenue', l: 'Receita' }, { id: 'name', l: 'Nome' }].map(s => (
-                <button key={s.id} onClick={() => setSortBy(s.id)} style={{
-                  padding: '6px 14px', fontSize: 12, borderRadius: 999, border: 'none',
-                  background: sortBy === s.id ? T.ink : 'transparent',
-                  color: sortBy === s.id ? T.bg : T.inkSoft,
-                  fontWeight: sortBy === s.id ? 600 : 400,
-                }}>{s.l}</button>
-              ))}
-              <button onClick={() => setSortDir(d => d === 'desc' ? 'asc' : 'desc')} style={{
-                padding: '6px 10px', borderRadius: 999, border: 'none', background: 'transparent', color: T.inkSoft,
-                display: 'flex', alignItems: 'center',
-              }}>
-                {sortDir === 'desc' ? <ArrowDown size={14} /> : <ArrowUp size={14} />}
+      )}
+
+      {tab === 'top' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Breadcrumb */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, color: T.inkSoft, flexWrap: 'wrap' }}>
+            <button onClick={handleDrillReset} style={{ background: 'transparent', border: 'none', color: drillPath.length === 0 ? T.ink : T.accent, cursor: drillPath.length === 0 ? 'default' : 'pointer', fontSize: 12, padding: 0 }}>Famílias</button>
+            {drillPath.map((p, i) => (
+              <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ color: T.inkMute }}>›</span>
+                <button onClick={() => setDrillPath(drillPath.slice(0, i + 1))}
+                  style={{ background: 'transparent', border: 'none', color: i === drillPath.length - 1 ? T.ink : T.accent, cursor: i === drillPath.length - 1 ? 'default' : 'pointer', fontSize: 12, padding: 0 }}>{p}</button>
+              </span>
+            ))}
+            {drillPath.length > 0 && (
+              <button onClick={handleDrillBack} style={{ marginLeft: 'auto', padding: '4px 10px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>
+                ← Voltar
               </button>
-            </div>
-            <button onClick={() => setTopOnly(t => !t)} style={{
-              padding: '9px 16px', fontSize: 12, fontWeight: 500,
-              background: topOnly ? T.accent : T.bgEl,
-              color: topOnly ? '#fff' : T.ink,
-              border: `1px solid ${topOnly ? T.accent : T.line}`,
-              borderRadius: 999, display: 'flex', alignItems: 'center', gap: 6,
-              boxShadow: topOnly ? `0 6px 14px -6px ${T.accent}80` : 'none',
-            }}>
-              <TrendingUp size={14} /> Top 20
-            </button>
-            <button onClick={() => setSalesData(null)} style={{
-              padding: '9px 14px', fontSize: 12, background: 'transparent', color: T.inkSoft,
-              border: `1px solid ${T.line}`, borderRadius: 999,
-            }}>
-              <RotateCcw size={12} style={{ display: 'inline', marginRight: 6 }} /> Substituir ficheiro
-            </button>
+            )}
           </div>
 
-          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 18, overflow: 'hidden', boxShadow: `0 1px 0 ${T.line}, 0 14px 28px -18px rgba(0,0,0,0.1)` }}>
-            <div style={{ padding: '14px 20px', borderBottom: `1px solid ${T.line}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12 }}>
-              <div className="mono" style={{ color: T.inkMute, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-                {filtered.length} produtos · {salesData.filename}
-              </div>
-              {candidates.length > 0 && (
-                <div className="mono" style={{ color: T.accent, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 500 }}>
-                  ★ {candidates.length} candidatos marcados
-                </div>
-              )}
-            </div>
-            <div style={{ maxHeight: 600, overflow: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-                <thead style={{ position: 'sticky', top: 0, background: T.bgEl, zIndex: 1 }}>
-                  <tr>
-                    <th className="mono" style={thStyle}>#</th>
-                    <th className="mono" style={thStyle}>REF</th>
-                    <th className="mono" style={thStyle}>PRODUTO</th>
-                    <th className="mono" style={{ ...thStyle, textAlign: 'right' }}>QTD</th>
-                    <th className="mono" style={{ ...thStyle, textAlign: 'right' }}>RECEITA</th>
-                    <th className="mono" style={{ ...thStyle, width: 120 }}>VOLUME</th>
-                    <th className="mono" style={{ ...thStyle, width: 60, textAlign: 'center' }}>★</th>
+          {/* Chart */}
+          {drillData.level < 3 ? (
+            <HBarChart
+              data={drillData.items.map((it, i) => ({ key: it.key, label: it.label, value: it.value, color: CHART_COLORS[i % CHART_COLORS.length] }))}
+              onItemClick={handleDrillInto}
+              valueFormatter={fmtEur}
+            />
+          ) : (
+            // Nível produto: tabela
+            <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Qtd</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((p, i) => {
-                    const marked = isMarked(p.id);
-                    return (
-                      <tr key={p.id} style={{ borderBottom: `1px solid ${T.lineSoft}`, background: marked ? T.accentSoft : 'transparent' }}>
-                        <td style={{ ...tdStyle, color: T.inkMute }} className="mono">{String(i + 1).padStart(2, '0')}</td>
-                        <td style={{ ...tdStyle, color: T.inkSoft }} className="mono">{p.ref}</td>
-                        <td style={{ ...tdStyle, fontWeight: 500 }}>{p.name}</td>
-                        <td style={{ ...tdStyle, textAlign: 'right' }} className="mono">{p.qty.toLocaleString('pt-PT')}</td>
-                        <td style={{ ...tdStyle, textAlign: 'right' }} className="mono">€{p.revenue.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                        <td style={tdStyle}>
-                          <div style={{ height: 4, background: T.lineSoft, borderRadius: 2, overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${maxQty ? (p.qty / maxQty) * 100 : 0}%`, background: T.accent }} />
-                          </div>
-                        </td>
-                        <td style={{ ...tdStyle, textAlign: 'center' }}>
-                          <button onClick={() => toggleCandidate(p)} style={{
-                            background: marked ? T.accent : 'transparent',
-                            border: `1px solid ${marked ? T.accent : T.line}`,
-                            borderRadius: 4, padding: '4px 8px',
-                            color: marked ? '#fff' : T.inkSoft,
-                            display: 'inline-flex', alignItems: 'center',
-                          }}>
-                            <Star size={12} fill={marked ? '#fff' : 'none'} strokeWidth={1.75} />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {drillData.items.map(it => (
+                    <tr key={it.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                      <td style={salesTd()}>{it.name}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{it.qty}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.value)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: it.margin >= 0 ? T.green : T.red }}>{fmtEur(it.margin)}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
-          </div>
-        </>
+          )}
+        </div>
       )}
     </div>
   );
 }
 
-const thStyle = { textAlign: 'left', padding: '12px 16px', fontWeight: 500, fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase', borderBottom: `1px solid ${T.line}`, whiteSpace: 'nowrap' };
-const tdStyle = { padding: '12px 16px', whiteSpace: 'nowrap' };
+const salesFilterInput = () => ({
+  padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`,
+  borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'inherit',
+});
+const salesTh = () => ({ padding: '10px 14px', textAlign: 'left', fontWeight: 500, fontSize: 11 });
+const salesTd = () => ({ padding: '8px 14px' });
 
 // ─────────────────────────────────────────────────────────────────────────
 // Campaigns — Store Layout Planner
