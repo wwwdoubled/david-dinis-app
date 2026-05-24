@@ -15188,7 +15188,7 @@ function NovidadesView({ user, userDepartment }) {
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: 1100, margin: '0 auto' }}>
-      <PageHeader
+      <Header
         eyebrow={<><Sparkles size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Novidades</>}
         title="Artigos com data de lançamento"
         subtitle="Cada novidade pode ser alocada a um piso/zona da loja para preparar a exposição. Reusa o layout definido pelo admin em 'Layout da loja'."
@@ -15484,7 +15484,7 @@ function DevolucoesView({ user, userDepartment }) {
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: 1000, margin: '0 auto' }}>
-      <PageHeader
+      <Header
         eyebrow={<><PackageOpen size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Devoluções</>}
         title="Gestão de devoluções"
         subtitle="Cada devolução começa com upload de Excel contendo artigos a devolver (EAN + quantidade). À medida que encontras os artigos podes incrementar manualmente OU usar a câmara para picar o EAN."
