@@ -10,7 +10,7 @@ import {
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
   Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap,
-  KeyRound, EyeOff, Copy, FileDown, Printer
+  KeyRound, EyeOff, Copy, FileDown, Printer, PackageOpen
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -531,8 +531,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.16.0';
-const APP_BUILD_DATE = '2026-05-22T23:30'; // Europe/Lisbon
+const APP_VERSION = '3.17.0';
+const APP_BUILD_DATE = '2026-05-24T18:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -542,6 +542,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.17.0', date: '2026-05-24', summary: 'Suporte multi-departamento (PTS / PES). (A) Cada utilizador tem um departamento — atribuído pelo admin ao criar conta (novo dropdown no modal de criar utilizador). Coluna department em user_profiles/campaigns/periods/stock_snapshots (requer correr supabase/migrations/2026-05-22_departments.sql). (B) PES tem sidebar dedicada — vê todas as vistas habituais (Vendas, Alterações, Stock, Inventário, etc.) mas NÃO vê Folhetos nem PDFs; em troca vê 2 novas vistas: Novidades (artigos com data de lançamento + alocação a piso/zona) e Devoluções (upload Excel + tracking qty encontrada via scan EAN ou input manual). Requer correr supabase/migrations/2026-05-22_novidades_devolucoes.sql. (C) Campanhas / períodos / stock isolados por dept — non-admin só vê dados do seu dept; upload stamping automático com o dept do uploader. (D) Admin entra com modal de escolha "PTS ou PES" — vista limpa e separada. Botão na sidebar para alternar a qualquer altura sem reload. (E) Edge Function admin-user-mgmt actualizada para aceitar department no payload create (requer re-deploy no Supabase). (F) Badges visuais: PTS azul, PES roxo, ADMIN accent — na sidebar do user logado e nas linhas do Admin → Utilizadores.' },
   { version: '3.16.0', date: '2026-05-22', summary: 'Modelo de autenticação admin-only + rebrand. (A) Login: removidos os modos "Criar conta" e "Recuperar password" — só sign-in. (B) Admin → Utilizadores ganha botão "Criar utilizador" e acção "Reset pw" por linha: a Edge Function admin-user-mgmt (Deno) gera uma password temporária de 14 chars (com service-role do Supabase, autenticando o caller via JWT e verificando admins table), marca user_profiles.must_change_password=true, e devolve a temp pw num modal copiável. (C) ForcePasswordChangeModal bloqueia toda a app no próximo login do utilizador até definir password definitiva via supabase.auth.updateUser({password}); só desbloqueia depois de limpar a flag. Requer correr supabase/migrations/2026-05-22_force_password_change.sql e fazer deploy da Edge Function admin-user-mgmt em Supabase Dashboard → Edge Functions. (D) Rebrand: "Campaign Studio" → "Gestão de Campanhas" em layout.js (tab do browser) e no login screen.' },
   { version: '3.15.8', date: '2026-05-22', summary: 'Inventário (PDF de códigos de barras): fix bullet-proof para células em branco. Apesar da normalizeToEAN13 da v3.15.6 estar correcta (testada), o JsBarcode 3.x falhava SILENCIOSAMENTE em alguns inputs em produção — não lançava excepção mas o canvas ficava 0×0 e o toDataURL devolvia PNG vazio que o jsPDF aceitava e renderizava em branco. Fix: (a) pré-dimensionar o canvas a 300×100 antes do render; (b) usar a callback `valid` do jsbarcode para detectar falha; (c) verificar dimensões do canvas pós-render; (d) sanity-check ao dataURL; (e) fallback automático para CODE128 (também scannable em qualquer leitor de POS) se o EAN13 falhar por qualquer razão; (f) console.warn explícitos para diagnóstico futuro.' },
   { version: '3.15.7', date: '2026-05-15', summary: 'Redução crítica de egress do Supabase (~99%). A sync periódica (30s) chamava cloudFetchAllCampaigns que descarregava as ROWS comprimidas de todas as campanhas a cada refresh — ~750 KB × 120/h × 8h = ~720 MB/dia/utilizador, soma facilmente para >17 GB/mês de egress no plano. Agora chama cloudFetchAllCampaignsMeta (só metadata, ~5 KB). mergeCampaigns ganha um parâmetro cloudStrictlyNewer: quando o cloud é estritamente mais recente (outro dispositivo editou) E só veio meta, as rows locais são invalidadas (_needsRows: true) → lazy hydration trata da re-fetch só quando o utilizador abrir a campanha. Comportamento idêntico para o utilizador final; egress baixa de ~720 MB/dia para ~5 MB/dia.' },
@@ -835,6 +836,10 @@ const DEFAULT_MENU_VISIBILITY = {
   // activar `visible` e escolher que roles vêm a opção na sidebar/Cmd+K.
   // (RLS continua a garantir que só vêem o que podem ler.)
   credentials: { roles: [], visible: false },
+  // v3.17.0: vistas PES — gated pelo hideFor/showFor da Sidebar, não pelo uiConfig.
+  // Default visible=true para que admin sempre veja na sidebar.
+  novidades:  { roles: ['user', 'manager', 'viewer'], visible: true },
+  devolucoes: { roles: ['user', 'manager', 'viewer'], visible: true },
   scanner: { visible: true, roles: ['user', 'manager', 'viewer'] },
 };
 
@@ -1140,6 +1145,85 @@ async function cloudFetchCredentialsActivity({ limit = 100 } = {}) {
     .limit(limit);
   if (error) return [];
   return data || [];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Novidades (PES) — artigos com data de lançamento + alocação a piso/zona
+// v3.17.0
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchNovidades() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('novidades')
+    .select('*')
+    .order('launch_date', { ascending: true, nullsFirst: false });
+  if (error) { console.warn('fetchNovidades:', error.message); return []; }
+  return data || [];
+}
+async function cloudCreateNovidade(payload) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase.from('novidades').insert(payload).select().single();
+  return { ok: !error, data, error: error?.message };
+}
+async function cloudUpdateNovidade(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('novidades').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+async function cloudDeleteNovidade(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('novidades').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Devoluções (PES) — sessões de devolução com items + qty tracking
+// v3.17.0
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchDevolucoes() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('devolucoes')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) { console.warn('fetchDevolucoes:', error.message); return []; }
+  return data || [];
+}
+async function cloudFetchDevolucaoItems(devolucaoId) {
+  if (!supabase || !devolucaoId) return [];
+  const { data, error } = await supabase
+    .from('devolucao_items')
+    .select('*')
+    .eq('devolucao_id', devolucaoId)
+    .order('description', { ascending: true });
+  if (error) { console.warn('fetchDevolucaoItems:', error.message); return []; }
+  return data || [];
+}
+async function cloudCreateDevolucao(payload, items) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase.from('devolucoes').insert(payload).select().single();
+  if (error || !data) return { ok: false, error: error?.message };
+  if (items && items.length) {
+    const itemsPayload = items.map(it => ({ ...it, devolucao_id: data.id }));
+    const { error: itemErr } = await supabase.from('devolucao_items').insert(itemsPayload);
+    if (itemErr) return { ok: false, error: 'items: ' + itemErr.message, data };
+  }
+  return { ok: true, data };
+}
+async function cloudUpdateDevolucaoItem(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('devolucao_items').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+async function cloudUpdateDevolucao(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('devolucoes').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+async function cloudDeleteDevolucao(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('devolucoes').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1459,16 +1543,19 @@ async function cloudFetchAllPeriods() {
       created_by: p.created_by || p.user_id,
       createdAt: p.created_at,
       updatedAt: p.updated_at,
+      department: p.department || 'PTS', // v3.17.0
     };
   });
 }
 
-async function cloudUpsertPeriod(period, userId) {
+async function cloudUpsertPeriod(period, userId, opts = {}) {
   if (!supabase) return { ok: false };
   // Reject non-UUID ids — DB requires UUID
   if (!isUUID(period.id)) {
     return { ok: false, error: `Período tem id inválido (não-UUID): ${period.id}` };
   }
+  // v3.17.0: stamp do departamento (PTS | PES)
+  const department = (period.department === 'PES' || opts.department === 'PES') ? 'PES' : 'PTS';
   const payload = {
     id: period.id,
     user_id: period.user_id || userId,
@@ -1482,6 +1569,7 @@ async function cloudUpsertPeriod(period, userId) {
     has_posters: period.has_posters || false,
     hidden: period.hidden || false,
     updated_at: new Date().toISOString(),
+    department, // v3.17.0
   };
   // Upsert: insert or update on conflict with id (primary key)
   const { error: upsertErr } = await supabase
@@ -1525,7 +1613,7 @@ async function cloudFetchAllCampaignsMeta() {
   if (!supabase) return [];
   const { data, error } = await supabase
     .from('campaigns')
-    .select('id, user_id, period_id, campaign_key, name, headers, floors, floors_compressed, uploaded_at, updated_at, created_by, updated_by')
+    .select('id, user_id, period_id, campaign_key, name, headers, floors, floors_compressed, uploaded_at, updated_at, created_by, updated_by, department')
     .order('updated_at', { ascending: false });
   if (error) {
     console.warn('cloudFetchAllCampaigns (meta) failed:', error.message);
@@ -1549,6 +1637,7 @@ async function cloudFetchAllCampaignsMeta() {
       created_by: c.created_by,
       updated_by: c.updated_by,
       updatedAt: c.updated_at,
+      department: c.department || 'PTS', // v3.17.0
     };
   }));
   return campaigns;
@@ -1580,10 +1669,12 @@ async function cloudFetchAllCampaigns() {
   });
 }
 
-async function cloudUpsertCampaign(campaign, userId) {
+async function cloudUpsertCampaign(campaign, userId, opts = {}) {
   if (!supabase) return { ok: false };
   // Validate periodId is UUID or null
   const periodId = (campaign.periodId && isUUID(campaign.periodId)) ? campaign.periodId : null;
+  // v3.17.0: stamp do departamento (PTS | PES). Caller passa o dept do user logado.
+  const department = (campaign.department === 'PES' || opts.department === 'PES') ? 'PES' : 'PTS';
 
   // Compress large fields
   const rows = campaign.rows || [];
@@ -1614,6 +1705,7 @@ async function cloudUpsertCampaign(campaign, userId) {
     uploaded_at: campaign.uploaded ? campaign.uploaded.toISOString() : new Date().toISOString(),
     updated_at: new Date().toISOString(),
     updated_by: userId,
+    department, // v3.17.0
   };
   const hasRows = rows.length > 0;
   if (hasRows) {
@@ -2890,6 +2982,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [userProfile, setUserProfile] = useState(null);
   const [uiConfig, setUIConfig] = useState(null);
 
+  // v3.17.0: admin view switcher — admin escolhe que dept ver na entrada.
+  // Mantém estado entre sessões. null = ainda não escolheu (mostra picker).
+  const [adminViewDepartment, setAdminViewDepartment] = useStoredState('admin.viewDept', null);
+
+  // userDepartment: o dept que está actualmente activo na UI.
+  // - Non-admin: fixo no dept do user_profile.
+  // - Admin: o que escolheu no AdminViewPickerModal (pode alternar via sidebar).
+  const userDepartment = useMemo(() => {
+    if (isAdmin) return adminViewDepartment || 'PTS'; // 'PTS' enquanto modal abre
+    return userProfile?.department || 'PTS';
+  }, [isAdmin, userProfile?.department, adminViewDepartment]);
+
+  // Mostrar modal de escolha apenas para admin que ainda não escolheu nesta sessão
+  const showAdminViewPicker = isAdmin && !adminViewDepartment;
+
   // Families excluded from the entire webapp. Admin can override in Config tab.
   // Falls back to DEFAULT_EXCLUDED_FAMILIES when uiConfig hasn't loaded yet.
   const excludedFamilies = useMemo(() => {
@@ -2902,13 +3009,34 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // Used by ALL views (dashboard, sales, changes, inventory, campaigns, calendar)
   // to ensure excluded families never appear unless admin explicitly re-enables.
   // Admin views still receive the raw `campaigns`.
+  //
+  // v3.17.0: também filtra por departamento. Non-admin só vê campanhas do seu dept
+  // (campanha tem coluna `department` stamped no upload). Admin vê tudo.
   const filteredCampaigns = useMemo(() => {
-    if (!excludedFamilies || excludedFamilies.length === 0) return campaigns;
-    return campaigns.map(c => ({
-      ...c,
-      rows: filterRowsByFamily(c.rows || [], c.headers || [], excludedFamilies),
-    }));
-  }, [campaigns, excludedFamilies]);
+    let cs = campaigns;
+    if (userDepartment) {
+      cs = cs.filter(c => (c.department || 'PTS') === userDepartment);
+    }
+    if (excludedFamilies && excludedFamilies.length > 0) {
+      cs = cs.map(c => ({
+        ...c,
+        rows: filterRowsByFamily(c.rows || [], c.headers || [], excludedFamilies),
+      }));
+    }
+    return cs;
+  }, [campaigns, excludedFamilies, userDepartment]);
+
+  // v3.17.0: periods filtradas por dept (admin = sem filtro)
+  const filteredPeriods = useMemo(() => {
+    if (!userDepartment) return periods;
+    return periods.filter(p => (p.department || 'PTS') === userDepartment);
+  }, [periods, userDepartment]);
+
+  // v3.17.0: stock snapshots filtradas por dept. NOTA: as listas de rows
+  // `stockRowsPO2`/`stockRowsPO3` derivam dos snapshots ativos; filtramos
+  // apenas a lista de snapshots para que a admin tab "Cloud" e fluxos de
+  // selecção de snapshot só mostrem os do dept. (rows são consumidas a
+  // partir de useMemo abaixo, sem necessidade de filtrar separadamente.)
 
   // ─── Posters / poster zones / notifications ───────────────────────────
   const [posters, setPosters] = useState([]);
@@ -3579,6 +3707,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     const p = newPeriod(data);
     if (user) p.user_id = user.id;
     if (user) p.created_by = user.id;
+    // v3.17.0: stamp do depto do criador. Admin defaultará PTS (poderá no
+    // futuro escolher dept ao criar — out of scope agora).
+    p.department = userDepartment || userProfile?.department || 'PTS';
     idbPutPeriod(p).catch(err => console.warn('Period save failed:', err));
     setPeriods(ps => [p, ...ps]);
     if (user && supabase) {
@@ -3587,11 +3718,11 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         userId: user.id, userEmail: user.email,
         action: 'create', resourceType: 'period',
         resourceId: p.id, resourceName: p.name,
-        metadata: { startDate: p.startDate, endDate: p.endDate },
+        metadata: { startDate: p.startDate, endDate: p.endDate, department: p.department },
       });
     }
     return p;
-  }, [user]);
+  }, [user, userDepartment, userProfile?.department]);
 
   // Debounced persistence buffers — evita escrever em IDB / cloud / activity_log
   // a cada keystroke quando o utilizador escreve em campos como "Observações".
@@ -4017,6 +4148,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           }}
         />
       )}
+      {/* v3.17.0: admin escolhe vista (PTS/PES) na entrada. Bloqueia até escolher. */}
+      {showAdminViewPicker && !mustChangePassword && (
+        <AdminViewPickerModal onPick={(dept) => setAdminViewDepartment(dept)} />
+      )}
       <style>{fonts}{`
         * { box-sizing: border-box; }
         :root { color-scheme: ${theme === 'dark' ? 'dark' : 'light'}; }
@@ -4358,6 +4493,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           view={view} setView={setView} candidates={candidates}
           onLogout={handleLogoutWithActivity} user={user}
           isAdmin={isAdmin} userProfile={userProfile} uiConfig={uiConfig}
+          userDepartment={userDepartment}
+          adminViewDepartment={adminViewDepartment}
+          setAdminViewDepartment={setAdminViewDepartment}
           notifications={notifications}
           syncStatus={syncStatus} isOnline={isOnline}
           theme={theme} toggleTheme={toggleTheme} setTheme={setTheme}
@@ -4401,12 +4539,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               }}
             />
           )}
-          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={periods} posters={posters} notifications={notifications} />}
+          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} />}
           {view === 'campaigns' && <CampaignsView
             campaigns={campaigns} setCampaigns={setCampaigns}
-            periods={periods}
+            periods={filteredPeriods}
             posters={posters} posterZones={posterZones} onRefreshPosters={refreshPosters}
             user={user} isAdmin={isAdmin}
+            userDepartment={userDepartment}
             onCreatePeriod={createPeriod} onUpdatePeriod={updatePeriod}
             onDeletePeriod={deletePeriod} onMoveCampaign={moveCampaignToPeriod}
             onToggleHidden={togglePeriodHidden}
@@ -4420,9 +4559,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
             cloudDataLoaded={cloudDataLoaded}
           />}
-          {view === 'calendar' && <CalendarView periods={periods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
+          {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {view === 'sales' && <SalesView salesData={salesData} setSalesData={setSalesData} candidates={candidates} setCandidates={setCandidates} />}
-          {view === 'changes' && <ChangesView campaigns={campaigns} periods={periods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
+          {view === 'changes' && <ChangesView campaigns={filteredCampaigns} periods={filteredPeriods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
             stockRowsPO2={stockRowsPO2} setStockRowsPO2={setStockRowsPO2}
             stockRowsPO3={stockRowsPO3} setStockRowsPO3={setStockRowsPO3}
@@ -4446,6 +4585,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
+          {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} />}
+          {view === 'devolucoes' && <DevolucoesView user={user} userDepartment={userDepartment} />}
           {view === 'admin' && isAdmin && (
             <AdminView
               user={user}
@@ -4548,7 +4689,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {notificationPanelOpen && (
         <NotificationPanel
           notifications={notifications}
-          periods={periods}
+          periods={filteredPeriods}
           posters={posters}
           onClose={() => setNotificationPanelOpen(false)}
           onDismiss={handleDismissNotification}
@@ -4573,8 +4714,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {/* Blueprint panel */}
       {blueprintOpen && (
         <BlueprintPanel
-          campaigns={campaigns}
-          periods={periods}
+          campaigns={filteredCampaigns}
+          periods={filteredPeriods}
           defaultLayout={defaultLayout}
           onClose={() => setBlueprintOpen(false)}
         />
@@ -4583,8 +4724,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {/* Pesquisa global (Ctrl+K / Cmd+K / "/") — v3.12.0 */}
       {globalSearchOpen && (
         <GlobalSearch
-          campaigns={campaigns}
-          periods={periods}
+          campaigns={filteredCampaigns}
+          periods={filteredPeriods}
           stockRowsPO2={stockRowsPO2}
           stockRowsPO3={stockRowsPO3}
           isAdmin={isAdmin}
@@ -4660,7 +4801,7 @@ function SyncIndicator({ status, isOnline }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Sidebar
 // ─────────────────────────────────────────────────────────────────────────
-function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme }) {
+function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, userDepartment, adminViewDepartment, setAdminViewDepartment, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme }) {
   const userRole = userProfile?.role || 'user';
   const notifCount = (notifications || []).length;
   // Detect mobile viewport — used to render-skip the absolute session widget
@@ -4674,21 +4815,31 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     mq.addEventListener ? mq.addEventListener('change', update) : mq.addListener(update);
     return () => { mq.removeEventListener ? mq.removeEventListener('change', update) : mq.removeListener(update); };
   }, []);
+  // v3.17.0: itens com metadata por dept.
+  // - hideFor: array de depts que NÃO vêem este item
+  // - showFor: se presente, APENAS estes depts vêem (além de admin)
   const allItems = [
-    { id: 'dashboard', label: 'Visão Geral', icon: LayoutDashboard },
-    { id: 'sales', label: 'Análise de Vendas', icon: BarChart3, badge: candidates.length || null },
-    { id: 'campaigns', label: 'Campanhas', icon: Layers, dot: notifCount > 0 ? notifCount : null },
-    { id: 'calendar', label: 'Calendário', icon: Calendar },
-    { id: 'changes', label: 'Alterações', icon: GitCompareArrows },
-    { id: 'stock', label: 'Stock', icon: Package },
-    { id: 'inventory', label: 'Inventário', icon: ScanLine },
-    { id: 'images', label: 'Folhetos', icon: ImageIcon },
-    { id: 'pdfs', label: 'PDFs', icon: FileText },
-    { id: 'notes', label: 'Notas', icon: NotebookPen },
-    { id: 'credentials', label: 'Cofre', icon: KeyRound },
+    { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
+    { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, badge: candidates.length || null },
+    { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
+    { id: 'calendar',   label: 'Calendário',          icon: Calendar },
+    { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
+    { id: 'stock',      label: 'Stock',               icon: Package },
+    { id: 'inventory',  label: 'Inventário',          icon: ScanLine },
+    { id: 'images',     label: 'Folhetos',            icon: ImageIcon,   hideFor: ['PES'] },
+    { id: 'pdfs',       label: 'PDFs',                icon: FileText,    hideFor: ['PES'] },
+    { id: 'notes',      label: 'Notas',               icon: NotebookPen },
+    { id: 'novidades',  label: 'Novidades',           icon: Sparkles,    showFor: ['PES'] },
+    { id: 'devolucoes', label: 'Devoluções',          icon: PackageOpen, showFor: ['PES'] },
+    { id: 'credentials',label: 'Cofre',               icon: KeyRound },
   ];
-  // Filter items by visibility config (admins always see everything)
-  const items = allItems.filter(it => canSeeMenuItem(it.id, userRole, isAdmin, uiConfig));
+  // v3.17.0: filtro dept-aware. Tanto admin (com switcher) como non-admin (fixo)
+  // respeitam o userDepartment actual.
+  const items = allItems.filter(it => {
+    if (it.hideFor?.includes(userDepartment)) return false;
+    if (it.showFor && !it.showFor.includes(userDepartment)) return false;
+    return canSeeMenuItem(it.id, userRole, isAdmin, uiConfig);
+  });
   // Always append admin item at the end if admin
   if (isAdmin) {
     items.push({ id: 'admin', label: 'Administração', icon: Shield, accent: true });
@@ -4771,7 +4922,53 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
           }} title={user?.email || 'David Dinis'}>
             {user?.email || 'David Dinis'}
           </div>
-          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 2, marginBottom: 12 }}>
+          {/* v3.17.0: badges admin/dept */}
+          {user && (isAdmin || userDepartment) && (
+            <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+              {isAdmin && (
+                <span style={{
+                  fontSize: 9, padding: '2px 6px', background: T.accent, color: '#fff',
+                  borderRadius: 3, fontWeight: 600, letterSpacing: '0.06em',
+                  fontFamily: 'Geist Mono', textTransform: 'uppercase',
+                }}>ADMIN</span>
+              )}
+              {userDepartment && (
+                <span style={{
+                  fontSize: 9, padding: '2px 6px',
+                  background: userDepartment === 'PES' ? T.purple : T.blue,
+                  color: '#fff', borderRadius: 3, fontWeight: 600, letterSpacing: '0.06em',
+                  fontFamily: 'Geist Mono', textTransform: 'uppercase',
+                }}>{userDepartment}</span>
+              )}
+            </div>
+          )}
+          {/* v3.17.0: admin pode alternar entre vistas PTS/PES */}
+          {isAdmin && adminViewDepartment && setAdminViewDepartment && (
+            <button
+              onClick={() => setAdminViewDepartment(adminViewDepartment === 'PTS' ? 'PES' : 'PTS')}
+              title={`Estás a ver dados ${adminViewDepartment}. Clica para alternar para ${adminViewDepartment === 'PTS' ? 'PES' : 'PTS'}.`}
+              style={{
+                marginTop: 8, padding: '6px 10px', width: '100%',
+                background: 'transparent', color: T.inkSoft,
+                border: `1px solid ${T.line}`, borderRadius: 4,
+                cursor: 'pointer', fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                gap: 6, fontSize: 11,
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background = T.lineSoft; e.currentTarget.style.color = T.ink; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.inkSoft; }}
+            >
+              <span>Mudar para</span>
+              <span className="mono" style={{
+                fontSize: 10, fontWeight: 600,
+                color: adminViewDepartment === 'PTS' ? T.purple : T.blue,
+                letterSpacing: '0.05em',
+              }}>
+                {adminViewDepartment === 'PTS' ? 'PES' : 'PTS'}
+              </span>
+            </button>
+          )}
+          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, marginBottom: 12 }}>
             {candidates.length} candidatos
           </div>
           {user && supabaseEnabled && (
@@ -5740,6 +5937,7 @@ function CampaignsView({
   campaigns, setCampaigns,
   periods, onCreatePeriod, onUpdatePeriod, onDeletePeriod, onMoveCampaign, onToggleHidden,
   posters, posterZones, onRefreshPosters, user, isAdmin,
+  userDepartment, // v3.17.0
   zoneMemory, setZoneMemory,
   defaultLayout, setDefaultLayout,
   candidates, setCandidates,
@@ -6177,6 +6375,7 @@ function CampaignsView({
       rows, headers, itemCount: rows.length,
       floors: initialFloors,
       periodId: selectedPeriodId || null,
+      department: userDepartment || 'PTS', // v3.17.0: stamp do depto do uploader
     };
 
     if (savedFloors && savedSlotCount > 0) {
@@ -14907,6 +15106,692 @@ const CREDENTIAL_TYPES = [
   { id: 'other',    label: 'Outro',            color: '#5A554E' },
 ];
 
+// ─────────────────────────────────────────────────────────────────────────
+// NovidadesView (PES) — v3.17.0
+// Lista de artigos com data de lançamento + alocação a piso/zona da loja.
+// Reusa store_floors + store_zones para o dropdown de alocação.
+// ─────────────────────────────────────────────────────────────────────────
+function NovidadesView({ user, userDepartment }) {
+  const [items, setItems] = useState(null);
+  const [editing, setEditing] = useState(null); // null | {id?, ...}
+  const [search, setSearch] = useState('');
+  const [floors, setFloors] = useState([]); // cloud_store_floors
+  const [zones, setZones] = useState([]);   // cloud_store_zones
+
+  const refresh = useCallback(async () => {
+    setItems(null);
+    const list = await cloudFetchNovidades();
+    setItems(Array.isArray(list) ? list : []);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Carrega pisos + zonas para o dropdown de alocação
+  useEffect(() => {
+    let alive = true;
+    cloudFetchStoreLayout().then(layout => {
+      if (!alive || !layout) return;
+      setFloors(layout);
+      const allZones = layout.flatMap(f => (f.zones || []).map(z => ({ ...z, floorId: f.id, floorName: f.name })));
+      setZones(allZones);
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(n =>
+      (n.ean || '').toLowerCase().includes(q) ||
+      (n.name || '').toLowerCase().includes(q) ||
+      (n.description || '').toLowerCase().includes(q)
+    );
+  }, [items, search]);
+
+  const handleSave = async (data) => {
+    let res;
+    if (data.id) {
+      const { id, ...patch } = data;
+      patch.updated_by = user?.id;
+      res = await cloudUpdateNovidade(id, patch);
+    } else {
+      res = await cloudCreateNovidade({
+        ...data,
+        department: userDepartment || 'PES',
+        created_by: user?.id,
+        updated_by: user?.id,
+      });
+    }
+    if (res?.ok) {
+      setEditing(null);
+      refresh();
+    } else {
+      alert('Erro ao guardar: ' + (res?.error || 'desconhecido'));
+    }
+  };
+
+  const handleDelete = async (n) => {
+    if (!confirm(`Eliminar novidade "${n.name}"?`)) return;
+    const res = await cloudDeleteNovidade(n.id);
+    if (res?.ok) refresh();
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  const floorMap = useMemo(() => new Map(floors.map(f => [f.id, f])), [floors]);
+  const zoneMap = useMemo(() => new Map(zones.map(z => [z.id, z])), [zones]);
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1100, margin: '0 auto' }}>
+      <PageHeader
+        eyebrow={<><Sparkles size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Novidades</>}
+        title="Artigos com data de lançamento"
+        subtitle="Cada novidade pode ser alocada a um piso/zona da loja para preparar a exposição. Reusa o layout definido pelo admin em 'Layout da loja'."
+        action={
+          <button onClick={() => setEditing({ ean: '', name: '', description: '', launch_date: '', floor_id: '', zone_id: '', notes: '' })} style={{
+            padding: '8px 14px', background: T.ink, color: T.bg,
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+          }}>
+            <Plus size={12} /> Nova novidade
+          </button>
+        }
+      />
+
+      <div style={{ marginBottom: 16, position: 'relative', maxWidth: 360 }}>
+        <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: T.inkMute }} />
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Pesquisar EAN, nome, descrição…"
+          style={{
+            width: '100%', padding: '9px 12px 9px 32px', fontSize: 13,
+            background: T.paper || '#fff', color: T.ink,
+            border: `1px solid ${T.line}`, borderRadius: 8,
+            outline: 'none', fontFamily: 'inherit',
+          }}
+        />
+      </div>
+
+      {items === null ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar…</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+          <Sparkles size={30} style={{ opacity: 0.25, marginBottom: 10 }} />
+          <div>Sem novidades. Carrega "Nova novidade" para começar.</div>
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 12 }}>
+          {filtered.map(n => {
+            const fl = floorMap.get(n.floor_id);
+            const zn = zoneMap.get(n.zone_id);
+            return (
+              <div key={n.id} style={{
+                padding: 16, background: T.bgEl, border: `1px solid ${T.line}`,
+                borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 8,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{n.name}</div>
+                    <div className="mono" style={{ fontSize: 10, color: T.inkMute, marginTop: 2 }}>{n.ean}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button onClick={() => setEditing(n)} title="Editar" style={{ background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, padding: 4, cursor: 'pointer', color: T.inkSoft, display: 'flex', alignItems: 'center' }}>
+                      <Pencil size={12} />
+                    </button>
+                    <button onClick={() => handleDelete(n)} title="Eliminar" style={{ background: 'transparent', border: `1px solid ${T.red}30`, borderRadius: 4, padding: 4, cursor: 'pointer', color: T.red, display: 'flex', alignItems: 'center' }}>
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+                {n.description && <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.4 }}>{n.description}</div>}
+                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: 11 }}>
+                  {n.launch_date && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: T.accent }}>
+                      <Calendar size={10} />
+                      {new Date(n.launch_date).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })}
+                    </span>
+                  )}
+                  {fl && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: T.inkSoft }}>
+                      <MapPin size={10} />
+                      {fl.name}{zn ? ` / ${zn.name}` : ''}
+                    </span>
+                  )}
+                </div>
+                {n.notes && <div style={{ fontSize: 10, color: T.inkMute, fontStyle: 'italic' }}>{n.notes}</div>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <NovidadeEditDialog
+          novidade={editing}
+          floors={floors}
+          zones={zones}
+          onSave={handleSave}
+          onClose={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function NovidadeEditDialog({ novidade, floors, zones, onSave, onClose }) {
+  const [draft, setDraft] = useState({
+    ean: novidade.ean || '',
+    name: novidade.name || '',
+    description: novidade.description || '',
+    launch_date: novidade.launch_date || '',
+    floor_id: novidade.floor_id || '',
+    zone_id: novidade.zone_id || '',
+    notes: novidade.notes || '',
+  });
+  const [error, setError] = useState('');
+
+  // Zones filtradas por floor escolhido
+  const zonesForFloor = useMemo(
+    () => zones.filter(z => z.floorId === draft.floor_id || z.floor_id === draft.floor_id),
+    [zones, draft.floor_id]
+  );
+
+  const submit = () => {
+    setError('');
+    if (!draft.ean.trim()) { setError('EAN obrigatório.'); return; }
+    if (!draft.name.trim()) { setError('Nome obrigatório.'); return; }
+    onSave({
+      ...(novidade.id ? { id: novidade.id } : {}),
+      ean: draft.ean.trim(),
+      name: draft.name.trim(),
+      description: draft.description.trim() || null,
+      launch_date: draft.launch_date || null,
+      floor_id: draft.floor_id || null,
+      zone_id: draft.zone_id || null,
+      notes: draft.notes.trim() || null,
+    });
+  };
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9000, padding: 20,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 28, maxWidth: 520, width: '100%',
+        maxHeight: '90vh', overflowY: 'auto',
+      }}>
+        <h3 style={{ margin: '0 0 18px', fontSize: 18, fontWeight: 600 }}>
+          {novidade.id ? 'Editar novidade' : 'Nova novidade'}
+        </h3>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <label>
+            <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>EAN *</div>
+            <input value={draft.ean} onChange={e => setDraft({ ...draft, ean: e.target.value })} style={dialogInput()} placeholder="123456789012" />
+          </label>
+          <label>
+            <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Data de lançamento</div>
+            <input type="date" value={draft.launch_date} onChange={e => setDraft({ ...draft, launch_date: e.target.value })} style={dialogInput()} />
+          </label>
+        </div>
+
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Nome *</div>
+          <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} style={dialogInput()} placeholder="Ex: Livro: Sapiens" />
+        </label>
+
+        <label style={{ display: 'block', marginBottom: 12 }}>
+          <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Descrição</div>
+          <input value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} style={dialogInput()} />
+        </label>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <label>
+            <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Piso (alocação)</div>
+            <select value={draft.floor_id} onChange={e => setDraft({ ...draft, floor_id: e.target.value, zone_id: '' })} style={dialogInput()}>
+              <option value="">— Sem piso —</option>
+              {floors.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </label>
+          <label>
+            <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Zona/Móvel</div>
+            <select value={draft.zone_id} onChange={e => setDraft({ ...draft, zone_id: e.target.value })} style={dialogInput()} disabled={!draft.floor_id}>
+              <option value="">— Sem zona —</option>
+              {zonesForFloor.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+            </select>
+          </label>
+        </div>
+
+        <label style={{ display: 'block', marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 4, fontWeight: 500 }}>Notas</div>
+          <textarea value={draft.notes} onChange={e => setDraft({ ...draft, notes: e.target.value })} style={{ ...dialogInput(), minHeight: 60, resize: 'vertical' }} />
+        </label>
+
+        {error && <div style={{ marginBottom: 12, padding: '8px 10px', background: '#FDECEA', color: '#A03028', borderRadius: 6, fontSize: 12 }}>{error}</div>}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={submit} style={{
+            flex: 1, padding: '10px 16px', background: T.ink, color: T.bg,
+            border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: 'pointer',
+          }}>Guardar</button>
+          <button onClick={onClose} style={{
+            padding: '10px 16px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 13, cursor: 'pointer',
+          }}>Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DevolucoesView (PES) — v3.17.0
+// Cada devolução = 1 ficheiro Excel com lista de artigos + qty a devolver.
+// Utilizadores marcam quantos encontraram (manual OR scan EAN via câmara).
+// ─────────────────────────────────────────────────────────────────────────
+function DevolucoesView({ user, userDepartment }) {
+  const [list, setList] = useState(null);
+  const [openDev, setOpenDev] = useState(null); // devolução aberta
+
+  const refresh = useCallback(async () => {
+    setList(null);
+    const d = await cloudFetchDevolucoes();
+    setList(Array.isArray(d) ? d : []);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Upload de Excel: parse + criar devolução
+  const fileInputRef = useRef(null);
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const data = await file.arrayBuffer();
+      const wb = XLSX.read(data, { type: 'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+      if (!rows.length) { alert('Excel vazio.'); return; }
+      // Detect columns (heuristic)
+      const headers = Object.keys(rows[0]);
+      const cols = detectColumns(headers);
+      // qty: procurar "quantidade", "qty", "qtd"
+      const qtyCol = headers.find(h => /(^|\s|_)(quantidade|qtd|qty|quant\.?)(\s|_|$)/i.test(h));
+      const items = rows.map(r => {
+        const eanRaw = cols.ean ? r[cols.ean] : '';
+        const ean = String(eanRaw || '').trim();
+        if (!ean) return null;
+        return {
+          ean,
+          description: cols.description ? String(r[cols.description] || '').trim() : '',
+          family: cols.family ? String(r[cols.family] || '').trim() : '',
+          qty_requested: qtyCol ? parseInt(r[qtyCol], 10) || 0 : 1,
+          qty_found: 0,
+          updated_by: user?.id,
+        };
+      }).filter(Boolean);
+      if (!items.length) { alert('Nenhum EAN encontrado no Excel. Verifica que tem coluna EAN.'); return; }
+      const name = prompt(`Nome para esta devolução?\n(detectados ${items.length} artigos)`, file.name.replace(/\.[^.]+$/, ''));
+      if (!name) return;
+      const res = await cloudCreateDevolucao({
+        department: userDepartment || 'PES',
+        name: name.trim(),
+        source_file: file.name,
+        status: 'open',
+        created_by: user?.id,
+      }, items);
+      if (res?.ok) {
+        refresh();
+        setOpenDev(res.data);
+      } else {
+        alert('Erro a criar devolução: ' + (res?.error || 'desconhecido'));
+      }
+    } catch (err) {
+      console.error('[devolucoes upload]', err);
+      alert('Erro a ler Excel: ' + (err?.message || err));
+    }
+  };
+
+  const handleDelete = async (d) => {
+    if (!confirm(`Eliminar devolução "${d.name}"?\n\nVai apagar também todos os items associados.`)) return;
+    const res = await cloudDeleteDevolucao(d.id);
+    if (res?.ok) refresh();
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  if (openDev) {
+    return <DevolucaoDetail
+      devolucao={openDev}
+      user={user}
+      onClose={() => { setOpenDev(null); refresh(); }}
+    />;
+  }
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1000, margin: '0 auto' }}>
+      <PageHeader
+        eyebrow={<><PackageOpen size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Devoluções</>}
+        title="Gestão de devoluções"
+        subtitle="Cada devolução começa com upload de Excel contendo artigos a devolver (EAN + quantidade). À medida que encontras os artigos podes incrementar manualmente OU usar a câmara para picar o EAN."
+        action={
+          <>
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} style={{ display: 'none' }} />
+            <button onClick={() => fileInputRef.current?.click()} style={{
+              padding: '8px 14px', background: T.ink, color: T.bg,
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+            }}>
+              <Upload size={12} /> Nova devolução (Excel)
+            </button>
+          </>
+        }
+      />
+
+      {list === null ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar…</div>
+      ) : list.length === 0 ? (
+        <div style={{ padding: 60, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+          <PackageOpen size={30} style={{ opacity: 0.25, marginBottom: 10 }} />
+          <div>Sem devoluções activas. Carrega o teu primeiro Excel para começar.</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {list.map(d => (
+            <div key={d.id} style={{
+              padding: 16, background: T.bgEl, border: `1px solid ${T.line}`,
+              borderRadius: 8, display: 'flex', alignItems: 'center', gap: 14,
+              cursor: 'pointer',
+            }} onClick={() => setOpenDev(d)}>
+              <div style={{
+                width: 44, height: 44, borderRadius: 8,
+                background: d.status === 'closed' ? T.green : T.orange,
+                color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <PackageOpen size={20} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>{d.name}</div>
+                <div style={{ fontSize: 11, color: T.inkMute, marginTop: 2 }}>
+                  Criada {new Date(d.created_at).toLocaleDateString('pt-PT')}
+                  {d.source_file ? ` · ${d.source_file}` : ''}
+                  {d.status === 'closed' ? ' · fechada' : ''}
+                </div>
+              </div>
+              <button onClick={(e) => { e.stopPropagation(); handleDelete(d); }} style={{
+                background: 'transparent', border: `1px solid ${T.red}30`, color: T.red,
+                padding: 6, borderRadius: 4, cursor: 'pointer',
+              }}>
+                <Trash2 size={13} />
+              </button>
+              <ChevronRight size={16} style={{ color: T.inkMute }} />
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Vista de detalhe de uma devolução: lista de items + edição qty + scanner EAN
+function DevolucaoDetail({ devolucao, user, onClose }) {
+  const [items, setItems] = useState(null);
+  const [search, setSearch] = useState('');
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [feedback, setFeedback] = useState(null); // { kind: 'success'|'error'|'info', message }
+
+  const refresh = useCallback(async () => {
+    setItems(null);
+    const list = await cloudFetchDevolucaoItems(devolucao.id);
+    setItems(Array.isArray(list) ? list : []);
+  }, [devolucao.id]);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const filtered = useMemo(() => {
+    if (!items) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return items;
+    return items.filter(it =>
+      (it.ean || '').toLowerCase().includes(q) ||
+      (it.description || '').toLowerCase().includes(q)
+    );
+  }, [items, search]);
+
+  const totalReq = useMemo(() => (items || []).reduce((s, i) => s + (i.qty_requested || 0), 0), [items]);
+  const totalFnd = useMemo(() => (items || []).reduce((s, i) => s + (i.qty_found || 0), 0), [items]);
+  const pct = totalReq > 0 ? Math.round((totalFnd / totalReq) * 100) : 0;
+
+  const updateQty = async (item, newQty) => {
+    const q = Math.max(0, parseInt(newQty, 10) || 0);
+    // Optimistic update
+    setItems(prev => prev.map(it => it.id === item.id ? { ...it, qty_found: q } : it));
+    const res = await cloudUpdateDevolucaoItem(item.id, { qty_found: q, updated_by: user?.id });
+    if (!res?.ok) {
+      alert('Erro a actualizar: ' + (res?.error || 'desconhecido'));
+      refresh();
+    }
+  };
+
+  const incrementQty = async (item, delta) => {
+    await updateQty(item, (item.qty_found || 0) + delta);
+  };
+
+  // Scanner picks: quando lê EAN, procura na lista e faz +1
+  const handleScanEan = (ean) => {
+    if (!items) return;
+    const normalized = normalizeEAN(ean);
+    const match = items.find(it => normalizeEAN(it.ean) === normalized);
+    if (!match) {
+      setFeedback({ kind: 'error', message: `EAN ${ean} não está nesta devolução` });
+      setTimeout(() => setFeedback(null), 2000);
+      return;
+    }
+    if (match.qty_found >= match.qty_requested) {
+      setFeedback({ kind: 'info', message: `${match.description || match.ean}: já tens todos (${match.qty_requested})` });
+      setTimeout(() => setFeedback(null), 2000);
+      return;
+    }
+    incrementQty(match, 1);
+    setFeedback({ kind: 'success', message: `✓ ${match.description || match.ean}: ${(match.qty_found || 0) + 1}/${match.qty_requested}` });
+    setTimeout(() => setFeedback(null), 1500);
+  };
+
+  const handleCloseDevolucao = async () => {
+    if (!confirm('Fechar esta devolução? Vai marcar como concluída.')) return;
+    await cloudUpdateDevolucao(devolucao.id, { status: 'closed', closed_at: new Date().toISOString() });
+    onClose();
+  };
+
+  // Export Excel com qty_found
+  const handleExport = () => {
+    if (!items?.length) return;
+    const rows = items.map(it => ({
+      EAN: it.ean,
+      'Descrição': it.description || '',
+      'Família': it.family || '',
+      'Qtd. pedida': it.qty_requested,
+      'Qtd. encontrada': it.qty_found,
+      '% encontrado': it.qty_requested > 0 ? Math.round((it.qty_found / it.qty_requested) * 100) + '%' : '—',
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Devolução');
+    const safeName = (devolucao.name || 'devolucao').replace(/[^a-z0-9-_]+/gi, '_');
+    XLSX.writeFile(wb, `${safeName}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1100, margin: '0 auto' }}>
+      <div style={{ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button onClick={onClose} style={{ background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, padding: '6px 10px', fontSize: 11, color: T.inkSoft, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <ArrowLeft size={12} /> Voltar
+        </button>
+        <div style={{ flex: 1 }}>
+          <div className="mono" style={{ fontSize: 10, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase' }}>Devolução</div>
+          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600, color: T.ink }}>{devolucao.name}</h2>
+        </div>
+        <button onClick={handleExport} disabled={!items?.length} style={{
+          padding: '8px 12px', background: T.green, color: '#fff',
+          border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5,
+        }}>
+          <Download size={12} /> Excel
+        </button>
+        {devolucao.status !== 'closed' && (
+          <button onClick={handleCloseDevolucao} style={{
+            padding: '8px 12px', background: 'transparent', color: T.accent,
+            border: `1px solid ${T.accent}40`, borderRadius: 6, fontSize: 12,
+            cursor: 'pointer',
+          }}>
+            Fechar devolução
+          </button>
+        )}
+      </div>
+
+      {/* Progress */}
+      <div style={{ marginBottom: 16, padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{ fontSize: 13, fontWeight: 500 }}>{totalFnd} / {totalReq} unidades encontradas</span>
+          <span className="mono" style={{ fontSize: 12, color: pct === 100 ? T.green : T.accent }}>{pct}%</span>
+        </div>
+        <div style={{ height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: pct === 100 ? T.green : T.accent, transition: 'width 0.3s' }} />
+        </div>
+      </div>
+
+      {/* Toolbar: search + scanner */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+        <div style={{ position: 'relative', flex: 1, maxWidth: 360 }}>
+          <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: T.inkMute }} />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Pesquisar EAN, descrição…"
+            style={{
+              width: '100%', padding: '9px 12px 9px 32px', fontSize: 13,
+              background: T.paper || '#fff', color: T.ink,
+              border: `1px solid ${T.line}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit',
+            }}
+          />
+        </div>
+        <button onClick={() => setScannerOpen(s => !s)} style={{
+          padding: '9px 14px', background: scannerOpen ? T.accent : T.ink, color: T.bg,
+          border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+          cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <Camera size={13} /> {scannerOpen ? 'Fechar scanner' : 'Picar EAN'}
+        </button>
+      </div>
+
+      {/* Scanner inline (simplificado: usa input manual; câmara seria refactor partilhado com Inventário) */}
+      {scannerOpen && (
+        <div style={{ padding: 14, marginBottom: 12, background: T.accentSoft, border: `1px solid ${T.accent}40`, borderRadius: 8 }}>
+          <div style={{ fontSize: 11, color: T.ink, marginBottom: 6, fontWeight: 500 }}>
+            Cola/digita o EAN e Enter (ou usa o leitor de mão a teclado virtual):
+          </div>
+          <ManualEanScanner onScan={handleScanEan} />
+          {feedback && (
+            <div style={{
+              marginTop: 8, padding: '6px 10px', fontSize: 11,
+              background: feedback.kind === 'success' ? '#E5F4E5' : feedback.kind === 'error' ? '#FDECEA' : T.lineSoft,
+              color: feedback.kind === 'success' ? '#2E5E2A' : feedback.kind === 'error' ? '#A03028' : T.ink,
+              borderRadius: 4,
+            }}>{feedback.message}</div>
+          )}
+        </div>
+      )}
+
+      {/* Items list */}
+      {items === null ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar…</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>Sem items para este filtro.</div>
+      ) : (
+        <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, overflow: 'hidden' }}>
+          {filtered.map((it, idx) => {
+            const complete = it.qty_found >= it.qty_requested && it.qty_requested > 0;
+            return (
+              <div key={it.id} style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                padding: '10px 14px',
+                borderBottom: idx === filtered.length - 1 ? 'none' : `1px solid ${T.lineSoft}`,
+                background: complete ? '#E5F4E520' : 'transparent',
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.description || '—'}</div>
+                  <div className="mono" style={{ fontSize: 10, color: T.inkMute, marginTop: 1 }}>{it.ean}{it.family ? ` · ${it.family}` : ''}</div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <button onClick={() => incrementQty(it, -1)} disabled={it.qty_found <= 0} style={{
+                    width: 26, height: 26, borderRadius: 4, border: `1px solid ${T.line}`,
+                    background: 'transparent', color: T.inkSoft, cursor: it.qty_found <= 0 ? 'not-allowed' : 'pointer',
+                    fontSize: 14,
+                  }}>−</button>
+                  <input
+                    type="number"
+                    value={it.qty_found}
+                    onChange={(e) => updateQty(it, e.target.value)}
+                    style={{
+                      width: 48, padding: '4px 6px', fontSize: 13, fontWeight: 600,
+                      fontFamily: 'Geist Mono', textAlign: 'center',
+                      background: T.paper || '#fff', color: T.ink,
+                      border: `1px solid ${T.line}`, borderRadius: 4, outline: 'none',
+                    }}
+                  />
+                  <span style={{ fontSize: 12, color: T.inkMute }}>/ {it.qty_requested}</span>
+                  <button onClick={() => incrementQty(it, 1)} disabled={complete} style={{
+                    width: 26, height: 26, borderRadius: 4, border: `1px solid ${T.line}`,
+                    background: complete ? T.lineSoft : T.accent, color: complete ? T.inkMute : '#fff',
+                    cursor: complete ? 'not-allowed' : 'pointer', fontSize: 14, fontWeight: 600,
+                  }}>+</button>
+                </div>
+                {complete && <Check size={14} style={{ color: T.green }} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Helper: input manual de EAN com Enter para scan
+function ManualEanScanner({ onScan }) {
+  const [val, setVal] = useState('');
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.focus(); }, []);
+  const submit = () => {
+    const ean = val.trim();
+    if (!ean) return;
+    onScan(ean);
+    setVal('');
+    setTimeout(() => ref.current?.focus(), 50);
+  };
+  return (
+    <input
+      ref={ref}
+      value={val}
+      onChange={e => setVal(e.target.value)}
+      onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+      placeholder="EAN…"
+      style={{
+        width: '100%', padding: '10px 14px', fontSize: 16, fontFamily: 'Geist Mono',
+        background: T.paper || '#fff', color: T.ink,
+        border: `1px solid ${T.accent}`, borderRadius: 6, outline: 'none',
+      }}
+    />
+  );
+}
+
 function CredentialsView({ user, isAdmin }) {
   const [items, setItems] = useState(null); // null = loading
   const [search, setSearch] = useState('');
@@ -16839,8 +17724,9 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
   const [filter, setFilter] = useState('all'); // all | online | offline | admin | suspended
   const [now, setNow] = useState(Date.now());
   // v3.16.0: criação/reset de utilizadores via Edge Function admin-user-mgmt
-  const [tempPwModal, setTempPwModal] = useState(null); // { email, tempPassword, action: 'create'|'reset' }
+  const [tempPwModal, setTempPwModal] = useState(null); // { email, tempPassword, action, department? }
   const [busyAction, setBusyAction] = useState(false);
+  const [newUserModal, setNewUserModal] = useState(false); // v3.17.0: modal de criação com dept
 
   // Tick the clock every 15s for real-time online indicator
   useEffect(() => {
@@ -16908,18 +17794,21 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
     return data;
   }, []);
 
-  const handleCreateUser = async () => {
+  // v3.17.0: abre modal com email + dept dropdown. Submit chama Edge Function.
+  const handleCreateUser = () => {
     if (busyAction) return;
-    const email = prompt('Email do novo utilizador:\n(uma password temporária vai ser gerada e mostrada de seguida)');
-    if (!email || !email.trim()) return;
+    setNewUserModal(true);
+  };
+  const handleNewUserSubmit = async (email, department) => {
     setBusyAction(true);
     try {
-      const data = await callAdminFn({ action: 'create', email: email.trim() });
-      setTempPwModal({ email: data.email, tempPassword: data.tempPassword, action: 'create' });
+      const data = await callAdminFn({ action: 'create', email: email.trim(), department });
+      setNewUserModal(false);
+      setTempPwModal({ email: data.email, tempPassword: data.tempPassword, action: 'create', department: data.department });
       await logActivity({
         userId: currentUserId, userEmail: currentUserEmail,
         action: 'create', resourceType: 'user', resourceName: data.email,
-        resourceId: data.userId,
+        resourceId: data.userId, metadata: { department: data.department },
       });
       refresh();
     } catch (err) {
@@ -17073,7 +17962,17 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
           email={tempPwModal.email}
           tempPassword={tempPwModal.tempPassword}
           action={tempPwModal.action}
+          department={tempPwModal.department}
           onClose={() => setTempPwModal(null)}
+        />
+      )}
+
+      {/* v3.17.0: Modal de criação de utilizador (email + dept dropdown) */}
+      {newUserModal && (
+        <NewUserModal
+          busy={busyAction}
+          onCreate={handleNewUserSubmit}
+          onClose={() => setNewUserModal(false)}
         />
       )}
     </div>
@@ -17135,6 +18034,15 @@ function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend, onRe
               color: '#fff', borderRadius: 2, fontWeight: 600, letterSpacing: '0.05em',
               fontFamily: 'Geist Mono', textTransform: 'uppercase',
             }}>SUSPENSO</span>
+          )}
+          {/* v3.17.0: badge do departamento */}
+          {user.department && (
+            <span style={{
+              fontSize: 9, padding: '1px 5px',
+              background: user.department === 'PES' ? T.purple : T.blue,
+              color: '#fff', borderRadius: 2, fontWeight: 600, letterSpacing: '0.05em',
+              fontFamily: 'Geist Mono', textTransform: 'uppercase',
+            }}>{user.department}</span>
           )}
         </div>
         <div style={{ fontSize: 11, color: T.inkMute, marginTop: 2, display: 'flex', gap: 10 }}>
@@ -17199,7 +18107,191 @@ function adminActionBtn(color) {
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
 // o ForcePasswordChangeModal força mudança.
-function TempPasswordModal({ email, tempPassword, action, onClose }) {
+// v3.17.0: modal mostrado APÓS login ao admin para escolher que dept ver.
+// Bloqueante — sem fechar. Persistido em localStorage 'admin.viewDept'.
+// O botão de alternar na sidebar permite mudar a qualquer altura sem reload.
+function AdminViewPickerModal({ onPick }) {
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.85)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9990, padding: 20, backdropFilter: 'blur(4px)',
+    }}>
+      <div style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 16, padding: 36, maxWidth: 520, width: '100%',
+        boxShadow: '0 30px 80px -20px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 16, margin: '0 auto 18px',
+          background: T.accent, color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <Layers size={26} />
+        </div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600, textAlign: 'center', color: T.ink }}>
+          Em que vista queres entrar?
+        </h2>
+        <p style={{ fontSize: 13, color: T.inkSoft, textAlign: 'center', marginTop: 10, marginBottom: 26, lineHeight: 1.5 }}>
+          Escolhe o departamento que queres ver agora. Podes alternar a qualquer altura através do botão na sidebar.
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <button
+            onClick={() => onPick('PTS')}
+            style={{
+              padding: '24px 16px', background: T.blue, color: '#fff',
+              border: 'none', borderRadius: 12, cursor: 'pointer',
+              fontFamily: 'inherit', display: 'flex', flexDirection: 'column',
+              alignItems: 'center', gap: 8, transition: 'transform 0.15s, box-shadow 0.15s',
+              boxShadow: `0 10px 24px -10px ${T.blue}90`,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 16px 32px -10px ${T.blue}`; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 10px 24px -10px ${T.blue}90`; }}
+          >
+            <div className="display" style={{ fontSize: 32, fontWeight: 600, letterSpacing: '-0.02em' }}>PTS</div>
+            <div style={{ fontSize: 11, opacity: 0.9, lineHeight: 1.3, textAlign: 'center' }}>
+              Produtos Técnicos<br />e Serviços
+            </div>
+          </button>
+
+          <button
+            onClick={() => onPick('PES')}
+            style={{
+              padding: '24px 16px', background: T.purple, color: '#fff',
+              border: 'none', borderRadius: 12, cursor: 'pointer',
+              fontFamily: 'inherit', display: 'flex', flexDirection: 'column',
+              alignItems: 'center', gap: 8, transition: 'transform 0.15s, box-shadow 0.15s',
+              boxShadow: `0 10px 24px -10px ${T.purple}90`,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 16px 32px -10px ${T.purple}`; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 10px 24px -10px ${T.purple}90`; }}
+          >
+            <div className="display" style={{ fontSize: 32, fontWeight: 600, letterSpacing: '-0.02em' }}>PES</div>
+            <div style={{ fontSize: 11, opacity: 0.9, lineHeight: 1.3, textAlign: 'center' }}>
+              Produtos Editoriais<br />e Serviços
+            </div>
+          </button>
+        </div>
+
+        <div style={{ marginTop: 20, fontSize: 11, color: T.inkMute, textAlign: 'center', lineHeight: 1.5 }}>
+          A tua escolha fica guardada. Mudar de vista na sidebar é instantâneo — sem reload.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// v3.17.0: modal de criar utilizador. Email + dept dropdown. Submit chama
+// Edge Function admin-user-mgmt (via parent handler) que gera temp pw.
+function NewUserModal({ busy, onCreate, onClose }) {
+  const [email, setEmail] = useState('');
+  const [department, setDepartment] = useState('PTS');
+  const [error, setError] = useState('');
+
+  const submit = () => {
+    if (busy) return;
+    setError('');
+    const e = email.trim();
+    if (!e.includes('@')) { setError('Email inválido.'); return; }
+    onCreate(e, department);
+  };
+
+  useEffect(() => {
+    const onKey = (ev) => { if (ev.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+
+  return (
+    <div onClick={() => !busy && onClose()} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9000, padding: 20,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 28, maxWidth: 420, width: '100%',
+        boxShadow: '0 24px 60px -20px rgba(0,0,0,0.4)',
+      }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 8 }}>
+          Novo utilizador
+        </div>
+        <h3 style={{ margin: '0 0 18px', fontSize: 18, fontWeight: 600, color: T.ink }}>
+          Criar conta
+        </h3>
+
+        <label style={{ display: 'block', marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Email</div>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => { setEmail(e.target.value); setError(''); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+            autoFocus
+            disabled={busy}
+            placeholder="nome@pt.fnac.com"
+            style={authInputStyle(error)}
+          />
+        </label>
+
+        <label style={{ display: 'block', marginBottom: 18 }}>
+          <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Departamento</div>
+          <select
+            value={department}
+            onChange={(e) => setDepartment(e.target.value)}
+            disabled={busy}
+            style={{
+              width: '100%', padding: '11px 14px', fontSize: 14,
+              fontFamily: 'inherit',
+              background: T.paper || '#fff', color: T.ink,
+              border: `1.5px solid ${T.line}`, borderRadius: 14, outline: 'none',
+              cursor: 'pointer',
+            }}
+          >
+            <option value="PTS">PTS — Produtos Técnicos e Serviços</option>
+            <option value="PES">PES — Produtos Editoriais e Serviços</option>
+          </select>
+          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6, lineHeight: 1.4 }}>
+            O utilizador só verá dados (campanhas, períodos, stock) do departamento escolhido. PES tem também acesso a Novidades e Devoluções. Não é alterável depois.
+          </div>
+        </label>
+
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14,
+            padding: '8px 10px', background: '#FDECEA', color: '#A03028',
+            borderRadius: 6, fontSize: 12,
+          }}>
+            <AlertCircle size={12} /> {error}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={submit} disabled={busy || !email} style={{
+            flex: 1, padding: '10px 16px',
+            background: (busy || !email) ? T.line : T.accent,
+            color: (busy || !email) ? T.inkMute : '#fff',
+            border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500,
+            cursor: (busy || !email) ? 'not-allowed' : 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          }}>
+            {busy ? 'A criar…' : <><UserPlus size={14} /> Criar utilizador</>}
+          </button>
+          <button onClick={onClose} disabled={busy} style={{
+            padding: '10px 16px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 13,
+            cursor: busy ? 'not-allowed' : 'pointer',
+          }}>
+            Cancelar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TempPasswordModal({ email, tempPassword, action, department, onClose }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     try {
@@ -17233,7 +18325,7 @@ function TempPasswordModal({ email, tempPassword, action, onClose }) {
         </h3>
         <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, marginBottom: 16 }}>
           {isCreate
-            ? <>O utilizador <strong>{email}</strong> foi criado.</>
+            ? <>O utilizador <strong>{email}</strong> foi criado{department ? <> no departamento <strong>{department}</strong></> : null}.</>
             : <>A password de <strong>{email}</strong> foi resetada.</>}
           {' '}Dá esta password ao utilizador. <strong>Não aparecerá outra vez</strong> — copia agora.
           No próximo login, ele será obrigado a mudá-la.

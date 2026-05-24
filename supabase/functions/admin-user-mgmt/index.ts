@@ -103,13 +103,15 @@ Deno.serve(async (req) => {
     // 3) Cliente service-role para Admin API
     const adminClient = createClient(supabaseUrl, serviceKey);
 
-    let body: { action?: string; email?: string; userId?: string };
+    let body: { action?: string; email?: string; userId?: string; department?: string };
     try {
       body = await req.json();
     } catch {
       return jsonResponse({ error: 'invalid_json_body' }, 400);
     }
     const { action, email, userId } = body || {};
+    // v3.17.0: department é 'PTS' (default) | 'PES'. Qualquer outra string vira PTS.
+    const department = body?.department === 'PES' ? 'PES' : 'PTS';
     const tempPassword = generateTempPassword();
 
     // ─── action: create ─────────────────────────────────────────────
@@ -131,11 +133,12 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: error?.message || 'create_failed' }, 400);
       }
 
-      // upsert do profile com a flag
+      // upsert do profile com a flag + departamento
       await adminClient.from('user_profiles').upsert({
         user_id: data.user.id,
         email: cleanEmail,
         must_change_password: true,
+        department, // v3.17.0
       }, { onConflict: 'user_id' });
 
       return jsonResponse({
@@ -144,6 +147,7 @@ Deno.serve(async (req) => {
         tempPassword,
         userId: data.user.id,
         email: cleanEmail,
+        department,
       });
     }
 
