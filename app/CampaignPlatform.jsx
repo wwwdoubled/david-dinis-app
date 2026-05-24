@@ -532,7 +532,7 @@ function debounce(fn, ms = 600) {
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
 const APP_VERSION = '3.17.0';
-const APP_BUILD_DATE = '2026-05-24T18:00'; // Europe/Lisbon
+const APP_BUILD_DATE = '2026-05-24T19:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -3026,12 +3026,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return cs;
   }, [campaigns, excludedFamilies, userDepartment]);
 
-  // v3.17.0: periods filtradas por dept (admin = sem filtro)
-  const filteredPeriods = useMemo(() => {
-    if (!userDepartment) return periods;
-    return periods.filter(p => (p.department || 'PTS') === userDepartment);
-  }, [periods, userDepartment]);
-
+  // v3.17.0 (filteredPeriods movido para depois do useState de `periods` na
+  // linha ~3126 para evitar TDZ — periods é declarado mais à frente neste
+  // mesmo componente).
+  //
   // v3.17.0: stock snapshots filtradas por dept. NOTA: as listas de rows
   // `stockRowsPO2`/`stockRowsPO3` derivam dos snapshots ativos; filtramos
   // apenas a lista de snapshots para que a admin tab "Cloud" e fluxos de
@@ -3124,6 +3122,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
   // Periods — campaign planning entities (top-level containers for Excels)
   const [periods, setPeriods] = useState([]);
+  // v3.17.0: periods filtradas por dept (admin = vê dept escolhido no switcher,
+  // non-admin = vê só do seu dept). Aqui em vez de junto a filteredCampaigns
+  // porque depende do useState de `periods` declarado nesta linha.
+  const filteredPeriods = useMemo(() => {
+    if (!userDepartment) return periods;
+    return periods.filter(p => (p.department || 'PTS') === userDepartment);
+  }, [periods, userDepartment]);
   const [periodsLoaded, setPeriodsLoaded] = useState(false);
   // Refs so async closures (setInterval, etc.) always read current state
   const periodsRef = useRef([]);
