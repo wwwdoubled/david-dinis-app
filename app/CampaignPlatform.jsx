@@ -4837,13 +4837,13 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
     { id: 'stock',      label: 'Stock',               icon: Package },
-    { id: 'inventory',  label: 'Inventário',          icon: ScanLine },
+    { id: 'inventory',  label: 'Inventário',          icon: ScanLine,    hideFor: ['PES'] },
     { id: 'images',     label: 'Folhetos',            icon: ImageIcon,   hideFor: ['PES'] },
     { id: 'pdfs',       label: 'PDFs',                icon: FileText,    hideFor: ['PES'] },
-    { id: 'notes',      label: 'Notas',               icon: NotebookPen },
+    { id: 'notes',      label: 'Notas',               icon: NotebookPen, hideFor: ['PES'] },
     { id: 'novidades',  label: 'Novidades',           icon: Sparkles,    showFor: ['PES'] },
     { id: 'devolucoes', label: 'Devoluções',          icon: PackageOpen, showFor: ['PES'] },
-    { id: 'credentials',label: 'Cofre',               icon: KeyRound },
+    { id: 'credentials',label: 'Cofre',               icon: KeyRound,    hideFor: ['PES'] },
   ];
   // v3.17.0: filtro dept-aware. Tanto admin (com switcher) como non-admin (fixo)
   // respeitam o userDepartment actual.
