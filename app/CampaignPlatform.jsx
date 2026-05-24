@@ -841,6 +841,10 @@ const DEFAULT_MENU_VISIBILITY = {
   novidades:  { roles: ['user', 'manager', 'viewer'], visible: true },
   devolucoes: { roles: ['user', 'manager', 'viewer'], visible: true },
   scanner: { visible: true, roles: ['user', 'manager', 'viewer'] },
+  // v3.19.0: Planos de Proteção — admin-only, PTS-only.
+  // canSeeMenuItem trata o admin como sempre visível; hideFor: ['PES'] no Sidebar
+  // exclui visão PES. Para non-admins fica invisível por defeito (roles vazio).
+  pps: { roles: [], visible: false },
 };
 
 async function fetchUIConfig() {
@@ -1229,6 +1233,35 @@ async function cloudUpdateDevolucao(id, patch) {
 async function cloudDeleteDevolucao(id) {
   if (!supabase) return { ok: false };
   const { error } = await supabase.from('devolucoes').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Protection Plans (PPs) — PTS-only, admin-only
+// Schema: ver supabase/migrations/2026-05-24_protection_plans.sql
+// ─────────────────────────────────────────────────────────────────────────
+async function cloudFetchPPs({ from, to } = {}) {
+  if (!supabase) return [];
+  let q = supabase.from('protection_plans').select('*').order('sale_date', { ascending: false });
+  if (from) q = q.gte('sale_date', from);
+  if (to)   q = q.lte('sale_date', to);
+  const { data, error } = await q;
+  if (error) { console.warn('cloudFetchPPs:', error.message); return []; }
+  return data || [];
+}
+async function cloudCreatePP(payload) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase.from('protection_plans').insert(payload).select().single();
+  return { ok: !error, data, error: error?.message };
+}
+async function cloudUpdatePP(id, patch) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('protection_plans').update(patch).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+async function cloudDeletePP(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('protection_plans').delete().eq('id', id);
   return { ok: !error, error: error?.message };
 }
 
@@ -4595,6 +4628,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
+          {view === 'pps' && isAdmin && <PPsView currentUserId={user?.id} />}
+          {view === 'pps' && !isAdmin && (
+            <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
+              <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
+              <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
+            </div>
+          )}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
           {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} />}
           {view === 'devolucoes' && <DevolucoesView user={user} userDepartment={userDepartment} />}
@@ -4843,6 +4883,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'notes',      label: 'Notas',               icon: NotebookPen, hideFor: ['PES'] },
     { id: 'novidades',  label: 'Novidades',           icon: Sparkles,    showFor: ['PES'] },
     { id: 'devolucoes', label: 'Devoluções',          icon: PackageOpen, showFor: ['PES'] },
+    { id: 'pps',        label: 'Planos de Proteção',  icon: Shield,      hideFor: ['PES'] },
     { id: 'credentials',label: 'Cofre',               icon: KeyRound,    hideFor: ['PES'] },
   ];
   // v3.17.0: filtro dept-aware. Tanto admin (com switcher) como non-admin (fixo)
@@ -15103,6 +15144,277 @@ const navBtnStyle = {
   border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
   display: 'flex', alignItems: 'center', gap: 4, fontSize: 12,
 };
+
+// ─────────────────────────────────────────────────────────────────────────
+// PPsView — Planos de Proteção (PTS-only, admin-only)
+// Diarização de vendas de PPs por colaborador. Calcula taxa de conversão
+// (PPs vendidos / equipamentos vendidos).
+// ─────────────────────────────────────────────────────────────────────────
+function PPsView({ currentUserId }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+
+  const [entries, setEntries]   = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [from, setFrom]         = useState(monthAgo);
+  const [to, setTo]             = useState(today);
+  const [collaborators, setCollaborators] = useState([]);
+  const [filterCollab, setFilterCollab]   = useState('all');
+  const [editing, setEditing]   = useState(null); // null | {id?, sale_date, collaborator_id, equipment_count, pp_count, value, category, notes}
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    const list = await cloudFetchPPs({ from, to });
+    setEntries(list);
+    setLoading(false);
+  }, [from, to]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Carrega colaboradores (users PTS) para dropdown
+  useEffect(() => {
+    let alive = true;
+    fetchAllProfiles().then(profs => {
+      if (!alive) return;
+      const ptsOnly = (profs || []).filter(p => (p.department || 'PTS') === 'PTS' && !p.suspended);
+      setCollaborators(ptsOnly);
+    });
+    return () => { alive = false; };
+  }, []);
+
+  const collaboratorMap = useMemo(
+    () => new Map(collaborators.map(c => [c.user_id, c])),
+    [collaborators]
+  );
+
+  // Filtrar por colaborador (client-side; RLS já garantiu o resto)
+  const filtered = useMemo(() => {
+    if (filterCollab === 'all') return entries;
+    return entries.filter(e => e.collaborator_id === filterCollab);
+  }, [entries, filterCollab]);
+
+  // KPIs
+  const kpis = useMemo(() => {
+    const totalEquip = filtered.reduce((s, e) => s + (e.equipment_count || 0), 0);
+    const totalPPs   = filtered.reduce((s, e) => s + (e.pp_count || 0), 0);
+    const conv = totalEquip > 0 ? (totalPPs / totalEquip * 100) : 0;
+    const days = new Set(filtered.map(e => e.sale_date)).size;
+    return { totalEquip, totalPPs, conv, days };
+  }, [filtered]);
+
+  // Agrupar por data (descendente)
+  const grouped = useMemo(() => {
+    const byDate = new Map();
+    for (const e of filtered) {
+      if (!byDate.has(e.sale_date)) byDate.set(e.sale_date, []);
+      byDate.get(e.sale_date).push(e);
+    }
+    return Array.from(byDate.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [filtered]);
+
+  const handleSave = async (data) => {
+    const collab = collaboratorMap.get(data.collaborator_id);
+    const payload = {
+      sale_date: data.sale_date,
+      collaborator_id: data.collaborator_id || null,
+      collaborator_email: collab?.email || null,
+      collaborator_name: collab?.display_name || collab?.email || null,
+      equipment_count: Number(data.equipment_count) || 0,
+      pp_count: Number(data.pp_count) || 0,
+      value: data.value ? Number(data.value) : null,
+      category: data.category || null,
+      notes: data.notes || null,
+    };
+    let res;
+    if (data.id) {
+      res = await cloudUpdatePP(data.id, payload);
+    } else {
+      payload.created_by = currentUserId;
+      res = await cloudCreatePP(payload);
+    }
+    if (res?.ok) { setEditing(null); refresh(); }
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  const handleDelete = async (entry) => {
+    const who = entry.collaborator_name || entry.collaborator_email || 'colaborador';
+    if (!confirm(`Apagar registo de ${who} em ${entry.sale_date}?`)) return;
+    const res = await cloudDeletePP(entry.id);
+    if (res?.ok) refresh();
+    else alert('Erro: ' + (res?.error || 'desconhecido'));
+  };
+
+  const fmtPct = (n) => n.toFixed(1).replace('.', ',') + '%';
+
+  return (
+    <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
+      <Header
+        eyebrow={<><Shield size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Planos de Proteção</>}
+        title="Diarização por colaborador"
+        subtitle="Regista quantos equipamentos cada colaborador vendeu e em quantos foi feito PP. A taxa de conversão é calculada automaticamente."
+        action={
+          <button
+            onClick={() => setEditing({ sale_date: today, collaborator_id: '', equipment_count: 0, pp_count: 0, value: '', category: '', notes: '' })}
+            style={{
+              padding: '8px 14px', background: T.ink, color: T.bg,
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+            }}
+          >
+            <Plus size={12} /> Adicionar entrada
+          </button>
+        }
+      />
+
+      {/* Filtros */}
+      <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', alignItems: 'center', gap: 6 }}>
+          De
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} style={dialogInput()} />
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', alignItems: 'center', gap: 6 }}>
+          Até
+          <input type="date" value={to} onChange={e => setTo(e.target.value)} style={dialogInput()} />
+        </label>
+        <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', alignItems: 'center', gap: 6 }}>
+          Colaborador
+          <select value={filterCollab} onChange={e => setFilterCollab(e.target.value)} style={dialogInput()}>
+            <option value="all">Todos</option>
+            {collaborators.map(c => (
+              <option key={c.user_id} value={c.user_id}>{c.display_name || c.email}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      {/* KPIs */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
+        <div style={kpiBox()}><div style={kpiLabel()}>Equipamentos</div><div style={kpiValue()}>{kpis.totalEquip}</div></div>
+        <div style={kpiBox()}><div style={kpiLabel()}>PPs vendidos</div><div style={kpiValue()}>{kpis.totalPPs}</div></div>
+        <div style={kpiBox()}><div style={kpiLabel()}>Taxa conversão</div><div style={{ ...kpiValue(), color: kpis.conv >= 50 ? T.green : kpis.conv >= 30 ? T.orange : T.red }}>{fmtPct(kpis.conv)}</div></div>
+        <div style={kpiBox()}><div style={kpiLabel()}>Dias com registo</div><div style={kpiValue()}>{kpis.days}</div></div>
+      </div>
+
+      {/* Lista agrupada por dia */}
+      {loading ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar…</div>
+      ) : grouped.length === 0 ? (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, border: `1px dashed ${T.line}`, borderRadius: 6 }}>
+          Sem registos no intervalo seleccionado.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {grouped.map(([date, rows]) => {
+            const dayEquip = rows.reduce((s, e) => s + (e.equipment_count || 0), 0);
+            const dayPPs   = rows.reduce((s, e) => s + (e.pp_count || 0), 0);
+            const dayConv  = dayEquip > 0 ? (dayPPs / dayEquip * 100) : 0;
+            return (
+              <div key={date} style={{ border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 14px', background: T.bgEl, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 }}>
+                  <strong>{date}</strong>
+                  <span style={{ color: T.inkSoft }}>{dayEquip} eq · {dayPPs} PPs · <strong style={{ color: dayConv >= 50 ? T.green : dayConv >= 30 ? T.orange : T.red }}>{fmtPct(dayConv)}</strong></span>
+                </div>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: T.bg, color: T.inkMute }}>
+                      <th style={ppTh()}>Colaborador</th>
+                      <th style={{ ...ppTh(), textAlign: 'right' }}>Eq.</th>
+                      <th style={{ ...ppTh(), textAlign: 'right' }}>PPs</th>
+                      <th style={{ ...ppTh(), textAlign: 'right' }}>Conv.</th>
+                      <th style={ppTh()}>Notas</th>
+                      <th style={{ ...ppTh(), textAlign: 'right' }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map(e => {
+                      const conv = e.equipment_count > 0 ? (e.pp_count / e.equipment_count * 100) : 0;
+                      const name = e.collaborator_name || collaboratorMap.get(e.collaborator_id)?.display_name || e.collaborator_email || '—';
+                      return (
+                        <tr key={e.id} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                          <td style={ppTd()}>{name}</td>
+                          <td style={{ ...ppTd(), textAlign: 'right' }}>{e.equipment_count}</td>
+                          <td style={{ ...ppTd(), textAlign: 'right' }}>{e.pp_count}</td>
+                          <td style={{ ...ppTd(), textAlign: 'right', color: conv >= 50 ? T.green : conv >= 30 ? T.orange : T.red }}>{fmtPct(conv)}</td>
+                          <td style={{ ...ppTd(), color: T.inkMute, fontSize: 11 }}>{e.notes || ''}</td>
+                          <td style={{ ...ppTd(), textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <button onClick={() => setEditing({ ...e })} title="Editar" style={ppIconBtn()}><Settings size={11} /></button>
+                            <button onClick={() => handleDelete(e)} title="Apagar" style={{ ...ppIconBtn(), color: T.red }}><X size={11} /></button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {editing && (
+        <PPEditDialog
+          initial={editing}
+          collaborators={collaborators}
+          onClose={() => setEditing(null)}
+          onSave={handleSave}
+        />
+      )}
+    </div>
+  );
+}
+
+function PPEditDialog({ initial, collaborators, onClose, onSave }) {
+  const [d, setD] = useState({ ...initial });
+  const update = (k, v) => setD(prev => ({ ...prev, [k]: v }));
+  const canSave = d.sale_date && d.collaborator_id;
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8, padding: 24, width: 480, maxWidth: '90vw' }}>
+        <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>{d.id ? 'Editar entrada' : 'Nova entrada PP'}</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <label style={ppLabel()}>Data
+            <input type="date" value={d.sale_date || ''} onChange={e => update('sale_date', e.target.value)} style={dialogInput()} />
+          </label>
+          <label style={ppLabel()}>Colaborador
+            <select value={d.collaborator_id || ''} onChange={e => update('collaborator_id', e.target.value)} style={dialogInput()}>
+              <option value="">— escolher —</option>
+              {collaborators.map(c => (
+                <option key={c.user_id} value={c.user_id}>{c.display_name || c.email}</option>
+              ))}
+            </select>
+          </label>
+          <label style={ppLabel()}>Equipamentos vendidos
+            <input type="number" min="0" value={d.equipment_count ?? 0} onChange={e => update('equipment_count', e.target.value)} style={dialogInput()} />
+          </label>
+          <label style={ppLabel()}>PPs vendidos
+            <input type="number" min="0" value={d.pp_count ?? 0} onChange={e => update('pp_count', e.target.value)} style={dialogInput()} />
+          </label>
+          <label style={ppLabel()}>Valor (€) (opcional)
+            <input type="number" step="0.01" value={d.value ?? ''} onChange={e => update('value', e.target.value)} style={dialogInput()} />
+          </label>
+          <label style={ppLabel()}>Categoria (opcional)
+            <input type="text" value={d.category || ''} onChange={e => update('category', e.target.value)} style={dialogInput()} placeholder="Ex: Informática" />
+          </label>
+          <label style={{ ...ppLabel(), gridColumn: '1 / -1' }}>Notas (opcional)
+            <textarea rows={2} value={d.notes || ''} onChange={e => update('notes', e.target.value)} style={{ ...dialogInput(), resize: 'vertical', fontFamily: 'inherit' }} />
+          </label>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+          <button onClick={onClose} style={{ padding: '8px 14px', background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Cancelar</button>
+          <button onClick={() => canSave && onSave(d)} disabled={!canSave} style={{ padding: '8px 14px', background: canSave ? T.ink : T.lineSoft, color: canSave ? T.bg : T.inkMute, border: 'none', borderRadius: 6, fontSize: 12, cursor: canSave ? 'pointer' : 'not-allowed' }}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const kpiBox     = () => ({ padding: 14, border: `1px solid ${T.line}`, borderRadius: 6, background: T.bgEl });
+const kpiLabel   = () => ({ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 });
+const kpiValue   = () => ({ fontSize: 24, fontWeight: 500, color: T.ink });
+const ppTh       = () => ({ padding: '8px 12px', textAlign: 'left', fontWeight: 500, fontSize: 11 });
+const ppTd       = () => ({ padding: '8px 12px' });
+const ppIconBtn  = () => ({ padding: 4, background: 'transparent', border: 'none', cursor: 'pointer', color: T.inkSoft, marginLeft: 4 });
+const ppLabel    = () => ({ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, color: T.inkSoft });
 
 // ─────────────────────────────────────────────────────────────────────────
 // CredentialsView — Cofre de credenciais (passwords/códigos de equipamentos)
