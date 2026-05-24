@@ -412,10 +412,14 @@ function parseCounterSalesExcel(file) {
           const qty   = Number(row[cQty]) || 0;
           const value = Number(row[cPvp]) || 0;
           const fam1  = cFam1 >= 0 ? String(row[cFam1] || '').trim() : '';
-          // Tipo: produto / seguro / pp
+          // Tipo: produto / seguro (descrição começa por "SEG") /
+          //       addon (descrição começa por "PP" — extensões de garantia,
+          //       NÃO confundir com Planos de Proteção, que são geridos à parte
+          //       na vista 'Planos de Proteção').
+          const desc = String(row[cName] || '').trim();
           let type = 'product';
-          if (/SEGUROS\s+ADDON/i.test(fam1) || /^PP\s/i.test(String(row[cName] || ''))) type = 'pp';
-          else if (/^SEGUROS$/i.test(fam1)) type = 'insurance';
+          if (/^SEG[\s_]/i.test(desc))      type = 'insurance';
+          else if (/^PP[\s_]/i.test(desc))  type = 'addon';
           const funcNum = row[cFunc];
           const who = cWho >= 0 ? String(row[cWho] || '').trim() : '';
           const isAnonymous = !who || String(funcNum) === '994';
@@ -6533,20 +6537,20 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     let totalValue = 0, totalQty = 0;
     let prodValue = 0, prodQty = 0;
     let insValue = 0, insQty = 0;
-    let ppValue = 0, ppQty = 0;
+    let addonValue = 0, addonQty = 0;
     let anonValue = 0, anonQty = 0;
     for (const r of counterFiltered) {
       totalValue += r.value; totalQty += r.qty;
       if (r.isAnonymous) { anonValue += r.value; anonQty += r.qty; }
       if (r.type === 'product') { prodValue += r.value; prodQty += r.qty; }
       else if (r.type === 'insurance') { insValue += r.value; insQty += r.qty; }
-      else if (r.type === 'pp') { ppValue += r.value; ppQty += r.qty; }
+      else if (r.type === 'addon') { addonValue += r.value; addonQty += r.qty; }
     }
-    // Taxa de anexação aproximada: PPs+Seguros / (produtos elegíveis)
-    // Heurística simples: ratio (insQty+ppQty) / prodQty
-    const attachRate = prodQty > 0 ? ((insQty + ppQty) / prodQty * 100) : 0;
+    // Taxa de anexação aproximada: seguros vendidos / produtos vendidos
+    const attachRate = prodQty > 0 ? (insQty / prodQty * 100) : 0;
+    const addonRate  = prodQty > 0 ? (addonQty / prodQty * 100) : 0;
     const anonPct = totalValue > 0 ? (anonValue / totalValue * 100) : 0;
-    return { totalValue, totalQty, prodValue, prodQty, insValue, insQty, ppValue, ppQty, anonValue, anonQty, attachRate, anonPct };
+    return { totalValue, totalQty, prodValue, prodQty, insValue, insQty, addonValue, addonQty, anonValue, anonQty, attachRate, addonRate, anonPct };
   }, [counterFiltered]);
 
   const teamRanking = useMemo(() => {
@@ -6559,13 +6563,13 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
         lines: 0, qty: 0, value: 0,
         prodQty: 0, prodValue: 0,
         insQty: 0, insValue: 0,
-        ppQty: 0, ppValue: 0,
+        addonQty: 0, addonValue: 0,
         famCount: new Map(),
       };
       e.lines += 1; e.qty += r.qty; e.value += r.value;
       if (r.type === 'product')   { e.prodQty += r.qty; e.prodValue += r.value; }
       else if (r.type === 'insurance') { e.insQty += r.qty; e.insValue += r.value; }
-      else if (r.type === 'pp')   { e.ppQty += r.qty; e.ppValue += r.value; }
+      else if (r.type === 'addon') { e.addonQty += r.qty; e.addonValue += r.value; }
       if (r.fam1) e.famCount.set(r.fam1, (e.famCount.get(r.fam1) || 0) + r.qty);
       map.set(key, e);
     }
@@ -6573,7 +6577,8 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       const topFam = Array.from(e.famCount.entries()).sort((a, b) => b[1] - a[1])[0];
       return {
         ...e,
-        attachRate: e.prodQty > 0 ? ((e.insQty + e.ppQty) / e.prodQty * 100) : 0,
+        attachRate: e.prodQty > 0 ? (e.insQty / e.prodQty * 100) : 0,
+        addonRate:  e.prodQty > 0 ? (e.addonQty / e.prodQty * 100) : 0,
         topFam: topFam ? topFam[0] : '—',
       };
     });
@@ -6581,11 +6586,11 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     return arr;
   }, [counterFiltered]);
 
-  // Top tipos de seguros vendidos
+  // Top tipos de seguros + addons vendidos
   const insuranceTypes = useMemo(() => {
     const map = new Map();
     for (const r of counterFiltered) {
-      if (r.type !== 'insurance' && r.type !== 'pp') continue;
+      if (r.type !== 'insurance' && r.type !== 'addon') continue;
       const e = map.get(r.name) || { name: r.name, type: r.type, qty: 0, value: 0 };
       e.qty += r.qty; e.value += r.value;
       map.set(r.name, e);
@@ -7732,9 +7737,10 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                 <KpiCard label="Total vendas" value={fmtEur(teamKpis.totalValue)} subtitle={`${teamKpis.totalQty.toLocaleString('pt-PT')} unidades`} />
                 <KpiCard label="Produtos" value={fmtEur(teamKpis.prodValue)} subtitle={`${teamKpis.prodQty.toLocaleString('pt-PT')} unid.`} accent={T.ink} />
-                <KpiCard label="Seguros base" value={fmtEur(teamKpis.insValue)} subtitle={`${teamKpis.insQty} contratos`} accent="#5B9BD5" />
-                <KpiCard label="Planos Proteção" value={fmtEur(teamKpis.ppValue)} subtitle={`${teamKpis.ppQty} PPs`} accent={T.green} />
-                <KpiCard label="Taxa anexação" value={teamKpis.attachRate.toFixed(1).replace('.', ',') + '%'} subtitle="(Seg+PP) ÷ produtos" accent={teamKpis.attachRate >= 30 ? T.green : teamKpis.attachRate >= 15 ? T.orange : T.red} />
+                <KpiCard label="Seguros (SEG*)" value={fmtEur(teamKpis.insValue)} subtitle={`${teamKpis.insQty} contratos`} accent="#5B9BD5" />
+                <KpiCard label="Addons (PP*)" value={fmtEur(teamKpis.addonValue)} subtitle={`${teamKpis.addonQty} extensões/addons`} accent="#8064A2" />
+                <KpiCard label="Taxa anexação seguro" value={teamKpis.attachRate.toFixed(1).replace('.', ',') + '%'} subtitle="seguros ÷ produtos" accent={teamKpis.attachRate >= 30 ? T.green : teamKpis.attachRate >= 15 ? T.orange : T.red} />
+                <KpiCard label="Taxa addons" value={teamKpis.addonRate.toFixed(1).replace('.', ',') + '%'} subtitle="addons ÷ produtos" accent={teamKpis.addonRate >= 30 ? T.green : teamKpis.addonRate >= 15 ? T.orange : T.red} />
                 <KpiCard label="Vendas anónimas" value={teamKpis.anonPct.toFixed(1).replace('.', ',') + '%'} subtitle={fmtEur(teamKpis.anonValue) + ' s/ colaborador'} accent={teamKpis.anonPct > 20 ? T.orange : T.inkSoft} />
               </div>
 
@@ -7752,8 +7758,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                       <th style={{ ...salesTh(), textAlign: 'right' }}>Unidades</th>
                       <th style={{ ...salesTh(), textAlign: 'right' }}>Vendas €</th>
                       <th style={{ ...salesTh(), textAlign: 'right' }}>Seguros</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>PPs</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Anexação %</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Addons</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Seg %</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Add %</th>
                       <th style={salesTh()}>Top família</th>
                     </tr>
                   </thead>
@@ -7778,8 +7785,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                             <span style={{ position: 'relative', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(c.value)}</span>
                           </td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#5B9BD5' }}>{c.insQty}</td>
-                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.green, fontWeight: 500 }}>{c.ppQty}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#8064A2' }}>{c.addonQty}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: c.attachRate >= 30 ? T.green : c.attachRate >= 15 ? T.orange : T.red }}>{c.attachRate.toFixed(1)}%</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: c.addonRate >= 30 ? T.green : c.addonRate >= 15 ? T.orange : T.inkSoft }}>{c.addonRate.toFixed(1)}%</td>
                           <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{c.topFam}</td>
                         </tr>
                       );
@@ -7809,7 +7817,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                       <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Top 10 produtos vendidos</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                         {collabDetail.topProds.map(p => {
-                          const tag = p.type === 'pp' ? { l: 'PP', c: T.green } : p.type === 'insurance' ? { l: 'SEG', c: '#5B9BD5' } : null;
+                          const tag = p.type === 'addon' ? { l: 'ADD', c: '#8064A2' } : p.type === 'insurance' ? { l: 'SEG', c: '#5B9BD5' } : null;
                           return (
                             <div key={p.ean} style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', gap: 8, padding: '6px 8px', background: T.bg, borderRadius: 4, fontSize: 11, alignItems: 'center' }}>
                               {tag ? <span style={{ padding: '1px 6px', borderRadius: 3, background: tag.c + '22', color: tag.c, fontSize: 9, fontWeight: 600 }}>{tag.l}</span> : <span style={{ width: 24 }} />}
@@ -7850,7 +7858,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               {insuranceTypes.length > 0 && (
                 <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
                   <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                    🛡 Top tipos de seguros vendidos
+                    🛡 Top seguros (SEG*) + addons (PP*) vendidos
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                     <thead>
@@ -7865,7 +7873,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                       {insuranceTypes.map(it => (
                         <tr key={it.name} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
                           <td style={salesTd()}>
-                            <span style={{ padding: '2px 8px', borderRadius: 3, background: it.type === 'pp' ? T.green + '22' : '#5B9BD522', color: it.type === 'pp' ? T.green : '#5B9BD5', fontSize: 10, fontWeight: 600 }}>{it.type === 'pp' ? 'PP' : 'SEGURO'}</span>
+                            <span style={{ padding: '2px 8px', borderRadius: 3, background: it.type === 'addon' ? '#806CA222' : '#5B9BD522', color: it.type === 'addon' ? '#8064A2' : '#5B9BD5', fontSize: 10, fontWeight: 600 }}>{it.type === 'addon' ? 'ADDON' : 'SEGURO'}</span>
                           </td>
                           <td style={salesTd()}>{it.name}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{it.qty}</td>
