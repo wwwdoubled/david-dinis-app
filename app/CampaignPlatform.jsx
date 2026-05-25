@@ -1181,7 +1181,8 @@ async function markActivityReverted(activityId, reverterId) {
 // Default menu config — all visible
 const DEFAULT_MENU_VISIBILITY = {
   dashboard: { roles: ['user', 'manager', 'viewer'], visible: true },
-  // v3.20.0: Análise de Vendas é agora admin-only (parser FNAC com margens)
+  // v3.20.7: 'sales' já não está na sidebar (vive dentro de Administração).
+  // Mantido aqui só para compatibilidade com canSeeMenuItem caso seja invocado.
   sales: { roles: [], visible: false },
   campaigns: { roles: ['user', 'manager', 'viewer'], visible: true },
   calendar: { roles: ['user', 'manager', 'viewer'], visible: true },
@@ -4963,13 +4964,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             cloudDataLoaded={cloudDataLoaded}
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
-          {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
-          {view === 'sales' && !isAdmin && (
-            <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
-              <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
-              <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
-            </div>
-          )}
+          {/* v3.20.7: 'sales' agora vive dentro de Administração (tab) */}
           {view === 'changes' && <ChangesView campaigns={filteredCampaigns} periods={filteredPeriods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
           {view === 'stock' && <StockView
             stockRowsPO2={stockRowsPO2} setStockRowsPO2={setStockRowsPO2}
@@ -5009,6 +5004,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               uiConfig={uiConfig}
               setUIConfig={setUIConfig}
               userDepartment={userDepartment}
+              stockRowsPO2={stockRowsPO2}
+              stockRowsPO3={stockRowsPO3}
+              stockMapPO2={stockMapPO2}
+              stockMapPO3={stockMapPO3}
             />
           )}
           {view === 'admin' && !isAdmin && (
@@ -5237,7 +5236,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
   // - showFor: se presente, APENAS estes depts vêem (além de admin)
   const allItems = [
     { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
-    { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, hideFor: ['PES'] },
+    // v3.20.7: 'sales' movido para dentro da Administração (não aparece no menu principal)
     { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
@@ -21347,7 +21346,7 @@ function BPSlotFull({ slot }) {
 // AdminView — administration panel (only visible to admins)
 // Tabs: Utilizadores | Atividade | Configuração | Estatísticas
 // ─────────────────────────────────────────────────────────────────────────
-function AdminView({ user, uiConfig, setUIConfig, userDepartment }) {
+function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 }) {
   const [tab, setTab] = useStoredState('admin.tab', 'users');
 
   return (
@@ -21371,6 +21370,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment }) {
           { id: 'layout', label: 'Layout da loja', icon: Layers },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
           { id: 'emails', label: 'Emails', icon: Inbox },
+          { id: 'sales', label: 'Análise Vendas', icon: BarChart3 },
           { id: 'config', label: 'Configuração', icon: Settings },
         ].map(t => {
           const Icon = t.icon;
@@ -21396,6 +21396,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment }) {
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
+      {tab === 'sales' && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
     </div>
   );
