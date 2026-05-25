@@ -3633,6 +3633,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // ─── Cloud sync: load shared periods/campaigns from cloud, merge with local
   // and migrate any local-only items to the cloud once.
   const [cloudDataLoaded, setCloudDataLoaded] = useState(false);
+  const [rowsHydrated, setRowsHydrated] = useState(false); // v3.20.12: eager hydration done?
   const [migrationStatus, setMigrationStatus] = useState(null); // { migrated: n }
   const cloudLoadRanRef = useRef(false);
   useEffect(() => {
@@ -3663,15 +3664,15 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCloudDataLoaded(true); // unblock the rest of the app immediately
 
       // 2c. EAGER row hydration — load rows for ALL campaigns in background.
-      // This guarantees that no matter when the user opens a period, the rows
-      // are already there. Stock snapshots (PO2/PO3) work the same way and
-      // never had this problem. (v3.9.6)
+      // v3.20.12: hidratar também campanhas onde rows está vazio (não só
+      // _needsRows). Isto cobre o caso de campanhas que perderam rows ao
+      // longo do tempo ou nunca tiveram IDB cache.
       (async () => {
         try {
           const idsNeedingRows = earlyMergedCampaigns
-            .filter(c => c.id && c._needsRows)
+            .filter(c => c.id && (c._needsRows || !Array.isArray(c.rows) || c.rows.length === 0))
             .map(c => c.id);
-          if (idsNeedingRows.length === 0) return;
+          if (idsNeedingRows.length === 0) { setRowsHydrated(true); return; }
           console.log(`[startup] eager hydration: ${idsNeedingRows.length} campaigns`);
           const hydrated = await cloudFetchCampaignRows(idsNeedingRows);
           if (cancelled) return;
@@ -3685,9 +3686,11 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             }
             return { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false };
           }));
+          setRowsHydrated(true);
           console.log(`[startup] eager hydration done`);
         } catch (e) {
           console.warn('[startup] eager hydration failed', e);
+          setRowsHydrated(true);
         }
       })();
 
@@ -4948,7 +4951,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               }}
             />
           )}
-          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} />}
+          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} isAdmin={isAdmin} />}
           {view === 'campaigns' && <CampaignsView
             campaigns={campaigns} setCampaigns={setCampaigns}
             periods={filteredPeriods}
@@ -4969,8 +4972,15 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             cloudDataLoaded={cloudDataLoaded}
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
-          {/* v3.20.7: 'sales' agora vive dentro de Administração (tab) */}
-          {view === 'changes' && <ChangesView campaigns={filteredCampaigns} periods={filteredPeriods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} />}
+          {/* v3.20.12: 'sales' no sidebar (admin-only) + também acessível dentro de Admin */}
+          {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
+          {view === 'sales' && !isAdmin && (
+            <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
+              <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
+              <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
+            </div>
+          )}
+          {view === 'changes' && <ChangesView campaigns={filteredCampaigns} periods={filteredPeriods} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} user={user} excludedFamilies={excludedFamilies} rowsHydrated={rowsHydrated} />}
           {view === 'stock' && <StockView
             stockRowsPO2={stockRowsPO2} setStockRowsPO2={setStockRowsPO2}
             stockRowsPO3={stockRowsPO3} setStockRowsPO3={setStockRowsPO3}
@@ -5241,7 +5251,8 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
   // - showFor: se presente, APENAS estes depts vêem (além de admin)
   const allItems = [
     { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
-    // v3.20.7: 'sales' movido para dentro da Administração (não aparece no menu principal)
+    // v3.20.12: 'sales' volta ao sidebar — admin-only via canSeeMenuItem (roles=[] visible=false)
+    { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, hideFor: ['PES'] },
     { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
@@ -5638,9 +5649,43 @@ const SearchInput = React.memo(function SearchInput({ value = '', onCommit, debo
 // Section 2: Active campaigns summary (existing)
 // Section 3: Acesso rápido (quick action grid replacing recommended flow)
 // ─────────────────────────────────────────────────────────────────────────
-function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods: periodsAll, posters, notifications }) {
+function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods: periodsAll, posters, notifications, isAdmin = false }) {
   // v3.20.8: ignorar periods 'hidden' (soft-delete) — admin gere-os em CampaignsView
   const periods = useMemo(() => (periodsAll || []).filter(p => !p.hidden), [periodsAll]);
+
+  // v3.20.12: artigos atribuídos por família 1
+  // Cruza EANs das zonas com headers de família das campanhas (col detection)
+  const familyBreakdown = useMemo(() => {
+    // Build EAN → family lookup a partir das campanhas
+    const eanFam = new Map();
+    (campaigns || []).forEach(camp => {
+      const cols = detectColumns(camp.headers || []);
+      if (!cols.ean || !cols.family) return;
+      (camp.rows || []).forEach(r => {
+        const k = normalizeEAN(r[cols.ean]);
+        if (!k) return;
+        const fam = String(r[cols.family] || '').trim();
+        if (fam && !eanFam.has(k)) eanFam.set(k, fam);
+      });
+    });
+    // Walk periods → zones → slots e conta EANs únicos por família
+    const counts = new Map();
+    const seen = new Set();
+    (periods || []).forEach(p => {
+      (p.floors || []).forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
+        const k = normalizeEAN(s.ref);
+        if (!k || seen.has(k)) return;
+        seen.add(k);
+        const fam = eanFam.get(k) || s.family || '— sem família —';
+        counts.set(fam, (counts.get(fam) || 0) + 1);
+      })));
+    });
+    const arr = Array.from(counts.entries())
+      .map(([family, count]) => ({ family, count }))
+      .sort((a, b) => b.count - a.count);
+    const total = arr.reduce((s, x) => s + x.count, 0);
+    return { items: arr, total };
+  }, [campaigns, periods]);
   // Plan ownership lives on PERIODS. Count ALL slots in every period's floors,
   // then deduplicate by EAN so the same product attributed to two zones
   // doesn't get counted twice.
@@ -5877,6 +5922,53 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
       {/* Active campaigns summary */}
       {periods && periods.length > 0 && (
         <ActiveCampaignsSummary periods={periods} posters={posters} setView={setView} />
+      )}
+
+      {/* v3.20.12: Breakdown por família (artigos atribuídos) — só faz sentido se há plano */}
+      {familyBreakdown.total > 0 && (
+        <div style={{ marginTop: 24, padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Artigos atribuídos por família</div>
+              <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 4 }}>{familyBreakdown.total.toLocaleString('pt-PT')} EANs únicos em {familyBreakdown.items.length} famílias</div>
+            </div>
+            <button onClick={() => setView('campaigns')} style={{ padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>Ver campanhas →</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {familyBreakdown.items.slice(0, 8).map(f => {
+              const pct = familyBreakdown.total > 0 ? (f.count / familyBreakdown.total * 100) : 0;
+              const maxBar = familyBreakdown.items[0]?.count || 1;
+              const barPct = (f.count / maxBar) * 100;
+              return (
+                <div key={f.family} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 50px', gap: 12, alignItems: 'center', fontSize: 12 }}>
+                  <div>
+                    <div style={{ marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.family}>{f.family}</div>
+                    <div style={{ height: 4, background: T.lineSoft, borderRadius: 2 }}>
+                      <div style={{ height: '100%', width: `${barPct}%`, background: T.accent, borderRadius: 2 }} />
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{f.count}</div>
+                  <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkMute, fontSize: 11 }}>{pct.toFixed(1)}%</div>
+                </div>
+              );
+            })}
+            {familyBreakdown.items.length > 8 && (
+              <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>+{familyBreakdown.items.length - 8} famílias menores</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* v3.20.12: Atalho admin para Análise de Vendas */}
+      {isAdmin && (
+        <div style={{ marginTop: 24, padding: 18, background: `linear-gradient(135deg, ${T.bgEl} 0%, ${T.accent}10 100%)`, border: `1px solid ${T.line}`, borderRadius: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Admin</div>
+            <div style={{ fontSize: 15, fontWeight: 500, marginTop: 4 }}>📊 Análise de Vendas</div>
+            <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 2 }}>KPIs, margens, top produtos, equipa, lifecycle…</div>
+          </div>
+          <button onClick={() => setView('sales')} style={{ padding: '8px 16px', background: T.ink, color: T.bg, border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer' }}>Abrir →</button>
+        </div>
       )}
 
       {/* Acesso rápido — quick action grid (replaces "Fluxo recomendado") */}
@@ -14965,7 +15057,7 @@ function ChangesDateFilter(props) {
   );
 }
 
-function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, user, excludedFamilies = [] }) {
+function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, user, excludedFamilies = [], rowsHydrated = true }) {
   // ── "Novo" side (left) ───────────────────────────────────────────────────
   const [newSource, setNewSource] = useStoredState('changes.newSource', 'period'); // 'period'|'campaign'|'upload'
   const [newPeriodId, setNewPeriodId] = useStoredState('changes.newPeriodId', null);
@@ -15542,6 +15634,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               onlyAssigned={onlyAssigned}
               setOnlyAssigned={setOnlyAssigned}
               onRefresh={autoPickPeriods}
+              rowsHydrated={rowsHydrated}
             />
           )}
         </>
@@ -15550,12 +15643,19 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef, zoneIndex, onlyAssigned, setOnlyAssigned, onRefresh }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef, zoneIndex, onlyAssigned, setOnlyAssigned, onRefresh, rowsHydrated = true }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
   return (
     <div>
+      {/* v3.20.12: banner enquanto eager hydration ainda não terminou */}
+      {!rowsHydrated && (
+        <div style={{ marginBottom: 16, padding: '10px 14px', background: T.accent + '12', border: `1px solid ${T.accent}40`, borderRadius: 6, fontSize: 12, color: T.accent, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: T.accent, animation: 'pulse 1.4s ease-in-out infinite' }} />
+          A carregar produtos das campanhas da cloud… clica em <strong>Refrescar</strong> daqui a poucos segundos se a lista parecer vazia.
+        </div>
+      )}
       {/* Summary cards — clickable to filter */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20 }}>
         <SummaryCard label="Novos" value={diff.added.length} color={T.green} active={filter === 'added'} onClick={() => setFilter(filter === 'added' ? 'all' : 'added')} />
@@ -21486,7 +21586,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
           { id: 'layout', label: 'Layout da loja', icon: Layers },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
           { id: 'emails', label: 'Emails', icon: Inbox },
-          { id: 'sales', label: 'Análise Vendas', icon: BarChart3 },
+          // v3.20.12: 'sales' voltou ao sidebar (admin-only); removido daqui
           { id: 'config', label: 'Configuração', icon: Settings },
         ].map(t => {
           const Icon = t.icon;
@@ -21512,7 +21612,6 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
-      {tab === 'sales' && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
     </div>
   );
