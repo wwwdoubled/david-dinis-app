@@ -3386,9 +3386,17 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [userProfile, setUserProfile] = useState(null);
   const [uiConfig, setUIConfig] = useState(null);
 
-  // v3.17.0: admin view switcher — admin escolhe que dept ver na entrada.
-  // Mantém estado entre sessões. null = ainda não escolheu (mostra picker).
-  const [adminViewDepartment, setAdminViewDepartment] = useStoredState('admin.viewDept', null);
+  // v3.17.0 / v3.20.13: admin view switcher — admin escolhe que dept ver
+  // EM CADA LOGIN. State não persistente; reset detectado via user.id change.
+  // Resultado: cada login (e cada refresh) força o picker.
+  const [adminViewDepartment, setAdminViewDepartment] = useState(null);
+  const lastUserIdRef = useRef(null);
+  useEffect(() => {
+    if (user?.id && lastUserIdRef.current !== user.id) {
+      lastUserIdRef.current = user.id;
+      setAdminViewDepartment(null);
+    }
+  }, [user?.id]);
 
   // userDepartment: o dept que está actualmente activo na UI.
   // - Non-admin: fixo no dept do user_profile.
@@ -4912,7 +4920,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           syncStatus={syncStatus} isOnline={isOnline}
           theme={theme} toggleTheme={toggleTheme} setTheme={setTheme}
         />
-        <main style={{ flex: 1, padding: '48px 40px', maxWidth: 1600, margin: '0 auto', width: '100%' }}>
+        <main style={{
+          flex: 1, padding: '48px 40px', maxWidth: 1600, margin: '0 auto', width: '100%',
+          // v3.20.13: faixa superior dept-color (só admin viewing-as)
+          borderTop: isAdmin && adminViewDepartment
+            ? `3px solid ${userDepartment === 'PES' ? T.purple : T.blue}`
+            : 'none',
+        }}>
           {/* Migration success/error toast */}
           {migrationStatus && (
             <div style={{
@@ -5278,12 +5292,44 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     items.push({ id: 'admin', label: 'Administração', icon: Shield, accent: true });
   }
 
+  // v3.20.13: cor do dept actual para diferenciação visual
+  const deptColor = userDepartment === 'PES' ? T.purple : T.blue;
+  const deptLabel = userDepartment === 'PES' ? 'Produtos Editoriais e Serviços' : 'Produtos Técnicos e Serviços';
+  const showDeptBadge = isAdmin && adminViewDepartment && setAdminViewDepartment;
+
   return (
     <aside className="no-print" style={{
       width: 240, padding: '40px 24px', borderRight: `1px solid ${T.line}`,
+      borderLeft: showDeptBadge ? `4px solid ${deptColor}` : 'none',
       position: 'sticky', top: 0, height: '100vh', background: T.bgEl, flexShrink: 0,
     }}>
-      <div style={{ marginBottom: 56 }}>
+      {/* v3.20.13: badge dept-color clicável (admin) — substitui o switcher pequeno antigo */}
+      {showDeptBadge && (
+        <button
+          onClick={() => setAdminViewDepartment(adminViewDepartment === 'PTS' ? 'PES' : 'PTS')}
+          title={`Vista actual: ${userDepartment}. Clica para alternar para ${userDepartment === 'PTS' ? 'PES' : 'PTS'}.`}
+          style={{
+            width: '100%', marginBottom: 24, padding: '12px 14px',
+            background: deptColor, color: '#fff', border: 'none',
+            borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit',
+            display: 'flex', alignItems: 'center', gap: 10,
+            boxShadow: `0 6px 16px -8px ${deptColor}`,
+            transition: 'transform 0.15s, box-shadow 0.15s',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = `0 10px 22px -8px ${deptColor}`; }}
+          onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = `0 6px 16px -8px ${deptColor}`; }}
+        >
+          <div className="display" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1, letterSpacing: '-0.02em' }}>
+            {userDepartment}
+          </div>
+          <div style={{ flex: 1, fontSize: 10, lineHeight: 1.25, opacity: 0.92, textAlign: 'left' }}>
+            {deptLabel}
+          </div>
+          <ArrowRight size={12} style={{ opacity: 0.7 }} />
+        </button>
+      )}
+
+      <div style={{ marginBottom: 40 }}>
         <div className="display" style={{ fontSize: 28, lineHeight: 1, fontStyle: 'italic' }}>David Dinis</div>
         <div className="mono" style={{ fontSize: 10, letterSpacing: '0.15em', color: T.inkMute, marginTop: 6, textTransform: 'uppercase' }}>
           Gestão de Campanhas
@@ -5375,32 +5421,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
               )}
             </div>
           )}
-          {/* v3.17.0: admin pode alternar entre vistas PTS/PES */}
-          {isAdmin && adminViewDepartment && setAdminViewDepartment && (
-            <button
-              onClick={() => setAdminViewDepartment(adminViewDepartment === 'PTS' ? 'PES' : 'PTS')}
-              title={`Estás a ver dados ${adminViewDepartment}. Clica para alternar para ${adminViewDepartment === 'PTS' ? 'PES' : 'PTS'}.`}
-              style={{
-                marginTop: 8, padding: '6px 10px', width: '100%',
-                background: 'transparent', color: T.inkSoft,
-                border: `1px solid ${T.line}`, borderRadius: 4,
-                cursor: 'pointer', fontFamily: 'inherit',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                gap: 6, fontSize: 11,
-              }}
-              onMouseEnter={e => { e.currentTarget.style.background = T.lineSoft; e.currentTarget.style.color = T.ink; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.inkSoft; }}
-            >
-              <span>Mudar para</span>
-              <span className="mono" style={{
-                fontSize: 10, fontWeight: 600,
-                color: adminViewDepartment === 'PTS' ? T.purple : T.blue,
-                letterSpacing: '0.05em',
-              }}>
-                {adminViewDepartment === 'PTS' ? 'PES' : 'PTS'}
-              </span>
-            </button>
-          )}
+          {/* v3.20.13: switcher antigo removido — substituído pela badge dept-color no topo do sidebar */}
           {candidates.length > 0 && (
             <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, marginBottom: 12 }}>
               {candidates.length} candidatos
