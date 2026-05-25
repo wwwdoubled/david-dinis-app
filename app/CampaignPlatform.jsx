@@ -4024,7 +4024,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [uiConfig]);
 
   const notifications = useMemo(
-    () => computeNotifications(filteredPeriods, posters, dismissals, warnDays),
+    () => computeNotifications(filteredPeriods.filter(p => !p.hidden), posters, dismissals, warnDays),
     [filteredPeriods, posters, dismissals, warnDays]
   );
 
@@ -5633,7 +5633,9 @@ const SearchInput = React.memo(function SearchInput({ value = '', onCommit, debo
 // Section 2: Active campaigns summary (existing)
 // Section 3: Acesso rápido (quick action grid replacing recommended flow)
 // ─────────────────────────────────────────────────────────────────────────
-function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods, posters, notifications }) {
+function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods: periodsAll, posters, notifications }) {
+  // v3.20.8: ignorar periods 'hidden' (soft-delete) — admin gere-os em CampaignsView
+  const periods = useMemo(() => (periodsAll || []).filter(p => !p.hidden), [periodsAll]);
   // Plan ownership lives on PERIODS. Count ALL slots in every period's floors,
   // then deduplicate by EAN so the same product attributed to two zones
   // doesn't get counted twice.
@@ -23488,6 +23490,7 @@ function ActiveCampaignsSummary({ periods, posters, setView }) {
 
   const enriched = useMemo(() => {
     return (periods || [])
+      .filter(p => !p.hidden) // v3.20.8: ignorar soft-deleted
       .map(p => {
         const status = periodStatus(p);
         const end = p.endDate ? new Date(p.endDate) : null;
