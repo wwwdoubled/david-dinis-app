@@ -6667,7 +6667,15 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       weeklyMap.set(wk, (weeklyMap.get(wk) || 0) + r.value);
     }
     const weekly = Array.from(weeklyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, value }));
-    return { rows: myRows, topProds, daily, famArr, bestFam2: bestFam2 ? bestFam2[0] : null, weekly };
+    // Detalhe seguros + addons (para verificação da classificação)
+    const insuranceLines = myRows.filter(r => r.type === 'insurance' || r.type === 'addon')
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const insSummary = { insQty: 0, insValue: 0, addonQty: 0, addonValue: 0 };
+    insuranceLines.forEach(r => {
+      if (r.type === 'insurance') { insSummary.insQty += r.qty; insSummary.insValue += r.value; }
+      else { insSummary.addonQty += r.qty; insSummary.addonValue += r.value; }
+    });
+    return { rows: myRows, topProds, daily, famArr, bestFam2: bestFam2 ? bestFam2[0] : null, weekly, insuranceLines, insSummary };
   }, [selectedCollab, counterFiltered]);
 
   // ── Famílias detectadas no snapshot (para configurar elegíveis) ───────
@@ -8629,6 +8637,59 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                       </div>
                     </div>
                   </div>
+
+                  {/* Verificação: TODAS as linhas seguros + addons deste colaborador */}
+                  {collabDetail.insuranceLines.length > 0 && (
+                    <div style={{ marginTop: 20, padding: 14, background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+                        <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                          🔍 Detalhe seguros & addons ({collabDetail.insuranceLines.length} linhas)
+                        </div>
+                        <div style={{ fontSize: 11, color: T.inkSoft }}>
+                          <span style={{ color: '#5B9BD5' }}>● {collabDetail.insSummary.insQty} seguros ({fmtEur(collabDetail.insSummary.insValue)})</span>
+                          <span style={{ margin: '0 8px', color: T.inkMute }}>·</span>
+                          <span style={{ color: '#8064A2' }}>● {collabDetail.insSummary.addonQty} addons ({fmtEur(collabDetail.insSummary.addonValue)})</span>
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 10, color: T.inkMute, marginBottom: 8, fontStyle: 'italic' }}>
+                        Lista completa para verificares se a classificação está certa. SEG* = seguros base; PP* = addons/extensões.
+                      </div>
+                      <div style={{ maxHeight: 320, overflowY: 'auto', border: `1px solid ${T.lineSoft}`, borderRadius: 4 }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                          <thead style={{ position: 'sticky', top: 0, background: T.bgEl }}>
+                            <tr style={{ color: T.inkMute }}>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>Tipo</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>Data</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>EAN</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>Designação</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>Família 1</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 500, fontSize: 10 }}>Família 2</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 500, fontSize: 10 }}>Qtd</th>
+                              <th style={{ padding: '6px 10px', textAlign: 'right', fontWeight: 500, fontSize: 10 }}>Valor</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {collabDetail.insuranceLines.map((r, i) => (
+                              <tr key={i} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                                <td style={{ padding: '5px 10px' }}>
+                                  <span style={{ padding: '1px 6px', borderRadius: 3, background: r.type === 'addon' ? '#806CA222' : '#5B9BD522', color: r.type === 'addon' ? '#8064A2' : '#5B9BD5', fontSize: 9, fontWeight: 600 }}>
+                                    {r.type === 'addon' ? 'ADDON' : 'SEGURO'}
+                                  </span>
+                                </td>
+                                <td style={{ padding: '5px 10px', fontFamily: 'monospace', color: T.inkSoft }}>{r.date || '—'}</td>
+                                <td style={{ padding: '5px 10px', fontFamily: 'monospace', color: T.inkSoft }}>{r.ean}</td>
+                                <td style={{ padding: '5px 10px' }}>{r.name}</td>
+                                <td style={{ padding: '5px 10px', color: T.inkSoft, fontSize: 10 }}>{r.fam1}</td>
+                                <td style={{ padding: '5px 10px', color: T.inkSoft, fontSize: 10 }}>{r.fam2}</td>
+                                <td style={{ padding: '5px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{r.qty}</td>
+                                <td style={{ padding: '5px 10px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(r.value)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
