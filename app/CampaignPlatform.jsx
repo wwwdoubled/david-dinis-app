@@ -889,8 +889,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.14';
-const APP_BUILD_DATE = '2026-05-25T13:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.15';
+const APP_BUILD_DATE = '2026-05-25T14:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -900,6 +900,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.15', date: '2026-05-25', summary: 'HydrationGate — bloqueia a app no login até todas as rows das campanhas estarem carregadas da cloud. Aparece um overlay com ícone Database pulsante, barra de progresso (X de Y prontas) e botão "Continuar mesmo assim" após 8s caso demore muito. Aparece DEPOIS do ForcePasswordChangeModal e AdminViewPickerModal. Resultado: ao entrar em Alterações/Visão Geral logo a seguir ao login, todos os dados estão prontos.' },
   { version: '3.20.14', date: '2026-05-25', summary: 'Visão Geral: removida a secção "Artigos atribuídos por família" — dependia de hydration de campaign rows que não está sempre pronta ao abrir a app, ficava em branco até entrar numa campanha. Em Análise de Vendas → Top Famílias tem-se essa info quando os dados estão hidratados.' },
   { version: '3.20.13', date: '2026-05-25', summary: 'Picker de departamento em cada login + diferenciação visual reforçada. (A) Admin escolhe vista (PTS / PES) em CADA login (não só no primeiro) — adminViewDepartment deixou de persistir em localStorage, reset detectado via user.id change. Refresh da página também força nova escolha. (B) Sidebar ganha badge GRANDE no topo com cor sólida do dept (azul=PTS, roxo=PES) + nome completo + ícone de seta — clicável para alternar instantaneamente, com hover lift. Borda esquerda 4px na cor do dept (sempre visível). (C) Main content ganha borda superior 3px na cor do dept. (D) Switcher pequeno antigo da secção do user removido (redundante).' },
   { version: '3.20.12', date: '2026-05-25', summary: 'Eager hydration + breakdown por família + Análise de Vendas no sidebar. (A) Eager row hydration agora também hidrata campanhas com rows vazios (não só _needsRows), apanhando casos onde a flag foi limpa mas rows nunca carregaram. Novo flag rowsHydrated propagado; ChangesView mostra banner "A carregar produtos das campanhas…" enquanto false. (B) Visão Geral: nova secção "Artigos atribuídos por família" — top 8 famílias com barras horizontais, total e %. Cruza EANs das zonas com Família 1 das campanhas via detectColumns. (C) Análise de Vendas volta ao sidebar (admin-only, hideFor:[PES]); removida da AdminView. (D) Atalho admin para Análise de Vendas no Dashboard.' },
@@ -4592,6 +4593,15 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {showAdminViewPicker && !mustChangePassword && (
         <AdminViewPickerModal onPick={(dept) => setAdminViewDepartment(dept)} />
       )}
+      {/* v3.20.15: gate de hidratação — bloqueia até as rows das campanhas estarem carregadas */}
+      {!mustChangePassword && !showAdminViewPicker && (!cloudDataLoaded || !rowsHydrated) && (
+        <HydrationGate
+          cloudDataLoaded={cloudDataLoaded}
+          rowsHydrated={rowsHydrated}
+          campaigns={campaigns}
+          onSkip={() => setRowsHydrated(true)}
+        />
+      )}
       <style>{fonts}{`
         * { box-sizing: border-box; }
         :root { color-scheme: ${theme === 'dark' ? 'dark' : 'light'}; }
@@ -4607,6 +4617,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         ::-webkit-scrollbar-track { background: transparent; }
         @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
         .fade-up { animation: fadeUp 0.4s ease-out backwards; }
+        @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
 
         /* ─── Polish global (v3.11.4) ─── */
         /* Scroll smooth em toda a app */
@@ -22337,6 +22348,81 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.20.15: HydrationGate — bloqueia a app até as campaign rows estarem
+// carregadas. Aparece após login, depois do ForcePasswordChangeModal e
+// AdminViewPickerModal. Mostra contagem de campanhas + botão de skip
+// após 8 segundos (caso a hidratação demore demasiado).
+function HydrationGate({ cloudDataLoaded, rowsHydrated, campaigns, onSkip }) {
+  const [allowSkip, setAllowSkip] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setAllowSkip(true), 8000);
+    return () => clearTimeout(t);
+  }, []);
+  const total = (campaigns || []).length;
+  const loaded = (campaigns || []).filter(c => Array.isArray(c.rows) && c.rows.length > 0).length;
+  const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.92)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 10000, padding: 20, backdropFilter: 'blur(6px)',
+    }}>
+      <div style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 16, padding: 36, maxWidth: 440, width: '100%',
+        textAlign: 'center',
+        boxShadow: '0 30px 80px -20px rgba(0,0,0,0.5)',
+      }}>
+        <div style={{
+          width: 56, height: 56, borderRadius: 16, margin: '0 auto 18px',
+          background: T.accent, color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          animation: 'pulse 1.4s ease-in-out infinite',
+        }}>
+          <Database size={26} />
+        </div>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 600, color: T.ink }}>
+          A carregar os teus dados
+        </h2>
+        <p style={{ fontSize: 13, color: T.inkSoft, marginTop: 10, marginBottom: 20, lineHeight: 1.5 }}>
+          {!cloudDataLoaded
+            ? 'A ligar à cloud…'
+            : (
+              <>
+                A descarregar produtos das campanhas — <strong>{loaded} de {total}</strong> prontas.
+                <br />Assim que terminar, todas as vistas terão dados completos.
+              </>
+            )}
+        </p>
+        {/* Barra de progresso */}
+        <div style={{ height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden', marginBottom: 16 }}>
+          <div style={{
+            height: '100%',
+            width: cloudDataLoaded ? `${Math.max(8, pct)}%` : '8%',
+            background: T.accent,
+            transition: 'width 0.4s',
+          }} />
+        </div>
+        {allowSkip && (
+          <button
+            onClick={onSkip}
+            style={{
+              padding: '8px 16px', background: 'transparent', color: T.inkSoft,
+              border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            Continuar mesmo assim
+          </button>
+        )}
+        {!allowSkip && (
+          <div style={{ fontSize: 10, color: T.inkMute }}>Demora alguns segundos…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // o ForcePasswordChangeModal força mudança.
 // v3.17.0: modal mostrado APÓS login ao admin para escolher que dept ver.
 // Bloqueante — sem fechar. Persistido em localStorage 'admin.viewDept'.
