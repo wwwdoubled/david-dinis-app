@@ -1,0 +1,15 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Supabase config — só campos críticos para preservar em deploys
+# Resto da config é gerido pelo Dashboard (https://supabase.com/dashboard).
+# ─────────────────────────────────────────────────────────────────────────
+
+project_id = "xcwljcidrudorkbqdcjq"
+
+# Edge Functions
+# ─────────────────────────────────────────────────────────────────────────
+# admin-user-mgmt: verify_jwt=false porque a função faz o seu próprio
+# check de JWT (linhas 78-101 do index.ts) e precisa de aceitar o
+# preflight OPTIONS sem Authorization header (CORS). Sem isto o gateway
+# devolve 401 antes de chegar ao código.
+[functions.admin-user-mgmt]
+verify_jwt = false
