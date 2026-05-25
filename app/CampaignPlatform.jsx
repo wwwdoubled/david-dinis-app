@@ -6462,6 +6462,11 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [eligibleFams, setEligibleFams] = useStoredState('sales.eligibleFams', ['TELECOMUNICACOES', 'INFORMATICA', 'GAMING', 'FOTO', 'SOM']);
   const [showEligibleConfig, setShowEligibleConfig] = useState(false);
   const [selectedInsName, setSelectedInsName] = useState(null); // drill no top seguros
+  // v3.20.6: metas + mapping colaboradores → user_id
+  const [teamGoals, setTeamGoals] = useStoredState('sales.teamGoals', {}); // { funcNum: { YYYYMM: { sales, attach } } }
+  const [collabMap, setCollabMap] = useStoredState('sales.collabMap', {}); // { nome: user_id }
+  const [showTeamManage, setShowTeamManage] = useState(false);
+  const [allProfilesForMap, setAllProfilesForMap] = useState([]);
 
   useEffect(() => {
     let alive = true;
@@ -6539,6 +6544,13 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     setCounterSnap(null);
     setTeamFrom(''); setTeamTo(''); setSelectedCollab(null);
   };
+
+  // Carregar profiles para o modal de gestão de equipa (mapeamento)
+  useEffect(() => {
+    if (showTeamManage && allProfilesForMap.length === 0) {
+      fetchAllProfiles().then(setAllProfilesForMap);
+    }
+  }, [showTeamManage]);
 
   const counterFiltered = useMemo(() => {
     if (!counterSnap) return [];
@@ -6930,6 +6942,144 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       .sort((a, b) => b.margin - a.margin)
       .slice(0, 30);
   }, [productAgg, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
+
+  // ── CROSS-FILE: lookup por EAN (snapshot detalhado → médias por unidade) ─
+  const eanLookup = useMemo(() => {
+    if (!snapshot) return null;
+    const map = new Map();
+    for (const r of snapshot.rows) {
+      const e = map.get(r.ean) || { ean: r.ean, qty: 0, pmpSum: 0, discCSum: 0, discFSum: 0, marginSum: 0, revSum: 0 };
+      e.qty += r.qty;
+      e.pmpSum += r.qty * r.pmp;
+      e.discCSum += Math.abs(r.discComerc);
+      e.discFSum += Math.abs(r.discFidel);
+      e.marginSum += r.qty * (r.pvpNoVat - r.pmp);
+      e.revSum += r.qty * r.pvpNoVat;
+      map.set(r.ean, e);
+    }
+    // Calcular médias por unidade
+    const out = new Map();
+    for (const [ean, e] of map.entries()) {
+      if (e.qty === 0) continue;
+      out.set(ean, {
+        avgPmp: e.pmpSum / e.qty,
+        avgDiscComercPerUnit: e.discCSum / Math.abs(e.qty || 1),
+        avgDiscFidelPerUnit:  e.discFSum / Math.abs(e.qty || 1),
+        avgRevPerUnit: e.revSum / e.qty,
+      });
+    }
+    return out;
+  }, [snapshot]);
+
+  // ── CROSS-FILE: margem + descontos estimados por colaborador ──────────
+  const collabCrossAnalysis = useMemo(() => {
+    if (!eanLookup || !counterSnap || !counterFiltered.length) return null;
+    const map = new Map();
+    let matched = 0, unmatched = 0;
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || r.type !== 'product') continue;
+      const lookup = eanLookup.get(r.ean);
+      if (!lookup) { unmatched++; continue; }
+      matched++;
+      const key = r.funcNum + '|' + r.who;
+      const e = map.get(key) || {
+        funcNum: r.funcNum, who: r.who,
+        qty: 0, revenue: 0, estCost: 0, estDiscComerc: 0, estDiscFidel: 0,
+      };
+      e.qty += r.qty;
+      e.revenue += r.value;
+      e.estCost += r.qty * lookup.avgPmp;
+      e.estDiscComerc += r.qty * lookup.avgDiscComercPerUnit;
+      e.estDiscFidel  += r.qty * lookup.avgDiscFidelPerUnit;
+      map.set(key, e);
+    }
+    const arr = Array.from(map.values()).map(e => {
+      const estMargin = e.revenue - e.estCost;
+      const estMarginPct = e.revenue !== 0 ? (estMargin / e.revenue * 100) : 0;
+      const estDiscTotal = e.estDiscComerc + e.estDiscFidel;
+      const discPct = e.revenue !== 0 ? (estDiscTotal / e.revenue * 100) : 0;
+      return { ...e, estMargin, estMarginPct, estDiscTotal, discPct };
+    });
+    arr.sort((a, b) => b.estMargin - a.estMargin);
+    return { rows: arr, matched, unmatched, matchRate: matched + unmatched > 0 ? (matched / (matched + unmatched) * 100) : 0 };
+  }, [eanLookup, counterSnap, counterFiltered]);
+
+  // ── CROSS-FILE: comparação totais detalhado vs mostrador ──────────────
+  const totalsComparison = useMemo(() => {
+    if (!snapshot || !counterSnap) return null;
+    // Filtrar detailed para o mesmo intervalo do counter
+    const cfrom = counterSnap.dateFrom, cto = counterSnap.dateTo;
+    let detailedRev = 0, detailedQty = 0;
+    for (const r of snapshot.rows) {
+      if (cfrom && r.date && r.date < cfrom) continue;
+      if (cto   && r.date && r.date > cto)   continue;
+      if (r.qty > 0) {
+        detailedRev += r.revenue;
+        detailedQty += r.qty;
+      }
+    }
+    let counterRev = 0, counterQty = 0, counterRevAttrib = 0, counterQtyAttrib = 0;
+    for (const r of counterSnap.rows) {
+      if (cfrom && r.date && r.date < cfrom) continue;
+      if (cto   && r.date && r.date > cto)   continue;
+      counterRev += r.value;
+      counterQty += r.qty;
+      if (!r.isAnonymous) {
+        counterRevAttrib += r.value;
+        counterQtyAttrib += r.qty;
+      }
+    }
+    const gap = detailedRev - counterRev;
+    const gapPct = detailedRev > 0 ? (gap / detailedRev * 100) : 0;
+    const attribPct = counterRev > 0 ? (counterRevAttrib / counterRev * 100) : 0;
+    return {
+      dateFrom: cfrom, dateTo: cto,
+      detailedRev, detailedQty,
+      counterRev, counterQty,
+      counterRevAttrib, counterQtyAttrib,
+      gap, gapPct, attribPct,
+    };
+  }, [snapshot, counterSnap]);
+
+  // ── METAS vs realizado (mês actual do snapshot) ───────────────────────
+  const teamGoalsProgress = useMemo(() => {
+    if (!counterSnap) return null;
+    // Mês predominante do snapshot (último mês visível)
+    const monthCount = new Map();
+    for (const r of counterFiltered) {
+      if (!r.date) continue;
+      const m = r.date.slice(0, 7);
+      monthCount.set(m, (monthCount.get(m) || 0) + 1);
+    }
+    const dominant = Array.from(monthCount.entries()).sort((a, b) => b[1] - a[1])[0];
+    if (!dominant) return null;
+    const month = dominant[0]; // YYYY-MM
+    const monthKey = month.replace('-', ''); // YYYYMM
+    // Realizado por colaborador
+    const map = new Map();
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || !r.date || r.date.slice(0, 7) !== month) continue;
+      const key = r.funcNum + '|' + r.who;
+      const e = map.get(key) || { funcNum: r.funcNum, who: r.who, sales: 0, prodElig: 0, insurance: 0 };
+      e.sales += r.value;
+      if (r.type === 'product' && eligibleFams.includes(r.fam1)) e.prodElig += r.qty;
+      if (r.type === 'insurance') e.insurance += r.qty;
+      map.set(key, e);
+    }
+    const arr = Array.from(map.values()).map(e => {
+      const goal = teamGoals[e.funcNum]?.[monthKey] || { sales: 0, attach: 0 };
+      const attachRate = e.prodElig > 0 ? (e.insurance / e.prodElig * 100) : 0;
+      return {
+        ...e,
+        attachRate,
+        goalSales: Number(goal.sales) || 0,
+        goalAttach: Number(goal.attach) || 0,
+        salesPct: goal.sales > 0 ? (e.sales / goal.sales * 100) : null,
+        attachPct: goal.attach > 0 ? (attachRate / goal.attach * 100) : null,
+      };
+    }).sort((a, b) => b.sales - a.sales);
+    return { month, monthKey, rows: arr };
+  }, [counterFiltered, counterSnap, teamGoals, eligibleFams]);
 
   // ── Filtragem global (date range + família 1 + POS + price + margem) ─
   const filteredRows = useMemo(() => {
@@ -8443,6 +8593,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                 <button onClick={() => setShowEligibleConfig(true)} style={{ padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end' }}>
                   ⚙️ Famílias elegíveis ({eligibleFams.length})
                 </button>
+                <button onClick={() => setShowTeamManage(true)} style={{ padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end' }}>
+                  👥 Gestão equipa
+                </button>
                 <div style={{ flex: 1 }} />
                 <div style={{ fontSize: 11, color: T.inkMute, alignSelf: 'flex-end' }}>{counterFiltered.length.toLocaleString('pt-PT')} linhas · {teamRanking.length} colaboradores</div>
               </div>
@@ -8457,6 +8610,124 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                 <KpiCard label="Taxa addons" value={teamKpis.addonRate.toFixed(1).replace('.', ',') + '%'} subtitle="addons ÷ produtos elegíveis" accent={teamKpis.addonRate >= 30 ? T.green : teamKpis.addonRate >= 15 ? T.orange : T.red} />
                 <KpiCard label="Vendas anónimas" value={teamKpis.anonPct.toFixed(1).replace('.', ',') + '%'} subtitle={fmtEur(teamKpis.anonValue) + ' s/ colaborador'} accent={teamKpis.anonPct > 20 ? T.orange : T.inkSoft} />
               </div>
+
+              {/* Metas vs realizado */}
+              {teamGoalsProgress && teamGoalsProgress.rows.some(r => r.goalSales > 0 || r.goalAttach > 0) && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>🎯 Metas vs realizado — {teamGoalsProgress.month}</div>
+                    <button onClick={() => setShowTeamManage(true)} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>Editar metas</button>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {teamGoalsProgress.rows.filter(r => r.goalSales > 0 || r.goalAttach > 0).map(r => (
+                      <div key={r.funcNum + r.who} style={{ padding: 12, background: T.bg, borderRadius: 6, display: 'grid', gridTemplateColumns: '180px 1fr 1fr', gap: 12, alignItems: 'center' }}>
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 500 }}>{r.who}</div>
+                          <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {r.funcNum}</div>
+                        </div>
+                        {/* Vendas */}
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.inkMute, marginBottom: 4 }}>
+                            <span>Vendas: {fmtEur(r.sales)} / {fmtEur(r.goalSales)}</span>
+                            <span style={{ color: r.salesPct >= 100 ? T.green : r.salesPct >= 75 ? T.orange : T.red, fontWeight: 600 }}>{r.salesPct !== null ? r.salesPct.toFixed(0) + '%' : '—'}</span>
+                          </div>
+                          <div style={{ height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${Math.min(100, r.salesPct || 0)}%`, background: r.salesPct >= 100 ? T.green : r.salesPct >= 75 ? T.orange : T.accent }} />
+                          </div>
+                        </div>
+                        {/* Anexação */}
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.inkMute, marginBottom: 4 }}>
+                            <span>Anexação: {r.attachRate.toFixed(1)}% / {r.goalAttach}%</span>
+                            <span style={{ color: r.attachPct >= 100 ? T.green : r.attachPct >= 75 ? T.orange : T.red, fontWeight: 600 }}>{r.attachPct !== null ? r.attachPct.toFixed(0) + '%' : '—'}</span>
+                          </div>
+                          <div style={{ height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                            <div style={{ height: '100%', width: `${Math.min(100, r.attachPct || 0)}%`, background: r.attachPct >= 100 ? T.green : r.attachPct >= 75 ? T.orange : T.accent }} />
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Cross-file: margem + descontos por colaborador */}
+              {collabCrossAnalysis && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>🔗 Margem & descontos estimados por colaborador</div>
+                    <div style={{ fontSize: 10, color: T.inkSoft }}>EAN match: {collabCrossAnalysis.matchRate.toFixed(0)}% ({collabCrossAnalysis.matched}/{collabCrossAnalysis.matched + collabCrossAnalysis.unmatched})</div>
+                  </div>
+                  <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 12, fontStyle: 'italic' }}>
+                    Cruza vendas ao mostrador (com colaborador) com vendas detalhadas (com PMP/descontos médios por EAN). Aproximação — não substitui ID de talão.
+                  </div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 800 }}>
+                      <thead>
+                        <tr style={{ background: T.bg, color: T.inkMute }}>
+                          <th style={salesTh()}>Colaborador</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Margem est.</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Desc. comercial</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Desc. fidelidade</th>
+                          <th style={{ ...salesTh(), textAlign: 'right' }}>Desc. % rec.</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {collabCrossAnalysis.rows.map(r => (
+                          <tr key={r.funcNum + r.who} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                            <td style={salesTd()}>
+                              <div style={{ fontWeight: 500 }}>{r.who}</div>
+                              <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {r.funcNum}</div>
+                            </td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(r.revenue)}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: r.estMargin >= 0 ? T.green : T.red }}>{fmtEur(r.estMargin)}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: r.estMarginPct >= 20 ? T.green : r.estMarginPct >= 5 ? T.orange : T.red }}>{r.estMarginPct.toFixed(1)}%</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur(r.estDiscComerc)}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur(r.estDiscFidel)}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500, color: r.discPct > 8 ? T.orange : T.inkSoft }}>{r.discPct.toFixed(1)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Cross-file: comparação totais */}
+              {totalsComparison && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>📊 Comparação totais (mesmo período {totalsComparison.dateFrom} → {totalsComparison.dateTo})</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+                    <div style={{ padding: 14, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.accent}` }}>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Total detalhadas</div>
+                      <div style={{ fontSize: 16, fontWeight: 500, marginTop: 6 }}>{fmtEur(totalsComparison.detailedRev)}</div>
+                      <div style={{ fontSize: 10, color: T.inkSoft, marginTop: 2 }}>{totalsComparison.detailedQty.toLocaleString('pt-PT')} unidades</div>
+                    </div>
+                    <div style={{ padding: 14, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${T.green}` }}>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Total mostrador</div>
+                      <div style={{ fontSize: 16, fontWeight: 500, marginTop: 6 }}>{fmtEur(totalsComparison.counterRev)}</div>
+                      <div style={{ fontSize: 10, color: T.inkSoft, marginTop: 2 }}>{totalsComparison.counterQty.toLocaleString('pt-PT')} unidades</div>
+                    </div>
+                    <div style={{ padding: 14, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${totalsComparison.gap > 0 ? T.orange : T.inkSoft}` }}>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Gap (não-mostrador)</div>
+                      <div style={{ fontSize: 16, fontWeight: 500, marginTop: 6, color: totalsComparison.gap > 0 ? T.orange : T.green }}>{fmtEur(totalsComparison.gap)}</div>
+                      <div style={{ fontSize: 10, color: T.inkSoft, marginTop: 2 }}>{totalsComparison.gapPct.toFixed(1)}% online/auto</div>
+                    </div>
+                    <div style={{ padding: 14, background: T.bg, borderRadius: 6, borderLeft: `3px solid ${totalsComparison.attribPct >= 80 ? T.green : T.orange}` }}>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Atribuição mostrador</div>
+                      <div style={{ fontSize: 16, fontWeight: 500, marginTop: 6, color: totalsComparison.attribPct >= 80 ? T.green : T.orange }}>{totalsComparison.attribPct.toFixed(1)}%</div>
+                      <div style={{ fontSize: 10, color: T.inkSoft, marginTop: 2 }}>{fmtEur(totalsComparison.counterRevAttrib)} c/ colaborador</div>
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 12, fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+                    {totalsComparison.gap > 0
+                      ? `${fmtEur(totalsComparison.gap)} de vendas no detalhado não aparecem no mostrador. Provavelmente: vendas online/auto-atendimento, ou cartões não picados.`
+                      : 'Mostrador cobre todo o detalhado (ou snapshot detalhado parcial).'}
+                  </div>
+                </div>
+              )}
 
               {/* Heatmap colaborador × dia */}
               {heatmapCollabDay.collabs.length > 0 && heatmapCollabDay.days.length > 0 && (
@@ -8771,6 +9042,19 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               selected={eligibleFams}
               onSave={(next) => { setEligibleFams(next); setShowEligibleConfig(false); }}
               onClose={() => setShowEligibleConfig(false)}
+            />
+          )}
+          {/* Modal gestão equipa: metas + mapeamento */}
+          {showTeamManage && (
+            <TeamManageModal
+              collaborators={teamRanking}
+              goals={teamGoals}
+              setGoals={setTeamGoals}
+              collabMap={collabMap}
+              setCollabMap={setCollabMap}
+              profiles={allProfilesForMap}
+              currentMonth={teamGoalsProgress?.monthKey}
+              onClose={() => setShowTeamManage(false)}
             />
           )}
         </div>
@@ -9216,6 +9500,136 @@ function EligibleFamConfig({ allFams, selected, onSave, onClose }) {
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
           <button onClick={onClose} style={{ padding: '8px 14px', background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Cancelar</button>
           <button onClick={() => onSave(Array.from(picked))} style={{ padding: '8px 14px', background: T.ink, color: T.bg, border: 'none', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Guardar ({picked.size})</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Modal Gestão Equipa: Metas + Mapping ───────────────────────────────
+function TeamManageModal({ collaborators, goals, setGoals, collabMap, setCollabMap, profiles, currentMonth, onClose }) {
+  const [tab, setTab] = useState('goals');
+  const monthKey = currentMonth || (() => {
+    const d = new Date();
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
+  })();
+  const monthLabel = `${monthKey.slice(0, 4)}-${monthKey.slice(4)}`;
+
+  const updateGoal = (funcNum, field, value) => {
+    const next = { ...goals };
+    if (!next[funcNum]) next[funcNum] = {};
+    if (!next[funcNum][monthKey]) next[funcNum][monthKey] = {};
+    next[funcNum][monthKey][field] = value;
+    setGoals(next);
+  };
+  const updateMap = (nome, userId) => {
+    const next = { ...collabMap };
+    if (userId) next[nome] = userId;
+    else delete next[nome];
+    setCollabMap(next);
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8, padding: 20, width: 720, maxWidth: '90vw', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h3 style={{ margin: 0, fontSize: 16 }}>👥 Gestão Equipa</h3>
+          <button onClick={onClose} style={{ padding: '4px 10px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>✕ Fechar</button>
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: `1px solid ${T.line}` }}>
+          {[
+            { id: 'goals', l: `🎯 Metas (${monthLabel})` },
+            { id: 'map',   l: '🔗 Mapeamento → users da app' },
+          ].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              padding: '8px 14px', fontSize: 12, fontWeight: 500,
+              background: 'transparent', border: 'none',
+              color: tab === t.id ? T.ink : T.inkSoft,
+              borderBottom: `2px solid ${tab === t.id ? T.accent : 'transparent'}`,
+              cursor: 'pointer', marginBottom: -1,
+            }}>{t.l}</button>
+          ))}
+        </div>
+        <div style={{ overflowY: 'auto', flex: 1 }}>
+          {tab === 'goals' && (
+            <>
+              <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 12 }}>
+                Define meta de vendas € e meta de taxa anexação % para o mês {monthLabel}. Os colaboradores no ranking serão comparados contra estes valores.
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bgEl, color: T.inkMute }}>
+                    <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 11 }}>Colaborador</th>
+                    <th style={{ padding: '8px 12px', textAlign: 'right', fontSize: 11 }}>Meta vendas €</th>
+                    <th style={{ padding: '8px 12px', textAlign: 'right', fontSize: 11 }}>Meta anexação %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {collaborators.map(c => {
+                    const g = goals[c.funcNum]?.[monthKey] || {};
+                    return (
+                      <tr key={c.funcNum + c.who} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                        <td style={{ padding: '8px 12px' }}>
+                          <div style={{ fontWeight: 500 }}>{c.who}</div>
+                          <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {c.funcNum}</div>
+                        </td>
+                        <td style={{ padding: '6px 12px', textAlign: 'right' }}>
+                          <input type="number" value={g.sales || ''} onChange={e => updateGoal(c.funcNum, 'sales', e.target.value)}
+                            placeholder="0" style={{ ...salesFilterInput(), width: 100, textAlign: 'right' }} />
+                        </td>
+                        <td style={{ padding: '6px 12px', textAlign: 'right' }}>
+                          <input type="number" value={g.attach || ''} onChange={e => updateGoal(c.funcNum, 'attach', e.target.value)}
+                            placeholder="0" min="0" max="100" style={{ ...salesFilterInput(), width: 80, textAlign: 'right' }} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {collaborators.length === 0 && (
+                <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>
+                  Sem colaboradores — importa o ficheiro 'Vendas ao mostrador'.
+                </div>
+              )}
+            </>
+          )}
+          {tab === 'map' && (
+            <>
+              <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 12 }}>
+                Liga o "Nome" do Excel a um utilizador da app. Útil para futuras integrações (envio de relatórios pessoais, login para ver só os próprios dados, etc.). Por agora apenas guardado.
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bgEl, color: T.inkMute }}>
+                    <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 11 }}>Nome no Excel</th>
+                    <th style={{ padding: '8px 12px', textAlign: 'left', fontSize: 11 }}>Utilizador da app</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {collaborators.map(c => (
+                    <tr key={c.funcNum + c.who} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ padding: '8px 12px' }}>
+                        <div style={{ fontWeight: 500 }}>{c.who}</div>
+                        <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {c.funcNum}</div>
+                      </td>
+                      <td style={{ padding: '6px 12px' }}>
+                        <select value={collabMap[c.who] || ''} onChange={e => updateMap(c.who, e.target.value)}
+                          style={{ ...salesFilterInput(), width: '100%' }}>
+                          <option value="">— não mapeado —</option>
+                          {profiles.map(p => (
+                            <option key={p.user_id} value={p.user_id}>{p.display_name || p.email}</option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {profiles.length === 0 && (
+                <div style={{ marginTop: 12, fontSize: 11, color: T.inkMute, fontStyle: 'italic' }}>A carregar utilizadores…</div>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>
