@@ -14985,6 +14985,8 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [filterFamily, setFilterFamily] = useStoredState('changes.filterFamily', '');
   // Date filter (re-added in v3.11.1 as standalone <ChangesDateFilter/> component)
   const [dayFilter, setDayFilter] = useState('');
+  // v3.20.11: filtrar para só artigos destacados na blueprint (padrão: true)
+  const [onlyAssigned, setOnlyAssigned] = useStoredState('changes.onlyAssigned', true);
 
   // v3.15.4: deep link a partir do Cmd+K (kind=product) — pré-preenche a
   // pesquisa por EAN e destaca visualmente a linha durante 3s.
@@ -15045,18 +15047,40 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     return () => { cancelled = true; };
   }, [user]);
 
-  // Auto-pick periods: most recent → new, second most recent → old
-  useEffect(() => {
+  // v3.20.11: auto-pick prefere campanhas ACTIVAS para o "Novo".
+  // Também limpa IDs órfãos (campanhas que já não existem ou foram ocultadas)
+  // para evitar a vista aparecer em branco.
+  const autoPickPeriods = useCallback(() => {
     if (!periods?.length) return;
-    const sorted = [...periods].sort((a, b) => {
+    const visible = periods.filter(p => !p.hidden);
+    if (!visible.length) return;
+    const active = visible.filter(p => periodStatus(p) === 'active');
+    const byDateDesc = (a, b) => {
       if (!a.startDate && !b.startDate) return 0;
       if (!a.startDate) return 1; if (!b.startDate) return -1;
       return new Date(b.startDate) - new Date(a.startDate);
-    });
-    if (!newPeriodId && sorted[0]) setNewPeriodId(sorted[0].id);
-    if (!comparePeriodId && sorted[1]) setComparePeriodId(sorted[1].id);
-    else if (!comparePeriodId && sorted[0]) setComparePeriodId(sorted[0].id);
+    };
+    const activeSorted = [...active].sort(byDateDesc);
+    const allSorted    = [...visible].sort(byDateDesc);
+    // Novo = activa mais recente; fallback = mais recente em geral
+    const newPick = activeSorted[0] || allSorted[0];
+    // Antigo = próxima campanha (segunda activa, ou activa anterior, ou qualquer)
+    const oldCandidates = visible.filter(p => p.id !== newPick?.id).sort(byDateDesc);
+    const oldPick = oldCandidates[0];
+    if (newPick) setNewPeriodId(newPick.id);
+    if (oldPick) setComparePeriodId(oldPick.id);
   }, [periods]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Detectar IDs órfãos no mount + sempre que periods muda → re-pick
+  useEffect(() => {
+    if (!periods?.length) return;
+    const ids = new Set(periods.filter(p => !p.hidden).map(p => p.id));
+    const newMissing = newPeriodId && !ids.has(newPeriodId);
+    const oldMissing = comparePeriodId && !ids.has(comparePeriodId);
+    if (newMissing || oldMissing || (!newPeriodId && !comparePeriodId)) {
+      autoPickPeriods();
+    }
+  }, [periods, autoPickPeriods]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (newSource === 'campaign' && !newCampaignId && campaigns.length > 0) setNewCampaignId(campaigns[0].id);
@@ -15274,6 +15298,10 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
     if (filterAveiro) items = items.filter(p => (p.stockPO3 || 0) > 0);
     if (filterFamily && filterFamily !== 'all') items = items.filter(p => p.family === filterFamily);
     if (dayFilter) items = items.filter(p => p.changeDate === dayFilter);
+    // v3.20.11: só artigos destacados (presentes no zoneIndex)
+    if (onlyAssigned && zoneIndex && zoneIndex.size > 0) {
+      items = items.filter(p => zoneIndex.has(normalizeEAN(p.ean)));
+    }
     if (search) {
       const q = search.toLowerCase();
       items = items.filter(p =>
@@ -15283,7 +15311,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
       );
     }
     return items;
-  }, [diff, filter, filterAveiro, filterFamily, dayFilter, search]);
+  }, [diff, filter, filterAveiro, filterFamily, dayFilter, search, onlyAssigned, zoneIndex]);
 
   // Distinct change-dates for the dropdown filter (grouped by day with counts).
   const changeDateOptions = useMemo(() => {
@@ -15511,6 +15539,9 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               highlightEan={highlightEan}
               highlightRef={highlightRef}
               zoneIndex={zoneIndex}
+              onlyAssigned={onlyAssigned}
+              setOnlyAssigned={setOnlyAssigned}
+              onRefresh={autoPickPeriods}
             />
           )}
         </>
@@ -15519,7 +15550,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef, zoneIndex }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef, zoneIndex, onlyAssigned, setOnlyAssigned, onRefresh }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
@@ -15599,6 +15630,38 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
         </div>
         {/* Filtro por dia da alteração (re-added v3.11.1) */}
         <ChangesDateFilter dates={changeDateOptions} value={dayFilter} onChange={setDayFilter} />
+        {/* v3.20.11: toggle "Só destacados" — restringe diff a artigos na blueprint */}
+        <button
+          onClick={() => setOnlyAssigned(v => !v)}
+          title={onlyAssigned ? 'Mostrar todos (incluindo não destacados na blueprint)' : 'Mostrar só artigos destacados em alguma zona'}
+          style={{
+            padding: '6px 12px', fontSize: 11, fontWeight: 500,
+            borderRadius: 6, border: `1px solid ${onlyAssigned ? T.green : T.line}`,
+            background: onlyAssigned ? T.green : T.bgEl,
+            color: onlyAssigned ? '#fff' : T.inkSoft,
+            display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+            transition: 'all 0.15s',
+          }}
+        >
+          <MapPin size={12} />
+          Só destacados
+          {onlyAssigned && <X size={10} />}
+        </button>
+        {/* v3.20.11: botão refrescar — força auto-pick para campanhas activas */}
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            title="Re-seleccionar campanha activa mais recente e comparar com anterior"
+            style={{
+              padding: '6px 12px', fontSize: 11, fontWeight: 500,
+              borderRadius: 6, border: `1px solid ${T.accent}`,
+              background: T.bgEl, color: T.accent,
+              display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+            }}
+          >
+            <RotateCcw size={12} /> Refrescar
+          </button>
+        )}
         {/* Stock Aveiro (PO3) filter — só aparece se houver dados de stock */}
         {(stockRowsPO3?.length > 0) && (
           <button
