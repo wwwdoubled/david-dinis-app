@@ -6849,100 +6849,6 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
   }, [selectedInsName, counterFiltered]);
 
-  // ── LIFECYCLE (ficheiro detalhado) ────────────────────────────────────
-  // Produtos novos: primeira venda nos últimos N dias (default 30)
-  const productLifecycle = useMemo(() => {
-    if (!filteredRows.length) return null;
-    const firstSeen = new Map(); // ean → date
-    const lastSeen = new Map();
-    const daysActive = new Map(); // ean → Set of days
-    const dayValue = new Map(); // ean → Map(date → value)
-    const totalByEan = new Map();
-    const nameByEan = new Map();
-    const fam1ByEan = new Map();
-    for (const r of filteredRows) {
-      if (!r.date) continue;
-      if (!firstSeen.has(r.ean) || r.date < firstSeen.get(r.ean)) firstSeen.set(r.ean, r.date);
-      if (!lastSeen.has(r.ean)  || r.date > lastSeen.get(r.ean))  lastSeen.set(r.ean, r.date);
-      if (!daysActive.has(r.ean)) daysActive.set(r.ean, new Set());
-      daysActive.get(r.ean).add(r.date);
-      if (!dayValue.has(r.ean)) dayValue.set(r.ean, new Map());
-      dayValue.get(r.ean).set(r.date, (dayValue.get(r.ean).get(r.date) || 0) + r.revenue);
-      totalByEan.set(r.ean, (totalByEan.get(r.ean) || 0) + r.revenue);
-      nameByEan.set(r.ean, r.name);
-      fam1ByEan.set(r.ean, r.fam1);
-    }
-    // Calcular cutoff "novidades": 30 dias antes do último dia do snapshot
-    const allDates = Array.from(lastSeen.values()).sort();
-    const lastDateStr = allDates[allDates.length - 1];
-    const lastTs = new Date(lastDateStr).getTime();
-    const cutoffTs = lastTs - 30 * 86400000;
-    const cutoffIso = new Date(cutoffTs).toISOString().slice(0, 10);
-
-    // Produtos novos: primeira venda DEPOIS do cutoff
-    const newProducts = Array.from(firstSeen.entries())
-      .filter(([_, d]) => d >= cutoffIso)
-      .map(([ean, d]) => ({
-        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
-        firstSeen: d, daysActive: daysActive.get(ean).size,
-        revenue: totalByEan.get(ean),
-      }))
-      .sort((a, b) => b.revenue - a.revenue)
-      .slice(0, 30);
-
-    // Curva de vida: produtos com mais dias activos
-    const longestLived = Array.from(daysActive.entries())
-      .map(([ean, set]) => ({
-        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
-        days: set.size, firstSeen: firstSeen.get(ean), lastSeen: lastSeen.get(ean),
-        revenue: totalByEan.get(ean),
-      }))
-      .sort((a, b) => b.days - a.days)
-      .slice(0, 20);
-
-    // Puxões: produtos onde >70% da receita aconteceu num único dia
-    const spikes = [];
-    for (const [ean, dayMap] of dayValue.entries()) {
-      const total = totalByEan.get(ean);
-      if (total < 100) continue; // ignorar produtos pequenos
-      const maxDay = Array.from(dayMap.entries()).sort((a, b) => b[1] - a[1])[0];
-      if (maxDay && maxDay[1] / total > 0.70) {
-        spikes.push({
-          ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
-          spikeDate: maxDay[0], spikeValue: maxDay[1],
-          totalRevenue: total, concentration: (maxDay[1] / total) * 100,
-        });
-      }
-    }
-    spikes.sort((a, b) => b.spikeValue - a.spikeValue);
-
-    return { newProducts, longestLived, spikes: spikes.slice(0, 20), cutoffIso };
-  }, [filteredRows]);
-
-  // ── Recomendações para próxima campanha ──────────────────────────────
-  // Top produtos margem alta + stock disponível + sem desconto recente
-  const campaignRecommendations = useMemo(() => {
-    if (!productAgg.length) return [];
-    const idxPO2 = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
-    const idxPO3 = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
-    return productAgg
-      .filter(p => {
-        if (p.marginPct < 25) return false; // margem alta
-        if (p.discTotal > 0) return false;  // sem desconto recente
-        const stock = (idxPO2.index.get(p.ean) || 0) + (idxPO3.index.get(p.ean) || 0);
-        if (stock < 5) return false; // stock suficiente
-        if (p.qty < 2) return false; // tem alguma procura
-        return true;
-      })
-      .map(p => {
-        const stockPO2 = idxPO2.index.get(p.ean) || 0;
-        const stockPO3 = idxPO3.index.get(p.ean) || 0;
-        return { ...p, stockTotal: stockPO2 + stockPO3, stockPO2, stockPO3 };
-      })
-      .sort((a, b) => b.margin - a.margin)
-      .slice(0, 30);
-  }, [productAgg, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
-
   // ── CROSS-FILE: lookup por EAN (snapshot detalhado → médias por unidade) ─
   const eanLookup = useMemo(() => {
     if (!snapshot) return null;
@@ -7731,6 +7637,91 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     }
     return wins;
   }, [nearBreakeven, marginKillers, familyMargin, discountLoss, productAgg, stockIdle]);
+
+  // ── LIFECYCLE (ficheiro detalhado) ────────────────────────────────────
+  // (movido para depois de filteredRows/productAgg para evitar TDZ)
+  const productLifecycle = useMemo(() => {
+    if (!filteredRows.length) return null;
+    const firstSeen = new Map();
+    const lastSeen = new Map();
+    const daysActive = new Map();
+    const dayValue = new Map();
+    const totalByEan = new Map();
+    const nameByEan = new Map();
+    const fam1ByEan = new Map();
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      if (!firstSeen.has(r.ean) || r.date < firstSeen.get(r.ean)) firstSeen.set(r.ean, r.date);
+      if (!lastSeen.has(r.ean)  || r.date > lastSeen.get(r.ean))  lastSeen.set(r.ean, r.date);
+      if (!daysActive.has(r.ean)) daysActive.set(r.ean, new Set());
+      daysActive.get(r.ean).add(r.date);
+      if (!dayValue.has(r.ean)) dayValue.set(r.ean, new Map());
+      dayValue.get(r.ean).set(r.date, (dayValue.get(r.ean).get(r.date) || 0) + r.revenue);
+      totalByEan.set(r.ean, (totalByEan.get(r.ean) || 0) + r.revenue);
+      nameByEan.set(r.ean, r.name);
+      fam1ByEan.set(r.ean, r.fam1);
+    }
+    const allDates = Array.from(lastSeen.values()).sort();
+    const lastDateStr = allDates[allDates.length - 1];
+    const lastTs = new Date(lastDateStr).getTime();
+    const cutoffTs = lastTs - 30 * 86400000;
+    const cutoffIso = new Date(cutoffTs).toISOString().slice(0, 10);
+    const newProducts = Array.from(firstSeen.entries())
+      .filter(([_, d]) => d >= cutoffIso)
+      .map(([ean, d]) => ({
+        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+        firstSeen: d, daysActive: daysActive.get(ean).size,
+        revenue: totalByEan.get(ean),
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 30);
+    const longestLived = Array.from(daysActive.entries())
+      .map(([ean, set]) => ({
+        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+        days: set.size, firstSeen: firstSeen.get(ean), lastSeen: lastSeen.get(ean),
+        revenue: totalByEan.get(ean),
+      }))
+      .sort((a, b) => b.days - a.days)
+      .slice(0, 20);
+    const spikes = [];
+    for (const [ean, dayMap] of dayValue.entries()) {
+      const total = totalByEan.get(ean);
+      if (total < 100) continue;
+      const maxDay = Array.from(dayMap.entries()).sort((a, b) => b[1] - a[1])[0];
+      if (maxDay && maxDay[1] / total > 0.70) {
+        spikes.push({
+          ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+          spikeDate: maxDay[0], spikeValue: maxDay[1],
+          totalRevenue: total, concentration: (maxDay[1] / total) * 100,
+        });
+      }
+    }
+    spikes.sort((a, b) => b.spikeValue - a.spikeValue);
+    return { newProducts, longestLived, spikes: spikes.slice(0, 20), cutoffIso };
+  }, [filteredRows]);
+
+  // ── Recomendações para próxima campanha ──────────────────────────────
+  const campaignRecommendations = useMemo(() => {
+    if (!productAgg.length) return [];
+    const idxPO2 = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
+    const idxPO3 = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
+    return productAgg
+      .filter(p => {
+        if (p.marginPct < 25) return false;
+        if (p.discTotal > 0) return false;
+        const stock = (idxPO2.index.get(p.ean) || 0) + (idxPO3.index.get(p.ean) || 0);
+        if (stock < 5) return false;
+        if (p.qty < 2) return false;
+        return true;
+      })
+      .map(p => {
+        const stockPO2 = idxPO2.index.get(p.ean) || 0;
+        const stockPO3 = idxPO3.index.get(p.ean) || 0;
+        return { ...p, stockTotal: stockPO2 + stockPO3, stockPO2, stockPO3 };
+      })
+      .sort((a, b) => b.margin - a.margin)
+      .slice(0, 30);
+  }, [productAgg, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
 
   // ─── render ──────────────────────────────────────────────────────────
   if (loading) {
