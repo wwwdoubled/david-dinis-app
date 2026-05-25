@@ -6421,6 +6421,17 @@ function daysBetween(fromIso, toIso) {
   if (isNaN(a) || isNaN(b)) return 0;
   return Math.max(0, Math.round((b - a) / 86400000)) + 1;
 }
+function isoWeek(dateIso) {
+  // "2026-05-23" → "2026-W21"
+  const d = new Date(dateIso);
+  if (isNaN(d.getTime())) return dateIso;
+  // Algoritmo ISO 8601: jueves da semana define o ano da semana
+  const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - (tmp.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((tmp - yearStart) / 86400000) + 1) / 7);
+  return `${tmp.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}) {
@@ -6447,6 +6458,10 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [teamTo, setTeamTo] = useState('');
   const [selectedCollab, setSelectedCollab] = useState(null);
   const [whatIfN, setWhatIfN] = useState(20); // eliminar top N margem negativa
+  // v3.20.5: configuração de famílias elegíveis para seguro (afecta taxa anexação real)
+  const [eligibleFams, setEligibleFams] = useStoredState('sales.eligibleFams', ['TELECOMUNICACOES', 'INFORMATICA', 'GAMING', 'FOTO', 'SOM']);
+  const [showEligibleConfig, setShowEligibleConfig] = useState(false);
+  const [selectedInsName, setSelectedInsName] = useState(null); // drill no top seguros
 
   useEffect(() => {
     let alive = true;
@@ -6535,26 +6550,32 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   }, [counterSnap, teamFrom, teamTo]);
 
   const teamKpis = useMemo(() => {
+    const eligSet = new Set(eligibleFams);
     let totalValue = 0, totalQty = 0;
-    let prodValue = 0, prodQty = 0;
+    let prodValue = 0, prodQty = 0, prodEligQty = 0;
     let insValue = 0, insQty = 0;
     let addonValue = 0, addonQty = 0;
     let anonValue = 0, anonQty = 0;
     for (const r of counterFiltered) {
       totalValue += r.value; totalQty += r.qty;
       if (r.isAnonymous) { anonValue += r.value; anonQty += r.qty; }
-      if (r.type === 'product') { prodValue += r.value; prodQty += r.qty; }
+      if (r.type === 'product') {
+        prodValue += r.value; prodQty += r.qty;
+        if (eligSet.has(r.fam1)) prodEligQty += r.qty;
+      }
       else if (r.type === 'insurance') { insValue += r.value; insQty += r.qty; }
       else if (r.type === 'addon') { addonValue += r.value; addonQty += r.qty; }
     }
-    // Taxa de anexação aproximada: seguros vendidos / produtos vendidos
-    const attachRate = prodQty > 0 ? (insQty / prodQty * 100) : 0;
-    const addonRate  = prodQty > 0 ? (addonQty / prodQty * 100) : 0;
+    // Denominador real: produtos elegíveis
+    const denom = prodEligQty > 0 ? prodEligQty : prodQty;
+    const attachRate = denom > 0 ? (insQty / denom * 100) : 0;
+    const addonRate  = denom > 0 ? (addonQty / denom * 100) : 0;
     const anonPct = totalValue > 0 ? (anonValue / totalValue * 100) : 0;
-    return { totalValue, totalQty, prodValue, prodQty, insValue, insQty, addonValue, addonQty, anonValue, anonQty, attachRate, addonRate, anonPct };
-  }, [counterFiltered]);
+    return { totalValue, totalQty, prodValue, prodQty, prodEligQty, insValue, insQty, addonValue, addonQty, anonValue, anonQty, attachRate, addonRate, anonPct };
+  }, [counterFiltered, eligibleFams]);
 
   const teamRanking = useMemo(() => {
+    const eligSet = new Set(eligibleFams);
     const map = new Map();
     for (const r of counterFiltered) {
       if (r.isAnonymous) continue;
@@ -6563,12 +6584,16 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
         funcNum: r.funcNum, who: r.who,
         lines: 0, qty: 0, value: 0,
         prodQty: 0, prodValue: 0,
+        prodEligQty: 0, // produtos elegíveis (denominador real da taxa anexação)
         insQty: 0, insValue: 0,
         addonQty: 0, addonValue: 0,
         famCount: new Map(),
       };
       e.lines += 1; e.qty += r.qty; e.value += r.value;
-      if (r.type === 'product')   { e.prodQty += r.qty; e.prodValue += r.value; }
+      if (r.type === 'product') {
+        e.prodQty += r.qty; e.prodValue += r.value;
+        if (eligSet.has(r.fam1)) e.prodEligQty += r.qty;
+      }
       else if (r.type === 'insurance') { e.insQty += r.qty; e.insValue += r.value; }
       else if (r.type === 'addon') { e.addonQty += r.qty; e.addonValue += r.value; }
       if (r.fam1) e.famCount.set(r.fam1, (e.famCount.get(r.fam1) || 0) + r.qty);
@@ -6576,16 +6601,18 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
     }
     const arr = Array.from(map.values()).map(e => {
       const topFam = Array.from(e.famCount.entries()).sort((a, b) => b[1] - a[1])[0];
+      // Taxa anexação real: usa o denominador "produtos elegíveis" se configurado
+      const denom = e.prodEligQty > 0 ? e.prodEligQty : e.prodQty;
       return {
         ...e,
-        attachRate: e.prodQty > 0 ? (e.insQty / e.prodQty * 100) : 0,
-        addonRate:  e.prodQty > 0 ? (e.addonQty / e.prodQty * 100) : 0,
+        attachRate: denom > 0 ? (e.insQty / denom * 100) : 0,
+        addonRate:  denom > 0 ? (e.addonQty / denom * 100) : 0,
         topFam: topFam ? topFam[0] : '—',
       };
     });
     arr.sort((a, b) => b.value - a.value);
     return arr;
-  }, [counterFiltered]);
+  }, [counterFiltered, eligibleFams]);
 
   // Top tipos de seguros + addons vendidos
   const insuranceTypes = useMemo(() => {
@@ -6625,8 +6652,276 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       famMap.set(k, (famMap.get(k) || 0) + r.value);
     }
     const famArr = Array.from(famMap.entries()).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
-    return { rows: myRows, topProds, daily, famArr };
+    // Melhor sub-família (fam2)
+    const fam2Map = new Map();
+    for (const r of myRows) {
+      const k = r.fam2 || '—';
+      fam2Map.set(k, (fam2Map.get(k) || 0) + r.value);
+    }
+    const bestFam2 = Array.from(fam2Map.entries()).sort((a, b) => b[1] - a[1])[0];
+    // Histórico semanal (semana ISO → valor)
+    const weeklyMap = new Map();
+    for (const r of myRows) {
+      if (!r.date) continue;
+      const wk = isoWeek(r.date);
+      weeklyMap.set(wk, (weeklyMap.get(wk) || 0) + r.value);
+    }
+    const weekly = Array.from(weeklyMap.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([date, value]) => ({ date, value }));
+    return { rows: myRows, topProds, daily, famArr, bestFam2: bestFam2 ? bestFam2[0] : null, weekly };
   }, [selectedCollab, counterFiltered]);
+
+  // ── Famílias detectadas no snapshot (para configurar elegíveis) ───────
+  const allCounterFams = useMemo(() => {
+    if (!counterSnap) return [];
+    const s = new Set();
+    counterSnap.rows.forEach(r => r.fam1 && s.add(r.fam1));
+    return Array.from(s).sort();
+  }, [counterSnap]);
+
+  // ── Heatmap colaborador × dia (consistência) ──────────────────────────
+  const heatmapCollabDay = useMemo(() => {
+    if (!counterFiltered.length) return { collabs: [], days: [], matrix: [], max: 0 };
+    const collabSet = new Map(); // nome → totalValue
+    const daySet = new Set();
+    const cellMap = new Map(); // "name|date" → value
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || !r.date) continue;
+      const name = r.who;
+      collabSet.set(name, (collabSet.get(name) || 0) + r.value);
+      daySet.add(r.date);
+      const k = name + '|' + r.date;
+      cellMap.set(k, (cellMap.get(k) || 0) + r.value);
+    }
+    const collabs = Array.from(collabSet.entries()).sort((a, b) => b[1] - a[1]).map(c => c[0]).slice(0, 15);
+    const days = Array.from(daySet).sort();
+    let max = 0;
+    const matrix = collabs.map(name => days.map(d => {
+      const v = cellMap.get(name + '|' + d) || 0;
+      if (v > max) max = v;
+      return v;
+    }));
+    return { collabs, days, matrix, max };
+  }, [counterFiltered]);
+
+  // ── Cross-sell heatmap colaborador × família elegível ────────────────
+  // Mostra ratio (seguro/addon vendidos) ÷ (produtos elegíveis vendidos)
+  const crossSellMatrix = useMemo(() => {
+    if (!counterFiltered.length) return null;
+    const elig = new Set(eligibleFams);
+    // Para cada colaborador, para cada família elegível, conta produtos elegíveis e anexos (seg+addon)
+    const data = new Map(); // name → { fam → { prod, attach } }
+    for (const r of counterFiltered) {
+      if (r.isAnonymous) continue;
+      if (!elig.has(r.fam1)) continue;
+      const name = r.who;
+      if (!data.has(name)) data.set(name, new Map());
+      const famMap = data.get(name);
+      if (!famMap.has(r.fam1)) famMap.set(r.fam1, { prod: 0, attach: 0 });
+      if (r.type === 'product') famMap.get(r.fam1).prod += r.qty;
+    }
+    // Anexos: contamos por colaborador (seguros+addons no total — não conseguimos atribuir família do anexo ao produto sem ID talão)
+    const collabAttach = new Map();
+    for (const r of counterFiltered) {
+      if (r.isAnonymous) continue;
+      if (r.type === 'insurance' || r.type === 'addon') {
+        collabAttach.set(r.who, (collabAttach.get(r.who) || 0) + r.qty);
+      }
+    }
+    const collabs = Array.from(data.keys()).sort();
+    const fams = Array.from(eligibleFams).filter(f => collabs.some(c => data.get(c)?.has(f)));
+    // Matrix: cada célula = taxa anexação aproximada da família (atribuímos prop. dos anexos do colab ao peso da família)
+    const matrix = collabs.map(name => {
+      const famMap = data.get(name);
+      const totalProdElig = Array.from(famMap.values()).reduce((s, x) => s + x.prod, 0);
+      const attachTotal = collabAttach.get(name) || 0;
+      return fams.map(fam => {
+        const cell = famMap.get(fam);
+        if (!cell || cell.prod === 0) return null;
+        // Atribuição proporcional dos anexos ao peso da família
+        const allocAttach = totalProdElig > 0 ? attachTotal * (cell.prod / totalProdElig) : 0;
+        const rate = cell.prod > 0 ? (allocAttach / cell.prod * 100) : 0;
+        return { rate, prod: cell.prod, attach: allocAttach };
+      });
+    });
+    return { collabs, fams, matrix };
+  }, [counterFiltered, eligibleFams]);
+
+  // ── Oportunidades perdidas: vendas de produtos elegíveis em dias onde o colab não vendeu QUALQUER seguro/addon ─
+  const missedOpportunities = useMemo(() => {
+    if (!counterFiltered.length) return [];
+    const elig = new Set(eligibleFams);
+    // Por (collab, date): tem seguro/addon?
+    const hasAttach = new Set(); // "name|date"
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || !r.date) continue;
+      if (r.type === 'insurance' || r.type === 'addon') hasAttach.add(r.who + '|' + r.date);
+    }
+    const map = new Map();
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || !r.date) continue;
+      if (r.type !== 'product' || !elig.has(r.fam1)) continue;
+      const key = r.who + '|' + r.date;
+      if (hasAttach.has(key)) continue; // teve seguro nesse dia
+      const e = map.get(r.ean) || { ean: r.ean, name: r.name, fam1: r.fam1, qty: 0, value: 0, who: r.who, date: r.date, occurrences: 0 };
+      e.qty += r.qty; e.value += r.value; e.occurrences += 1;
+      map.set(r.ean + '|' + r.who + '|' + r.date, e);
+    }
+    return Array.from(map.values()).sort((a, b) => b.value - a.value).slice(0, 30);
+  }, [counterFiltered, eligibleFams]);
+
+  // ── Evolução semanal por colaborador (top-N) ─────────────────────────
+  const weeklyByCollab = useMemo(() => {
+    if (!counterFiltered.length) return null;
+    const collabMap = new Map(); // name → total
+    const cell = new Map(); // "name|week" → value
+    const weeks = new Set();
+    for (const r of counterFiltered) {
+      if (r.isAnonymous || !r.date) continue;
+      const wk = isoWeek(r.date);
+      weeks.add(wk);
+      collabMap.set(r.who, (collabMap.get(r.who) || 0) + r.value);
+      cell.set(r.who + '|' + wk, (cell.get(r.who + '|' + wk) || 0) + r.value);
+    }
+    const topCollabs = Array.from(collabMap.entries()).sort((a, b) => b[1] - a[1]).slice(0, 6).map(c => c[0]);
+    const weekArr = Array.from(weeks).sort();
+    const series = topCollabs.map(name => ({
+      name,
+      points: weekArr.map(w => cell.get(name + '|' + w) || 0),
+    }));
+    return { weeks: weekArr, series };
+  }, [counterFiltered]);
+
+  // ── Ranking ponderado (score 0-100) ───────────────────────────────────
+  const teamScored = useMemo(() => {
+    if (!teamRanking.length) return [];
+    const maxValue   = Math.max(...teamRanking.map(c => c.value));
+    const maxAttach  = Math.max(...teamRanking.map(c => c.attachRate));
+    const maxTicket  = Math.max(...teamRanking.map(c => c.lines > 0 ? c.value / c.lines : 0));
+    const maxFams    = Math.max(...teamRanking.map(c => c.famCount.size));
+    return teamRanking.map(c => {
+      const ticket = c.lines > 0 ? c.value / c.lines : 0;
+      const fams   = c.famCount.size;
+      const score =
+        (maxValue   > 0 ? (c.value / maxValue) * 40        : 0) +
+        (maxAttach  > 0 ? (c.attachRate / maxAttach) * 30  : 0) +
+        (maxTicket  > 0 ? (ticket / maxTicket) * 20        : 0) +
+        (maxFams    > 0 ? (fams / maxFams) * 10            : 0);
+      return { ...c, ticket, score, fams };
+    }).sort((a, b) => b.score - a.score);
+  }, [teamRanking]);
+
+  // ── Drill no tipo de seguro: quem o vende ─────────────────────────────
+  const insuranceDrillData = useMemo(() => {
+    if (!selectedInsName || !counterFiltered.length) return null;
+    const map = new Map();
+    for (const r of counterFiltered) {
+      if (r.name !== selectedInsName) continue;
+      if (r.isAnonymous) {
+        const e = map.get('— Anónimo') || { who: '— Anónimo', funcNum: '994', qty: 0, value: 0 };
+        e.qty += r.qty; e.value += r.value;
+        map.set('— Anónimo', e);
+        continue;
+      }
+      const e = map.get(r.who) || { who: r.who, funcNum: r.funcNum, qty: 0, value: 0 };
+      e.qty += r.qty; e.value += r.value;
+      map.set(r.who, e);
+    }
+    return Array.from(map.values()).sort((a, b) => b.qty - a.qty);
+  }, [selectedInsName, counterFiltered]);
+
+  // ── LIFECYCLE (ficheiro detalhado) ────────────────────────────────────
+  // Produtos novos: primeira venda nos últimos N dias (default 30)
+  const productLifecycle = useMemo(() => {
+    if (!filteredRows.length) return null;
+    const firstSeen = new Map(); // ean → date
+    const lastSeen = new Map();
+    const daysActive = new Map(); // ean → Set of days
+    const dayValue = new Map(); // ean → Map(date → value)
+    const totalByEan = new Map();
+    const nameByEan = new Map();
+    const fam1ByEan = new Map();
+    for (const r of filteredRows) {
+      if (!r.date) continue;
+      if (!firstSeen.has(r.ean) || r.date < firstSeen.get(r.ean)) firstSeen.set(r.ean, r.date);
+      if (!lastSeen.has(r.ean)  || r.date > lastSeen.get(r.ean))  lastSeen.set(r.ean, r.date);
+      if (!daysActive.has(r.ean)) daysActive.set(r.ean, new Set());
+      daysActive.get(r.ean).add(r.date);
+      if (!dayValue.has(r.ean)) dayValue.set(r.ean, new Map());
+      dayValue.get(r.ean).set(r.date, (dayValue.get(r.ean).get(r.date) || 0) + r.revenue);
+      totalByEan.set(r.ean, (totalByEan.get(r.ean) || 0) + r.revenue);
+      nameByEan.set(r.ean, r.name);
+      fam1ByEan.set(r.ean, r.fam1);
+    }
+    // Calcular cutoff "novidades": 30 dias antes do último dia do snapshot
+    const allDates = Array.from(lastSeen.values()).sort();
+    const lastDateStr = allDates[allDates.length - 1];
+    const lastTs = new Date(lastDateStr).getTime();
+    const cutoffTs = lastTs - 30 * 86400000;
+    const cutoffIso = new Date(cutoffTs).toISOString().slice(0, 10);
+
+    // Produtos novos: primeira venda DEPOIS do cutoff
+    const newProducts = Array.from(firstSeen.entries())
+      .filter(([_, d]) => d >= cutoffIso)
+      .map(([ean, d]) => ({
+        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+        firstSeen: d, daysActive: daysActive.get(ean).size,
+        revenue: totalByEan.get(ean),
+      }))
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 30);
+
+    // Curva de vida: produtos com mais dias activos
+    const longestLived = Array.from(daysActive.entries())
+      .map(([ean, set]) => ({
+        ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+        days: set.size, firstSeen: firstSeen.get(ean), lastSeen: lastSeen.get(ean),
+        revenue: totalByEan.get(ean),
+      }))
+      .sort((a, b) => b.days - a.days)
+      .slice(0, 20);
+
+    // Puxões: produtos onde >70% da receita aconteceu num único dia
+    const spikes = [];
+    for (const [ean, dayMap] of dayValue.entries()) {
+      const total = totalByEan.get(ean);
+      if (total < 100) continue; // ignorar produtos pequenos
+      const maxDay = Array.from(dayMap.entries()).sort((a, b) => b[1] - a[1])[0];
+      if (maxDay && maxDay[1] / total > 0.70) {
+        spikes.push({
+          ean, name: nameByEan.get(ean), fam1: fam1ByEan.get(ean),
+          spikeDate: maxDay[0], spikeValue: maxDay[1],
+          totalRevenue: total, concentration: (maxDay[1] / total) * 100,
+        });
+      }
+    }
+    spikes.sort((a, b) => b.spikeValue - a.spikeValue);
+
+    return { newProducts, longestLived, spikes: spikes.slice(0, 20), cutoffIso };
+  }, [filteredRows]);
+
+  // ── Recomendações para próxima campanha ──────────────────────────────
+  // Top produtos margem alta + stock disponível + sem desconto recente
+  const campaignRecommendations = useMemo(() => {
+    if (!productAgg.length) return [];
+    const idxPO2 = buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {});
+    const idxPO3 = buildStockIndex(stockRowsPO3 || [], stockMapPO3 || {});
+    return productAgg
+      .filter(p => {
+        if (p.marginPct < 25) return false; // margem alta
+        if (p.discTotal > 0) return false;  // sem desconto recente
+        const stock = (idxPO2.index.get(p.ean) || 0) + (idxPO3.index.get(p.ean) || 0);
+        if (stock < 5) return false; // stock suficiente
+        if (p.qty < 2) return false; // tem alguma procura
+        return true;
+      })
+      .map(p => {
+        const stockPO2 = idxPO2.index.get(p.ean) || 0;
+        const stockPO3 = idxPO3.index.get(p.ean) || 0;
+        return { ...p, stockTotal: stockPO2 + stockPO3, stockPO2, stockPO3 };
+      })
+      .sort((a, b) => b.margin - a.margin)
+      .slice(0, 30);
+  }, [productAgg, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3]);
 
   // ── Filtragem global (date range + família 1 + POS + price + margem) ─
   const filteredRows = useMemo(() => {
@@ -7391,6 +7686,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           { id: 'basket',   label: 'Cestas' },
           { id: 'stock',    label: 'Stock & Devoluções' },
           { id: 'team',     label: 'Equipa' },
+          { id: 'lifecycle', label: 'Lifecycle' },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             padding: '10px 18px', fontSize: 12, fontWeight: 500,
@@ -8136,6 +8432,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                   <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Até</span>
                   <input type="date" value={teamTo} min={counterSnap.dateFrom || ''} max={counterSnap.dateTo || ''} onChange={e => setTeamTo(e.target.value)} style={salesFilterInput()} />
                 </label>
+                <button onClick={() => setShowEligibleConfig(true)} style={{ padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-end' }}>
+                  ⚙️ Famílias elegíveis ({eligibleFams.length})
+                </button>
                 <div style={{ flex: 1 }} />
                 <div style={{ fontSize: 11, color: T.inkMute, alignSelf: 'flex-end' }}>{counterFiltered.length.toLocaleString('pt-PT')} linhas · {teamRanking.length} colaboradores</div>
               </div>
@@ -8146,35 +8445,62 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                 <KpiCard label="Produtos" value={fmtEur(teamKpis.prodValue)} subtitle={`${teamKpis.prodQty.toLocaleString('pt-PT')} unid.`} accent={T.ink} />
                 <KpiCard label="Seguros (SEG*)" value={fmtEur(teamKpis.insValue)} subtitle={`${teamKpis.insQty} contratos`} accent="#5B9BD5" />
                 <KpiCard label="Addons (PP*)" value={fmtEur(teamKpis.addonValue)} subtitle={`${teamKpis.addonQty} extensões/addons`} accent="#8064A2" />
-                <KpiCard label="Taxa anexação seguro" value={teamKpis.attachRate.toFixed(1).replace('.', ',') + '%'} subtitle="seguros ÷ produtos" accent={teamKpis.attachRate >= 30 ? T.green : teamKpis.attachRate >= 15 ? T.orange : T.red} />
-                <KpiCard label="Taxa addons" value={teamKpis.addonRate.toFixed(1).replace('.', ',') + '%'} subtitle="addons ÷ produtos" accent={teamKpis.addonRate >= 30 ? T.green : teamKpis.addonRate >= 15 ? T.orange : T.red} />
+                <KpiCard label="Taxa anexação seguro" value={teamKpis.attachRate.toFixed(1).replace('.', ',') + '%'} subtitle={`seguros ÷ ${teamKpis.prodEligQty > 0 ? 'elegíveis' : 'produtos'} (${(teamKpis.prodEligQty || teamKpis.prodQty).toLocaleString('pt-PT')})`} accent={teamKpis.attachRate >= 30 ? T.green : teamKpis.attachRate >= 15 ? T.orange : T.red} />
+                <KpiCard label="Taxa addons" value={teamKpis.addonRate.toFixed(1).replace('.', ',') + '%'} subtitle="addons ÷ produtos elegíveis" accent={teamKpis.addonRate >= 30 ? T.green : teamKpis.addonRate >= 15 ? T.orange : T.red} />
                 <KpiCard label="Vendas anónimas" value={teamKpis.anonPct.toFixed(1).replace('.', ',') + '%'} subtitle={fmtEur(teamKpis.anonValue) + ' s/ colaborador'} accent={teamKpis.anonPct > 20 ? T.orange : T.inkSoft} />
               </div>
 
-              {/* Ranking colaboradores */}
-              <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
-                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Ranking colaboradores ({teamRanking.length})
+              {/* Heatmap colaborador × dia */}
+              {heatmapCollabDay.collabs.length > 0 && heatmapCollabDay.days.length > 0 && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>🔥 Consistência por colaborador × dia</div>
+                  <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 12 }}>Quanto mais escuro, mais vendas nesse dia. Top 15 colaboradores.</div>
+                  <CollabDayHeatmap data={heatmapCollabDay} />
                 </div>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              )}
+
+              {/* Cross-sell heatmap colab × família elegível */}
+              {crossSellMatrix && crossSellMatrix.collabs.length > 0 && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 4 }}>🎯 Cross-sell: anexação por colaborador × família elegível</div>
+                  <div style={{ fontSize: 10, color: T.inkSoft, marginBottom: 12 }}>% estimada de anexos (seguro/addon) por produto elegível vendido — quanto maior, melhor.</div>
+                  <CrossSellHeatmap data={crossSellMatrix} />
+                </div>
+              )}
+
+              {/* Evolução semanal */}
+              {weeklyByCollab && weeklyByCollab.weeks.length >= 2 && (
+                <div style={{ padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>📊 Evolução semanal — top 6 colaboradores</div>
+                  <WeeklyMultiBars data={weeklyByCollab} valueFormatter={fmtEur} />
+                </div>
+              )}
+
+              {/* Ranking colaboradores com SCORE */}
+              <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+                <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>Ranking ponderado ({teamScored.length})</span>
+                  <span style={{ textTransform: 'none', letterSpacing: 0, fontSize: 10, color: T.inkSoft }}>Score: vendas 40% · anexação 30% · ticket 20% · diversidade 10%</span>
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, minWidth: 980 }}>
                   <thead>
                     <tr style={{ background: T.bg, color: T.inkMute }}>
                       <th style={{ ...salesTh(), width: 32, textAlign: 'right' }}>#</th>
                       <th style={salesTh()}>Colaborador</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Score</th>
                       <th style={{ ...salesTh(), textAlign: 'right' }}>Linhas</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Unidades</th>
                       <th style={{ ...salesTh(), textAlign: 'right' }}>Vendas €</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Seguros</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Addons</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Seg %</th>
-                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Add %</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>€/linha</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Seg</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Add</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Seg</th>
+                      <th style={{ ...salesTh(), textAlign: 'right' }}>Tx Add</th>
                       <th style={salesTh()}>Top família</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {teamRanking.map((c, i) => {
-                      const maxValue = teamRanking[0]?.value || 1;
-                      const pct = (c.value / maxValue) * 100;
+                    {teamScored.map((c, i) => {
                       const isSelected = selectedCollab && selectedCollab.funcNum === c.funcNum && selectedCollab.who === c.who;
                       return (
                         <tr key={c.funcNum + '|' + c.who}
@@ -8185,12 +8511,13 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                             <div style={{ fontWeight: 500 }}>{c.who}</div>
                             <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'monospace' }}>Func. {c.funcNum}</div>
                           </td>
-                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.lines}</td>
-                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.qty.toLocaleString('pt-PT')}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', position: 'relative' }}>
-                            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${pct}%`, background: T.accent + '14', pointerEvents: 'none' }} />
-                            <span style={{ position: 'relative', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(c.value)}</span>
+                            <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${c.score}%`, background: T.accent + '22', pointerEvents: 'none' }} />
+                            <span style={{ position: 'relative', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: c.score >= 70 ? T.green : c.score >= 40 ? T.accent : T.inkSoft }}>{c.score.toFixed(0)}</span>
                           </td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.lines}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(c.value)}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkSoft }}>{fmtEur2(c.ticket)}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#5B9BD5' }}>{c.insQty}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#8064A2' }}>{c.addonQty}</td>
                           <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: c.attachRate >= 30 ? T.green : c.attachRate >= 15 ? T.orange : T.red }}>{c.attachRate.toFixed(1)}%</td>
@@ -8201,7 +8528,41 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                     })}
                   </tbody>
                 </table>
+                </div>
               </div>
+
+              {/* Oportunidades perdidas */}
+              {missedOpportunities.length > 0 && (
+                <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+                  <div style={{ padding: '10px 14px', borderBottom: `1px solid ${T.line}`, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    ⚠️ Oportunidades perdidas — produtos elegíveis vendidos sem seguro nesse dia
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: T.bg, color: T.inkMute }}>
+                        <th style={salesTh()}>EAN</th>
+                        <th style={salesTh()}>Produto</th>
+                        <th style={salesTh()}>Família</th>
+                        <th style={salesTh()}>Colaborador</th>
+                        <th style={salesTh()}>Data</th>
+                        <th style={{ ...salesTh(), textAlign: 'right' }}>Valor</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {missedOpportunities.map(it => (
+                        <tr key={it.ean + '|' + it.who + '|' + it.date} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                          <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{it.ean}</td>
+                          <td style={salesTd()}>{it.name}</td>
+                          <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{it.fam1}</td>
+                          <td style={{ ...salesTd(), fontSize: 11 }}>{it.who}</td>
+                          <td style={{ ...salesTd(), fontFamily: 'monospace', fontSize: 11, color: T.inkSoft }}>{it.date}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.value)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               {/* Detalhe do colaborador seleccionado */}
               {selectedCollab && collabDetail && (
@@ -8210,9 +8571,19 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                     <div>
                       <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Detalhe</div>
                       <div style={{ fontSize: 18, fontWeight: 500 }}>{selectedCollab.who} <span style={{ color: T.inkMute, fontSize: 12, fontFamily: 'monospace', marginLeft: 8 }}>Func. {selectedCollab.funcNum}</span></div>
+                      {collabDetail.bestFam2 && (
+                        <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 4 }}>⭐ Melhor sub-família: <strong style={{ color: T.ink }}>{collabDetail.bestFam2}</strong></div>
+                      )}
                     </div>
                     <button onClick={() => setSelectedCollab(null)} style={{ padding: '5px 10px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>✕ Fechar</button>
                   </div>
+                  {/* Histórico semanal */}
+                  {collabDetail.weekly.length >= 2 && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Histórico semanal</div>
+                      <VBarChart data={collabDetail.weekly.map(w => ({ label: w.date.slice(5), value: w.value }))} height={100} valueFormatter={fmtEur} />
+                    </div>
+                  )}
                   {/* Sparkline */}
                   <div style={{ marginBottom: 20 }}>
                     <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Vendas diárias</div>
@@ -8277,14 +8648,52 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
                       </tr>
                     </thead>
                     <tbody>
-                      {insuranceTypes.map(it => (
-                        <tr key={it.name} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      {insuranceTypes.map(it => {
+                        const isSel = selectedInsName === it.name;
+                        return (
+                          <tr key={it.name}
+                            onClick={() => setSelectedInsName(isSel ? null : it.name)}
+                            style={{ borderTop: `1px solid ${T.lineSoft}`, cursor: 'pointer', background: isSel ? T.accent + '15' : 'transparent' }}>
+                            <td style={salesTd()}>
+                              <span style={{ padding: '2px 8px', borderRadius: 3, background: it.type === 'addon' ? '#806CA222' : '#5B9BD522', color: it.type === 'addon' ? '#8064A2' : '#5B9BD5', fontSize: 10, fontWeight: 600 }}>{it.type === 'addon' ? 'ADDON' : 'SEGURO'}</span>
+                            </td>
+                            <td style={salesTd()}>{it.name}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{it.qty}</td>
+                            <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.value)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Drill do seguro seleccionado */}
+              {selectedInsName && insuranceDrillData && (
+                <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${T.accent}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Quem vende</div>
+                      <div style={{ fontSize: 14, fontWeight: 500 }}>{selectedInsName}</div>
+                    </div>
+                    <button onClick={() => setSelectedInsName(null)} style={{ padding: '4px 8px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>✕</button>
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: T.bg, color: T.inkMute }}>
+                        <th style={salesTh()}>Colaborador</th>
+                        <th style={{ ...salesTh(), textAlign: 'right' }}>Vendidos</th>
+                        <th style={{ ...salesTh(), textAlign: 'right' }}>Valor</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {insuranceDrillData.map(c => (
+                        <tr key={c.who} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
                           <td style={salesTd()}>
-                            <span style={{ padding: '2px 8px', borderRadius: 3, background: it.type === 'addon' ? '#806CA222' : '#5B9BD522', color: it.type === 'addon' ? '#8064A2' : '#5B9BD5', fontSize: 10, fontWeight: 600 }}>{it.type === 'addon' ? 'ADDON' : 'SEGURO'}</span>
+                            {c.who} <span style={{ color: T.inkMute, fontSize: 10, fontFamily: 'monospace', marginLeft: 6 }}>Func. {c.funcNum}</span>
                           </td>
-                          <td style={salesTd()}>{it.name}</td>
-                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{it.qty}</td>
-                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(it.value)}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{c.qty}</td>
+                          <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(c.value)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -8293,6 +8702,172 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
               )}
             </>
           )}
+
+          {/* Modal config famílias elegíveis */}
+          {showEligibleConfig && (
+            <EligibleFamConfig
+              allFams={allCounterFams}
+              selected={eligibleFams}
+              onSave={(next) => { setEligibleFams(next); setShowEligibleConfig(false); }}
+              onClose={() => setShowEligibleConfig(false)}
+            />
+          )}
+        </div>
+      )}
+
+      {tab === 'lifecycle' && productLifecycle && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <div style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, color: T.inkSoft }}>
+            Análise lifecycle baseada no snapshot principal (vendas detalhadas). Janela "novidades": últimos 30 dias do snapshot (cutoff: <strong style={{ color: T.ink }}>{productLifecycle.cutoffIso}</strong>).
+          </div>
+
+          {/* Novidades */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              ✨ Produtos novos ({productLifecycle.newProducts.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· primeira venda nos últimos 30 dias</span>
+            </div>
+            {productLifecycle.newProducts.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem novidades no período filtrado.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={salesTh()}>Estreia</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Dias activo</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Receita</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productLifecycle.newProducts.map(p => (
+                    <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                      <td style={salesTd()}>{p.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{p.fam1}</td>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.green, fontSize: 11 }}>{p.firstSeen}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.daysActive}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{fmtEur(p.revenue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Puxões */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              ⚡ Puxões — produtos com pico num único dia ({productLifecycle.spikes.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· &gt;70% da receita concentrada num dia</span>
+            </div>
+            {productLifecycle.spikes.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem puxões detectados.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={salesTh()}>Dia do pico</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Pico €</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Total €</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Concentração</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {productLifecycle.spikes.map(s => (
+                    <tr key={s.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{s.ean}</td>
+                      <td style={salesTd()}>{s.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{s.fam1}</td>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', fontSize: 11 }}>{s.spikeDate}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500, color: T.accent }}>{fmtEur(s.spikeValue)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(s.totalRevenue)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.orange }}>{s.concentration.toFixed(0)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Recomendações campanha */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              🎯 Recomendados para próxima campanha ({campaignRecommendations.length}) <span style={{ textTransform: 'none', letterSpacing: 0, color: T.inkSoft, marginLeft: 8 }}>· margem ≥25% · stock ≥5 · sem desconto · com procura</span>
+            </div>
+            {campaignRecommendations.length === 0 ? (
+              <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem candidatos. Importa stock PO2/PO3 para resultados melhores.</div>
+            ) : (
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: T.bg, color: T.inkMute }}>
+                    <th style={salesTh()}>EAN</th>
+                    <th style={salesTh()}>Produto</th>
+                    <th style={salesTh()}>Família</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem %</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Margem €</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Vendido</th>
+                    <th style={{ ...salesTh(), textAlign: 'right' }}>Stock</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {campaignRecommendations.map(p => (
+                    <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                      <td style={salesTd()}>{p.name}</td>
+                      <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{p.fam1}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: T.green }}>{p.marginPct.toFixed(1)}%</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(p.margin)}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{p.qty}</td>
+                      <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{p.stockTotal}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Curva de vida (longest-lived) */}
+          <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+            <div style={{ padding: '12px 16px', fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              ⏳ Top produtos por longevidade — mais dias activos
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: T.bg, color: T.inkMute }}>
+                  <th style={salesTh()}>EAN</th>
+                  <th style={salesTh()}>Produto</th>
+                  <th style={salesTh()}>Família</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Dias activo</th>
+                  <th style={salesTh()}>Primeira</th>
+                  <th style={salesTh()}>Última</th>
+                  <th style={{ ...salesTh(), textAlign: 'right' }}>Receita total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {productLifecycle.longestLived.map(p => (
+                  <tr key={p.ean} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                    <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft }}>{p.ean}</td>
+                    <td style={salesTd()}>{p.name}</td>
+                    <td style={{ ...salesTd(), color: T.inkSoft, fontSize: 11 }}>{p.fam1}</td>
+                    <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{p.days}</td>
+                    <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft, fontSize: 11 }}>{p.firstSeen}</td>
+                    <td style={{ ...salesTd(), fontFamily: 'monospace', color: T.inkSoft, fontSize: 11 }}>{p.lastSeen}</td>
+                    <td style={{ ...salesTd(), textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{fmtEur(p.revenue)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'lifecycle' && !productLifecycle && (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>
+          Sem dados — verifica se importaste o ficheiro principal (vendas detalhadas).
         </div>
       )}
 
@@ -8412,6 +8987,175 @@ function BestDayCard({ label, date, value, sub, accent }) {
       <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 4, display: 'flex', justifyContent: 'space-between', gap: 8 }}>
         <span style={{ color: T.ink, fontFamily: 'monospace' }}>{date}</span>
         <span>{sub}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Heatmap colaborador × dia (vendas €) ───────────────────────────────
+function CollabDayHeatmap({ data }) {
+  const [hover, setHover] = useState(null);
+  if (!data.collabs.length || !data.days.length) return null;
+  const cellW = Math.max(8, Math.min(20, Math.floor(800 / data.days.length)));
+  return (
+    <div style={{ position: 'relative', overflowX: 'auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: `140px repeat(${data.days.length}, ${cellW}px)`, gap: 2, fontSize: 10 }}>
+        <div />
+        {data.days.map((d, i) => (
+          <div key={i} style={{ textAlign: 'center', color: T.inkMute, fontSize: 8, transform: 'rotate(-60deg)', transformOrigin: 'left bottom', height: 60, whiteSpace: 'nowrap' }}>{i % 3 === 0 ? d.slice(5) : ''}</div>
+        ))}
+        {data.collabs.map((name, ci) => (
+          <React.Fragment key={ci}>
+            <div style={{ color: T.inkSoft, textAlign: 'right', paddingRight: 6, alignSelf: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }}>{name}</div>
+            {data.days.map((d, di) => {
+              const v = data.matrix[ci][di] || 0;
+              const intensity = data.max > 0 ? v / data.max : 0;
+              const bg = intensity === 0 ? T.lineSoft : `rgba(91, 155, 213, ${0.10 + intensity * 0.85})`;
+              const isHover = hover && hover.ci === ci && hover.di === di;
+              return (
+                <div key={di}
+                  onMouseEnter={() => v > 0 && setHover({ ci, di, v, name, day: d })}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ height: 18, background: bg, borderRadius: 2, cursor: v > 0 ? 'pointer' : 'default',
+                    outline: isHover ? `1.5px solid ${T.ink}` : 'none' }}
+                />
+              );
+            })}
+          </React.Fragment>
+        ))}
+      </div>
+      {hover && (
+        <div style={{ position: 'absolute', top: 0, right: 0, background: T.ink, color: T.bg, padding: '6px 10px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.name} · {hover.day}</div>
+          <div style={{ fontWeight: 500 }}>{'€' + Math.round(hover.v).toLocaleString('pt-PT')}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Heatmap cross-sell (colaborador × família elegível) ────────────────
+function CrossSellHeatmap({ data }) {
+  const [hover, setHover] = useState(null);
+  if (!data || !data.collabs.length || !data.fams.length) return <div style={{ padding: 20, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem dados — verifica filtros e famílias elegíveis.</div>;
+  const cellW = Math.max(40, Math.floor(700 / data.fams.length));
+  return (
+    <div style={{ position: 'relative', overflowX: 'auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: `160px repeat(${data.fams.length}, ${cellW}px)`, gap: 2, fontSize: 10 }}>
+        <div />
+        {data.fams.map((f, i) => (
+          <div key={i} style={{ textAlign: 'center', color: T.inkSoft, fontSize: 9, padding: '4px 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f}</div>
+        ))}
+        {data.collabs.map((name, ci) => (
+          <React.Fragment key={ci}>
+            <div style={{ color: T.inkSoft, textAlign: 'right', paddingRight: 8, alignSelf: 'center', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+            {data.fams.map((f, fi) => {
+              const cell = data.matrix[ci][fi];
+              if (!cell) {
+                return <div key={fi} style={{ height: 24, background: T.lineSoft, borderRadius: 2 }} />;
+              }
+              const intensity = Math.min(1, cell.rate / 60);
+              const bg = `rgba(93, 160, 80, ${0.12 + intensity * 0.78})`;
+              const isHover = hover && hover.ci === ci && hover.fi === fi;
+              return (
+                <div key={fi}
+                  onMouseEnter={() => setHover({ ci, fi, ...cell, name, fam: f })}
+                  onMouseLeave={() => setHover(null)}
+                  style={{ height: 24, background: bg, borderRadius: 2, cursor: 'pointer', textAlign: 'center', lineHeight: '24px', fontSize: 10, color: intensity > 0.5 ? '#fff' : T.ink, fontVariantNumeric: 'tabular-nums', outline: isHover ? `1.5px solid ${T.ink}` : 'none' }}>
+                  {cell.rate.toFixed(0)}%
+                </div>
+              );
+            })}
+          </React.Fragment>
+        ))}
+      </div>
+      {hover && (
+        <div style={{ position: 'absolute', top: 0, right: 0, background: T.ink, color: T.bg, padding: '8px 12px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.name} · {hover.fam}</div>
+          <div style={{ fontWeight: 500 }}>{hover.rate.toFixed(1)}% anexação</div>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.prod} produtos · ~{hover.attach.toFixed(1)} anexos</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Multi-bar weekly (colaboradores × semanas) ─────────────────────────
+function WeeklyMultiBars({ data, valueFormatter }) {
+  const [hover, setHover] = useState(null);
+  if (!data || !data.weeks.length) return null;
+  const max = Math.max(1, ...data.series.flatMap(s => s.points));
+  const fmt = valueFormatter || (v => Math.round(v).toLocaleString('pt-PT'));
+  const barWidth = 100 / (data.weeks.length * (data.series.length + 1));
+  return (
+    <div style={{ position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', height: 200, gap: 4, padding: '8px 0' }}>
+        {data.weeks.map((w, wi) => (
+          <div key={wi} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 170 }}>
+              {data.series.map((s, si) => {
+                const v = s.points[wi] || 0;
+                const h = max > 0 ? (v / max) * 160 : 0;
+                const color = CHART_COLORS[si % CHART_COLORS.length];
+                const isH = hover && hover.wi === wi && hover.si === si;
+                return (
+                  <div key={si}
+                    onMouseEnter={() => setHover({ wi, si, v, week: w, name: s.name })}
+                    onMouseLeave={() => setHover(null)}
+                    style={{ width: 12, height: h || 1, background: isH ? T.ink : color, borderRadius: 1, cursor: 'pointer' }}
+                  />
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 9, color: T.inkMute, fontVariantNumeric: 'tabular-nums' }}>{w.slice(-3)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8, fontSize: 11 }}>
+        {data.series.map((s, i) => (
+          <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: T.inkSoft }}>
+            <span style={{ width: 10, height: 10, background: CHART_COLORS[i % CHART_COLORS.length], borderRadius: 2 }} />
+            {s.name}
+          </span>
+        ))}
+      </div>
+      {hover && (
+        <div style={{ position: 'absolute', top: 0, left: '50%', transform: 'translate(-50%, -100%)', background: T.ink, color: T.bg, padding: '6px 10px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.name} · {hover.week}</div>
+          <div style={{ fontWeight: 500 }}>{fmt(hover.v)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Modal config famílias elegíveis ────────────────────────────────────
+function EligibleFamConfig({ allFams, selected, onSave, onClose }) {
+  const [picked, setPicked] = useState(new Set(selected));
+  const toggle = (f) => {
+    const next = new Set(picked);
+    if (next.has(f)) next.delete(f); else next.add(f);
+    setPicked(next);
+  };
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: T.bg, border: `1px solid ${T.line}`, borderRadius: 8, padding: 24, width: 560, maxWidth: '90vw', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
+        <h3 style={{ margin: '0 0 8px', fontSize: 16 }}>Famílias elegíveis para seguro</h3>
+        <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 16 }}>
+          Selecciona as famílias onde faz sentido anexar seguro (telecom, electro, foto, etc.). Afecta o denominador da taxa anexação e do cross-sell.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, overflowY: 'auto', flex: 1 }}>
+          {allFams.map(f => (
+            <label key={f} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: T.bgEl, borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>
+              <input type="checkbox" checked={picked.has(f)} onChange={() => toggle(f)} />
+              <span>{f}</span>
+            </label>
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+          <button onClick={onClose} style={{ padding: '8px 14px', background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Cancelar</button>
+          <button onClick={() => onSave(Array.from(picked))} style={{ padding: '8px 14px', background: T.ink, color: T.bg, border: 'none', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Guardar ({picked.size})</button>
+        </div>
       </div>
     </div>
   );
