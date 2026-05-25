@@ -1315,8 +1315,13 @@ async function cloudFetchStoreLayout(department) {
       console.warn('cloudFetchStoreLayout(zones):', zonesRes.error.message);
       return null;
     }
-    const floors = floorsRes.data || [];
+    let floors = floorsRes.data || [];
     const zones  = zonesRes.data  || [];
+    // v3.20.10: PES não usa "destaques portáteis" (floors com star=true).
+    // Pisos normais (piso 1, piso 0, etc.) continuam partilhados.
+    if (department === 'PES') {
+      floors = floors.filter(f => !f.star);
+    }
     // Build the same shape as DEFAULT_FLOORS so FloorPlanner/Blueprint don't change
     return floors.map(f => ({
       id: f.id,
