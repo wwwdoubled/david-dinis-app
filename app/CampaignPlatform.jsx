@@ -889,8 +889,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.15';
-const APP_BUILD_DATE = '2026-05-25T14:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.16';
+const APP_BUILD_DATE = '2026-05-25T15:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -900,6 +900,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.16', date: '2026-05-25', summary: 'Quick wins + segurança (Fase 1+3 da auditoria). (A) Dead code: apagado app/CampaignPlatformanterior.jsx (10k linhas backup), duplicados /CampaignPlatform.jsx /layout.js /download no root; .gitignore corrigido. (B) Polling: refresh de campanhas/periods (30s) pausa quando document.hidden (tab em background) → poupa egress Supabase. Refresh imediato ao voltar à tab. (C) IDB cache: rows hidratadas via eager hydration agora são persistidas em IndexedDB → próximas sessões evitam re-fetch do cloud, HydrationGate desaparece quase instantaneamente. (D) Atalho ⌨ Help (Cmd+/ ou ?): novo HelpModal com lista de atalhos de teclado (navegação, listas, edição) e dica para Cmd+K. (E) Segurança: LEGACY_PASSWORD removido da source (era visível em DevTools). Agora lido de NEXT_PUBLIC_LEGACY_PASSWORD; sem env var = modo legacy desactivado, só Supabase autentica. (F) Migrations renomeadas para formato Supabase CLI standard (YYYYMMDDHHMMSS_*.sql) — supabase migration list já reconhece. (G) Novo .env.example + console.log na eager hydration só em dev.' },
   { version: '3.20.15', date: '2026-05-25', summary: 'HydrationGate — bloqueia a app no login até todas as rows das campanhas estarem carregadas da cloud. Aparece um overlay com ícone Database pulsante, barra de progresso (X de Y prontas) e botão "Continuar mesmo assim" após 8s caso demore muito. Aparece DEPOIS do ForcePasswordChangeModal e AdminViewPickerModal. Resultado: ao entrar em Alterações/Visão Geral logo a seguir ao login, todos os dados estão prontos.' },
   { version: '3.20.14', date: '2026-05-25', summary: 'Visão Geral: removida a secção "Artigos atribuídos por família" — dependia de hydration de campaign rows que não está sempre pronta ao abrir a app, ficava em branco até entrar numa campanha. Em Análise de Vendas → Top Famílias tem-se essa info quando os dados estão hidratados.' },
   { version: '3.20.13', date: '2026-05-25', summary: 'Picker de departamento em cada login + diferenciação visual reforçada. (A) Admin escolhe vista (PTS / PES) em CADA login (não só no primeiro) — adminViewDepartment deixou de persistir em localStorage, reset detectado via user.id change. Refresh da página também força nova escolha. (B) Sidebar ganha badge GRANDE no topo com cor sólida do dept (azul=PTS, roxo=PES) + nome completo + ícone de seta — clicável para alternar instantaneamente, com hover lift. Borda esquerda 4px na cor do dept (sempre visível). (C) Main content ganha borda superior 3px na cor do dept. (D) Switcher pequeno antigo da secção do user removido (redundante).' },
@@ -2894,15 +2895,19 @@ function countSlots(floors) {
 // ─────────────────────────────────────────────────────────────────────────
 // Auth — Supabase-backed when configured; legacy password fallback otherwise
 // ─────────────────────────────────────────────────────────────────────────
-// Legacy fallback (only used when Supabase env vars are missing)
-const LEGACY_PASSWORD = 'Faveiro2026';
+// v3.20.16: Legacy password retirado da source (era visível em DevTools).
+// Pode ser definido via NEXT_PUBLIC_LEGACY_PASSWORD se quiseres manter o
+// modo legacy como fallback de emergência sem Supabase. Sem isso, o modo
+// legacy nunca autentica — Supabase é o único caminho real.
+const LEGACY_PASSWORD = (typeof process !== 'undefined' ? (process.env.NEXT_PUBLIC_LEGACY_PASSWORD || '') : '');
 const SESSION_MS = 12 * 60 * 60 * 1000; // 12 hours (legacy session length)
 
 // True when Supabase client is properly configured
 const supabaseEnabled = !!supabase;
 
-// Legacy password check — used only when Supabase isn't configured
+// Legacy password check — só funciona se NEXT_PUBLIC_LEGACY_PASSWORD estiver definido
 async function checkLegacyPassword(text) {
+  if (!LEGACY_PASSWORD) return false; // legacy desactivado
   return text === LEGACY_PASSWORD;
 }
 
@@ -3706,17 +3711,29 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           const hydrated = await cloudFetchCampaignRows(idsNeedingRows);
           if (cancelled) return;
           const rowsById = new Map(hydrated.map(h => [h.id, h]));
-          setCampaigns(prev => prev.map(c => {
-            const r = rowsById.get(c.id);
-            if (!r) return c;
-            // Don't overwrite local rows if cloud returned empty — keep what we have
-            if ((!r.rows || r.rows.length === 0) && Array.isArray(c.rows) && c.rows.length > 0) {
-              return { ...c, _needsRows: false };
-            }
-            return { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false };
-          }));
+          setCampaigns(prev => {
+            const next = prev.map(c => {
+              const r = rowsById.get(c.id);
+              if (!r) return c;
+              // Don't overwrite local rows if cloud returned empty — keep what we have
+              if ((!r.rows || r.rows.length === 0) && Array.isArray(c.rows) && c.rows.length > 0) {
+                return { ...c, _needsRows: false };
+              }
+              return { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false };
+            });
+            // v3.20.16: persistir rows hidratadas em IDB → próxima sessão evita re-fetch
+            next.forEach(c => {
+              if (c.key && Array.isArray(c.rows) && c.rows.length > 0) {
+                idbPut({
+                  key: c.key, id: c.id, name: c.name, uploaded: c.uploaded,
+                  headers: c.headers, rows: c.rows, floors: c.floors, periodId: c.periodId,
+                }).catch(() => {});
+              }
+            });
+            return next;
+          });
           setRowsHydrated(true);
-          console.log(`[startup] eager hydration done`);
+          if (process.env.NODE_ENV !== 'production') console.log(`[startup] eager hydration done`);
         } catch (e) {
           console.warn('[startup] eager hydration failed', e);
           setRowsHydrated(true);
@@ -3835,8 +3852,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       });
       setCampaigns(curr => mergeCampaigns(curr, c));
     };
-    const interval = setInterval(refresh, 30000);
-    return () => clearInterval(interval);
+    // v3.20.16: respeitar document.hidden — não refresh com tab em background
+    const safeRefresh = () => { if (!document.hidden) refresh(); };
+    const interval = setInterval(safeRefresh, 30000);
+    // Refresh imediato quando o user volta à tab (evita estar com dados stale)
+    const onVis = () => { if (!document.hidden) refresh(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVis); };
   }, [user, cloudDataLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── De-duplicate "Importadas" periods and link orphan campaigns.
@@ -4303,6 +4325,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [blueprintOpen, setBlueprintOpen] = useState(false);
   // Pesquisa global (Ctrl+K / Cmd+K) — v3.12.0
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  // v3.20.16: modal de ajuda com atalhos de teclado (Cmd+/)
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Atalhos globais de teclado (v3.12.0)
   useEffect(() => {
@@ -4316,6 +4340,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         setGlobalSearchOpen(true);
         return;
       }
+      // v3.20.16: Cmd+/ ou Ctrl+/ → ajuda com atalhos
+      if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+        e.preventDefault();
+        setHelpOpen(true);
+        return;
+      }
+      // "?" abre ajuda quando não estás num input
+      if (e.key === '?' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        setHelpOpen(true);
+        return;
+      }
       // "/" abre pesquisa quando não estás num input
       if (e.key === '/' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
@@ -4326,6 +4362,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       // Esc fecha o painel/overlay mais recente
       if (e.key === 'Escape') {
         if (inField) return; // deixa o browser/input tratar
+        if (helpOpen) { setHelpOpen(false); return; }
         if (globalSearchOpen) { setGlobalSearchOpen(false); return; }
         if (blueprintOpen) { setBlueprintOpen(false); return; }
         if (notesPanelOpen) { setNotesPanelOpen(false); return; }
@@ -4334,7 +4371,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [blueprintOpen, notesPanelOpen, globalSearchOpen]);
+  }, [blueprintOpen, notesPanelOpen, globalSearchOpen, helpOpen]);
 
   // ─── Cloud sync state ──────────────────────────────────────────────────
   // syncStatus: 'idle' | 'loading' | 'syncing' | 'synced' | 'offline' | 'error'
@@ -5196,6 +5233,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           onClose={() => setBlueprintOpen(false)}
         />
       )}
+
+      {/* v3.20.16: Modal de ajuda — atalhos de teclado (Cmd+/ ou ?) */}
+      {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
 
       {/* Pesquisa global (Ctrl+K / Cmd+K / "/") — v3.12.0 */}
       {globalSearchOpen && (
@@ -22348,6 +22388,77 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.20.16: HelpModal — atalhos de teclado da app (Cmd+/ ou ? para abrir)
+function HelpModal({ onClose }) {
+  const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
+  const Cmd = isMac ? '⌘' : 'Ctrl';
+  const shortcuts = [
+    { group: 'Navegação', items: [
+      { keys: [`${Cmd}+K`, '/'], desc: 'Pesquisa global (períodos, campanhas, produtos, atalhos)' },
+      { keys: [`${Cmd}+/`, '?'], desc: 'Mostrar este painel de ajuda' },
+      { keys: ['Esc'], desc: 'Fechar painel/modal aberto' },
+    ]},
+    { group: 'Listas e tabelas', items: [
+      { keys: ['Tab'], desc: 'Navegar entre campos' },
+      { keys: ['Enter'], desc: 'Confirmar / aceder ao item seleccionado' },
+      { keys: ['↑ ↓'], desc: 'Navegar resultados de pesquisa' },
+    ]},
+    { group: 'Edição', items: [
+      { keys: ['Enter'], desc: 'Guardar alterações no campo (em inputs uncontrolled)' },
+      { keys: ['Tab'], desc: 'Sair do campo e guardar (perde foco)' },
+    ]},
+  ];
+  return (
+    <div
+      role="dialog" aria-modal="true" aria-labelledby="help-modal-title"
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 9990, padding: 20, backdropFilter: 'blur(3px)',
+      }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 12, padding: 28, width: '100%', maxWidth: 560,
+        maxHeight: '85vh', overflowY: 'auto',
+        boxShadow: '0 24px 60px -16px rgba(0,0,0,0.4)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+          <h2 id="help-modal-title" style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>⌨ Atalhos de teclado</h2>
+          <button onClick={onClose} aria-label="Fechar" style={{
+            padding: '4px 8px', background: 'transparent', border: `1px solid ${T.line}`,
+            borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer',
+          }}>Esc</button>
+        </div>
+        {shortcuts.map(g => (
+          <div key={g.group} style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>{g.group}</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {g.items.map((it, i) => (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, alignItems: 'center', fontSize: 12 }}>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {it.keys.map((k, j) => (
+                      <kbd key={j} style={{
+                        padding: '3px 8px', background: T.bg, border: `1px solid ${T.line}`,
+                        borderRadius: 4, fontSize: 11, fontFamily: 'Geist Mono, monospace',
+                        boxShadow: `0 1px 0 ${T.line}`, color: T.ink,
+                      }}>{k}</kbd>
+                    ))}
+                  </div>
+                  <div style={{ color: T.inkSoft }}>{it.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div style={{ marginTop: 16, padding: '12px 14px', background: T.bg, borderRadius: 6, fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+          💡 Dica: começa por <kbd style={{ padding: '1px 6px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 3, fontSize: 10, fontFamily: 'Geist Mono' }}>{Cmd}+K</kbd> para encontrar qualquer coisa na app — periodos, produtos por EAN, atalhos do menu, etc.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // v3.20.15: HydrationGate — bloqueia a app até as campaign rows estarem
 // carregadas. Aparece após login, depois do ForcePasswordChangeModal e
 // AdminViewPickerModal. Mostra contagem de campanhas + botão de skip
