@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.19';
-const APP_BUILD_DATE = '2026-05-25T17:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.20';
+const APP_BUILD_DATE = '2026-05-25T17:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.20', date: '2026-05-25', summary: 'Error boundary + acessibilidade. (A) AppErrorBoundary global em page.js — se algum componente crashar (excepção React), o user vê fallback amigável com botão Recarregar em vez da página em branco. Detalhes técnicos colapsáveis para diagnóstico. (B) prefers-reduced-motion respeitado — utilizadores com preferência por menos movimento desligam todas as animações automaticamente.' },
   { version: '3.20.19', date: '2026-05-25', summary: 'Toast notifications (Fase 1.3). (A) Sistema de toasts não-bloqueante no canto inferior direito — desliza, desaparece sozinho (3.5s info/success, 6s error), botão × para fechar manualmente. Kinds: info (azul), success (verde), error (vermelho), warn (laranja). aria-live=polite para screen readers. (B) window.alert é interceptado e mostra toast automaticamente — todas as ~90 chamadas existentes a alert() pela app passam a ser toasts elegantes sem bloquear a thread principal. Detecção heurística de erro vs info pelo texto. (C) Pode ser usado directamente via showToast(msg, { kind }) onde precisarmos de tipos explícitos.' },
   { version: '3.20.18', date: '2026-05-25', summary: 'PWA (Fase 4 parcial) — app instalável. (A) Novo public/manifest.json com nome, ícones, theme_color azul (#5B9BD5), display=standalone e shortcuts para Visão Geral/Campanhas/Stock. (B) Novo public/sw.js — service worker simples: cache-first para assets estáticos (Next.js static, fontes, imagens), network-first com fallback para cache em tudo o resto. Supabase API bypass (sempre cloud). (C) layout.js: link manifest, theme-color meta, apple-touch-icon, registo automático do SW no load. Resultado: chrome/edge/safari móvel mostram prompt "Add to Home Screen"; app abre em standalone mode sem barras do browser; offline funciona para navegação básica (IndexedDB já tem os dados). Ícones (icon-192.png / icon-512.png) precisam de ser criados manualmente no public/.' },
   { version: '3.20.17', date: '2026-05-25', summary: 'Performance pesada (Fase 2 parcial). (A) Parser Excel FNAC (86k linhas) movido para Web Worker: a main thread já NÃO congela durante o upload. Barra de progresso real com mensagens ("A processar X de Y…") e percentagem. Worker carrega XLSX do CDN; fallback transparente para main thread em browsers sem suporte. (B) next.config.js: compiler.removeConsole em production → console.log strip dos bundles, mantendo error/warn. (C) (Fase 2 restante — code-splitting + virtualização — fica para próxima sessão por ser refactor mais invasivo.)' },
@@ -4726,6 +4727,15 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
         .fade-up { animation: fadeUp 0.4s ease-out backwards; }
         @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+        /* v3.20.20: respeitar prefers-reduced-motion */
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+          }
+        }
 
         /* ─── Polish global (v3.11.4) ─── */
         /* Scroll smooth em toda a app */
