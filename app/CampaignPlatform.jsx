@@ -239,7 +239,47 @@ function parseExcelSmart(arrayBuffer, expectedHeaders = []) {
 // Estrutura fixa: linha 1 título, linha 2 "Data: dd-mm-yyyy até dd-mm-yyyy",
 // linha 3 "Loja: X", linha 4 headers (17 cols), dados a partir da linha 5.
 // ─────────────────────────────────────────────────────────────────────────
-function parseFnacSalesExcel(file) {
+// v3.20.17: tenta usar Web Worker para não bloquear UI. Fallback para main thread
+// se o worker falhar (CDN bloqueado, browser antigo, etc.).
+function parseFnacSalesExcel(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    // Tentar via Web Worker primeiro
+    if (typeof Worker !== 'undefined') {
+      try {
+        const worker = new Worker('/workers/fnacSalesWorker.js');
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          worker.postMessage({
+            type: 'parse',
+            payload: { arrayBuffer: e.target.result, filename: file.name },
+          }, [e.target.result]); // transferable → zero-copy
+        };
+        reader.onerror = () => { worker.terminate(); reject(reader.error); };
+        worker.onmessage = (ev) => {
+          const { type, result, error, ...rest } = ev.data;
+          if (type === 'progress') { onProgress && onProgress(rest); }
+          else if (type === 'done')  { worker.terminate(); resolve(result); }
+          else if (type === 'error') { worker.terminate(); reject(new Error(error)); }
+        };
+        worker.onerror = (err) => {
+          worker.terminate();
+          // Fallback transparente para main thread
+          parseFnacSalesExcelMainThread(file).then(resolve).catch(reject);
+        };
+        reader.readAsArrayBuffer(file);
+        return;
+      } catch (e) {
+        // Fallback se worker falhar a inicializar
+        parseFnacSalesExcelMainThread(file).then(resolve).catch(reject);
+        return;
+      }
+    }
+    parseFnacSalesExcelMainThread(file).then(resolve).catch(reject);
+  });
+}
+
+// Implementação main-thread (fallback ou primeira versão)
+function parseFnacSalesExcelMainThread(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -889,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.16';
-const APP_BUILD_DATE = '2026-05-25T15:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.17';
+const APP_BUILD_DATE = '2026-05-25T16:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -900,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.17', date: '2026-05-25', summary: 'Performance pesada (Fase 2 parcial). (A) Parser Excel FNAC (86k linhas) movido para Web Worker: a main thread já NÃO congela durante o upload. Barra de progresso real com mensagens ("A processar X de Y…") e percentagem. Worker carrega XLSX do CDN; fallback transparente para main thread em browsers sem suporte. (B) next.config.js: compiler.removeConsole em production → console.log strip dos bundles, mantendo error/warn. (C) (Fase 2 restante — code-splitting + virtualização — fica para próxima sessão por ser refactor mais invasivo.)' },
   { version: '3.20.16', date: '2026-05-25', summary: 'Quick wins + segurança (Fase 1+3 da auditoria). (A) Dead code: apagado app/CampaignPlatformanterior.jsx (10k linhas backup), duplicados /CampaignPlatform.jsx /layout.js /download no root; .gitignore corrigido. (B) Polling: refresh de campanhas/periods (30s) pausa quando document.hidden (tab em background) → poupa egress Supabase. Refresh imediato ao voltar à tab. (C) IDB cache: rows hidratadas via eager hydration agora são persistidas em IndexedDB → próximas sessões evitam re-fetch do cloud, HydrationGate desaparece quase instantaneamente. (D) Atalho ⌨ Help (Cmd+/ ou ?): novo HelpModal com lista de atalhos de teclado (navegação, listas, edição) e dica para Cmd+K. (E) Segurança: LEGACY_PASSWORD removido da source (era visível em DevTools). Agora lido de NEXT_PUBLIC_LEGACY_PASSWORD; sem env var = modo legacy desactivado, só Supabase autentica. (F) Migrations renomeadas para formato Supabase CLI standard (YYYYMMDDHHMMSS_*.sql) — supabase migration list já reconhece. (G) Novo .env.example + console.log na eager hydration só em dev.' },
   { version: '3.20.15', date: '2026-05-25', summary: 'HydrationGate — bloqueia a app no login até todas as rows das campanhas estarem carregadas da cloud. Aparece um overlay com ícone Database pulsante, barra de progresso (X de Y prontas) e botão "Continuar mesmo assim" após 8s caso demore muito. Aparece DEPOIS do ForcePasswordChangeModal e AdminViewPickerModal. Resultado: ao entrar em Alterações/Visão Geral logo a seguir ao login, todos os dados estão prontos.' },
   { version: '3.20.14', date: '2026-05-25', summary: 'Visão Geral: removida a secção "Artigos atribuídos por família" — dependia de hydration de campaign rows que não está sempre pronta ao abrir a app, ficava em branco até entrar numa campanha. Em Análise de Vendas → Top Famílias tem-se essa info quando os dados estão hidratados.' },
@@ -6568,6 +6609,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const [loading, setLoading]   = useState(true);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
+  const [importProgress, setImportProgress] = useState(null); // v3.20.17: { stage, message, total, current }
   const [tab, setTab] = useStoredState('sales.tab', 'overview');
   const [from, setFrom] = useState('');
   const [to, setTo]     = useState('');
@@ -6614,8 +6656,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   const handleFile = async (file) => {
     setImporting(true);
     setImportError(null);
+    setImportProgress({ stage: 'read', message: 'A ler ficheiro…' });
     try {
-      const snap = await parseFnacSalesExcel(file);
+      const snap = await parseFnacSalesExcel(file, (p) => setImportProgress(p));
       await idbPutSalesSnapshot(snap);
       setSnapshot(snap);
       setFrom(snap.dateFrom || '');
@@ -6626,6 +6669,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       setImportError(err.message || String(err));
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
   };
 
@@ -7866,12 +7910,23 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           subtitle="Esperamos o formato 'Vendas detalhadas com margem' com colunas EAN, descrição, qtd, PVP S/IVA, PMP, datas e famílias. Os dados ficam em IndexedDB local."
         />
         <DropZone
-          label={importing ? 'A processar…' : 'Arrasta o Excel de vendas'}
-          hint="aceita .xlsx — 86k+ linhas processadas localmente em ~3-5s"
+          label={importing ? (importProgress?.message || 'A processar…') : 'Arrasta o Excel de vendas'}
+          hint="aceita .xlsx — 86k+ linhas processadas em background (não bloqueia a UI)"
           accept=".xlsx,.xls"
           onFile={handleFile}
           icon={BarChart3}
         />
+        {importing && importProgress?.total > 0 && (
+          <div style={{ marginTop: 16, padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: T.inkSoft, marginBottom: 8 }}>
+              <span>{importProgress.message}</span>
+              <span style={{ fontVariantNumeric: 'tabular-nums' }}>{Math.round((importProgress.current / importProgress.total) * 100)}%</span>
+            </div>
+            <div style={{ height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${(importProgress.current / importProgress.total) * 100}%`, background: T.accent, transition: 'width 0.2s' }} />
+            </div>
+          </div>
+        )}
         {importError && (
           <div style={{ marginTop: 16, padding: 14, background: T.red + '15', border: `1px solid ${T.red}40`, borderRadius: 6, fontSize: 12, color: T.red }}>
             Erro: {importError}
