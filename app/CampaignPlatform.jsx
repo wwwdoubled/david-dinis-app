@@ -4023,8 +4023,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   }, [uiConfig]);
 
   const notifications = useMemo(
-    () => computeNotifications(periods, posters, dismissals, warnDays),
-    [periods, posters, dismissals, warnDays]
+    () => computeNotifications(filteredPeriods, posters, dismissals, warnDays),
+    [filteredPeriods, posters, dismissals, warnDays]
   );
 
   // ─── Email queue: when notifications are computed, create queue entries
