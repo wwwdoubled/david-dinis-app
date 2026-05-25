@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.17';
-const APP_BUILD_DATE = '2026-05-25T16:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.18';
+const APP_BUILD_DATE = '2026-05-25T16:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.18', date: '2026-05-25', summary: 'PWA (Fase 4 parcial) — app instalável. (A) Novo public/manifest.json com nome, ícones, theme_color azul (#5B9BD5), display=standalone e shortcuts para Visão Geral/Campanhas/Stock. (B) Novo public/sw.js — service worker simples: cache-first para assets estáticos (Next.js static, fontes, imagens), network-first com fallback para cache em tudo o resto. Supabase API bypass (sempre cloud). (C) layout.js: link manifest, theme-color meta, apple-touch-icon, registo automático do SW no load. Resultado: chrome/edge/safari móvel mostram prompt "Add to Home Screen"; app abre em standalone mode sem barras do browser; offline funciona para navegação básica (IndexedDB já tem os dados). Ícones (icon-192.png / icon-512.png) precisam de ser criados manualmente no public/.' },
   { version: '3.20.17', date: '2026-05-25', summary: 'Performance pesada (Fase 2 parcial). (A) Parser Excel FNAC (86k linhas) movido para Web Worker: a main thread já NÃO congela durante o upload. Barra de progresso real com mensagens ("A processar X de Y…") e percentagem. Worker carrega XLSX do CDN; fallback transparente para main thread em browsers sem suporte. (B) next.config.js: compiler.removeConsole em production → console.log strip dos bundles, mantendo error/warn. (C) (Fase 2 restante — code-splitting + virtualização — fica para próxima sessão por ser refactor mais invasivo.)' },
   { version: '3.20.16', date: '2026-05-25', summary: 'Quick wins + segurança (Fase 1+3 da auditoria). (A) Dead code: apagado app/CampaignPlatformanterior.jsx (10k linhas backup), duplicados /CampaignPlatform.jsx /layout.js /download no root; .gitignore corrigido. (B) Polling: refresh de campanhas/periods (30s) pausa quando document.hidden (tab em background) → poupa egress Supabase. Refresh imediato ao voltar à tab. (C) IDB cache: rows hidratadas via eager hydration agora são persistidas em IndexedDB → próximas sessões evitam re-fetch do cloud, HydrationGate desaparece quase instantaneamente. (D) Atalho ⌨ Help (Cmd+/ ou ?): novo HelpModal com lista de atalhos de teclado (navegação, listas, edição) e dica para Cmd+K. (E) Segurança: LEGACY_PASSWORD removido da source (era visível em DevTools). Agora lido de NEXT_PUBLIC_LEGACY_PASSWORD; sem env var = modo legacy desactivado, só Supabase autentica. (F) Migrations renomeadas para formato Supabase CLI standard (YYYYMMDDHHMMSS_*.sql) — supabase migration list já reconhece. (G) Novo .env.example + console.log na eager hydration só em dev.' },
   { version: '3.20.15', date: '2026-05-25', summary: 'HydrationGate — bloqueia a app no login até todas as rows das campanhas estarem carregadas da cloud. Aparece um overlay com ícone Database pulsante, barra de progresso (X de Y prontas) e botão "Continuar mesmo assim" após 8s caso demore muito. Aparece DEPOIS do ForcePasswordChangeModal e AdminViewPickerModal. Resultado: ao entrar em Alterações/Visão Geral logo a seguir ao login, todos os dados estão prontos.' },

@@ -1,0 +1,30 @@
+{
+  "name": "Gestão de Campanhas — David Dinis",
+  "short_name": "Campanhas",
+  "description": "Gestão de campanhas, stock e análise de vendas FNAC.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fdfbf7",
+  "theme_color": "#5B9BD5",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    { "name": "Visão Geral", "url": "/?view=dashboard" },
+    { "name": "Campanhas", "url": "/?view=campaigns" },
+    { "name": "Stock", "url": "/?view=stock" }
+  ]
+}
