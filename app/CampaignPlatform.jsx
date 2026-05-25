@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.18';
-const APP_BUILD_DATE = '2026-05-25T16:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.19';
+const APP_BUILD_DATE = '2026-05-25T17:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.19', date: '2026-05-25', summary: 'Toast notifications (Fase 1.3). (A) Sistema de toasts não-bloqueante no canto inferior direito — desliza, desaparece sozinho (3.5s info/success, 6s error), botão × para fechar manualmente. Kinds: info (azul), success (verde), error (vermelho), warn (laranja). aria-live=polite para screen readers. (B) window.alert é interceptado e mostra toast automaticamente — todas as ~90 chamadas existentes a alert() pela app passam a ser toasts elegantes sem bloquear a thread principal. Detecção heurística de erro vs info pelo texto. (C) Pode ser usado directamente via showToast(msg, { kind }) onde precisarmos de tipos explícitos.' },
   { version: '3.20.18', date: '2026-05-25', summary: 'PWA (Fase 4 parcial) — app instalável. (A) Novo public/manifest.json com nome, ícones, theme_color azul (#5B9BD5), display=standalone e shortcuts para Visão Geral/Campanhas/Stock. (B) Novo public/sw.js — service worker simples: cache-first para assets estáticos (Next.js static, fontes, imagens), network-first com fallback para cache em tudo o resto. Supabase API bypass (sempre cloud). (C) layout.js: link manifest, theme-color meta, apple-touch-icon, registo automático do SW no load. Resultado: chrome/edge/safari móvel mostram prompt "Add to Home Screen"; app abre em standalone mode sem barras do browser; offline funciona para navegação básica (IndexedDB já tem os dados). Ícones (icon-192.png / icon-512.png) precisam de ser criados manualmente no public/.' },
   { version: '3.20.17', date: '2026-05-25', summary: 'Performance pesada (Fase 2 parcial). (A) Parser Excel FNAC (86k linhas) movido para Web Worker: a main thread já NÃO congela durante o upload. Barra de progresso real com mensagens ("A processar X de Y…") e percentagem. Worker carrega XLSX do CDN; fallback transparente para main thread em browsers sem suporte. (B) next.config.js: compiler.removeConsole em production → console.log strip dos bundles, mantendo error/warn. (C) (Fase 2 restante — code-splitting + virtualização — fica para próxima sessão por ser refactor mais invasivo.)' },
   { version: '3.20.16', date: '2026-05-25', summary: 'Quick wins + segurança (Fase 1+3 da auditoria). (A) Dead code: apagado app/CampaignPlatformanterior.jsx (10k linhas backup), duplicados /CampaignPlatform.jsx /layout.js /download no root; .gitignore corrigido. (B) Polling: refresh de campanhas/periods (30s) pausa quando document.hidden (tab em background) → poupa egress Supabase. Refresh imediato ao voltar à tab. (C) IDB cache: rows hidratadas via eager hydration agora são persistidas em IndexedDB → próximas sessões evitam re-fetch do cloud, HydrationGate desaparece quase instantaneamente. (D) Atalho ⌨ Help (Cmd+/ ou ?): novo HelpModal com lista de atalhos de teclado (navegação, listas, edição) e dica para Cmd+K. (E) Segurança: LEGACY_PASSWORD removido da source (era visível em DevTools). Agora lido de NEXT_PUBLIC_LEGACY_PASSWORD; sem env var = modo legacy desactivado, só Supabase autentica. (F) Migrations renomeadas para formato Supabase CLI standard (YYYYMMDDHHMMSS_*.sql) — supabase migration list já reconhece. (G) Novo .env.example + console.log na eager hydration só em dev.' },
@@ -4370,6 +4371,34 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // v3.20.16: modal de ajuda com atalhos de teclado (Cmd+/)
   const [helpOpen, setHelpOpen] = useState(false);
 
+  // v3.20.19: sistema de toasts não-bloqueante (substitui alert())
+  const [toasts, setToasts] = useState([]);
+  const toastIdRef = useRef(0);
+  const showToast = useCallback((message, opts = {}) => {
+    const id = ++toastIdRef.current;
+    const kind = opts.kind || 'info'; // 'info' | 'success' | 'error' | 'warn'
+    const duration = opts.duration ?? (kind === 'error' ? 6000 : 3500);
+    setToasts(prev => [...prev, { id, message, kind }]);
+    if (duration > 0) {
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
+    }
+    return id;
+  }, []);
+  const dismissToast = useCallback((id) => setToasts(prev => prev.filter(t => t.id !== id)), []);
+
+  // Override window.alert para usar o sistema de toasts (não-bloqueante)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const originalAlert = window.alert;
+    window.alert = (msg) => {
+      const text = String(msg || '');
+      // Heurística: detectar erro pela palavra-chave
+      const isError = /erro|falha|não foi possível|inválido|aviso/i.test(text);
+      showToast(text, { kind: isError ? 'error' : 'info' });
+    };
+    return () => { window.alert = originalAlert; };
+  }, [showToast]);
+
   // Atalhos globais de teclado (v3.12.0)
   useEffect(() => {
     const onKey = (e) => {
@@ -5278,6 +5307,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
       {/* v3.20.16: Modal de ajuda — atalhos de teclado (Cmd+/ ou ?) */}
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+
+      {/* v3.20.19: Toast container — substituto não-bloqueante para alert() */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
       {/* Pesquisa global (Ctrl+K / Cmd+K / "/") — v3.12.0 */}
       {globalSearchOpen && (
@@ -22444,6 +22476,53 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.20.19: ToastContainer — toasts não-bloqueantes no canto inferior direito.
+// Substitui o window.alert() por mensagens deslizantes que desaparecem sozinhas.
+function ToastContainer({ toasts, onDismiss }) {
+  if (!toasts.length) return null;
+  return (
+    <div style={{
+      position: 'fixed', bottom: 20, right: 20, zIndex: 10001,
+      display: 'flex', flexDirection: 'column', gap: 8, pointerEvents: 'none',
+    }} aria-live="polite" aria-atomic="false">
+      {toasts.map(t => {
+        const c = t.kind === 'error' ? T.red
+                : t.kind === 'success' ? T.green
+                : t.kind === 'warn' ? T.orange
+                : T.accent;
+        return (
+          <div key={t.id}
+            role="status"
+            style={{
+              pointerEvents: 'auto',
+              minWidth: 260, maxWidth: 420,
+              padding: '12px 14px',
+              background: T.ink, color: T.bg,
+              borderRadius: 8, borderLeft: `4px solid ${c}`,
+              boxShadow: '0 12px 30px -10px rgba(0,0,0,0.4)',
+              fontSize: 13, lineHeight: 1.45,
+              display: 'flex', alignItems: 'flex-start', gap: 10,
+              animation: 'fadeUp 0.25s ease-out',
+            }}>
+            <div style={{ flex: 1, whiteSpace: 'pre-wrap' }}>{t.message}</div>
+            <button
+              onClick={() => onDismiss(t.id)}
+              aria-label="Fechar notificação"
+              style={{
+                background: 'transparent', color: T.bg, opacity: 0.6,
+                border: 'none', cursor: 'pointer', padding: 0, fontSize: 16,
+                lineHeight: 1, marginLeft: 4,
+              }}
+              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+              onMouseLeave={e => e.currentTarget.style.opacity = '0.6'}
+            >×</button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // v3.20.16: HelpModal — atalhos de teclado da app (Cmd+/ ou ? para abrir)
 function HelpModal({ onClose }) {
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
