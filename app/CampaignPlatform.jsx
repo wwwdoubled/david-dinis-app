@@ -13468,8 +13468,8 @@ const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMu
 
   return (
     <tr style={{
-      background: isSelected ? `${T.accent}10` : (zebra ? T.bg : 'transparent'),
-      borderLeft: isSelected ? `3px solid ${T.accent}` : (p.isStar ? `3px solid ${T.yellow}` : '3px solid transparent'),
+      background: isSelected ? `${T.accent}10` : (p.assigned ? `${T.green}08` : (zebra ? T.bg : 'transparent')),
+      borderLeft: isSelected ? `3px solid ${T.accent}` : (p.isStar ? `3px solid ${T.yellow}` : (p.assigned ? `3px solid ${T.green}` : '3px solid transparent')),
       borderBottom: `1px solid ${T.lineSoft}`,
     }}>
       <td style={{ ...ltdStyle, textAlign: 'center', padding: '4px' }}>
@@ -13495,6 +13495,23 @@ const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMu
         <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.description}>
           {p.description || '—'}
         </div>
+        {p.assigned && p.zones.length > 0 && (
+          <div style={{ marginTop: 3, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {p.zones.slice(0, 3).map((z, zi) => (
+              <span key={zi} title={`${z.floorName} → ${z.zoneName}`} style={{
+                fontSize: 9, padding: '1px 6px', background: `${T.green}18`,
+                color: T.green, borderRadius: 3, fontWeight: 600,
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                border: `1px solid ${T.green}40`,
+              }}>
+                <MapPin size={9} />{z.zoneName}
+              </span>
+            ))}
+            {p.zones.length > 3 && (
+              <span style={{ fontSize: 9, color: T.green, fontWeight: 600 }}>+{p.zones.length - 3}</span>
+            )}
+          </div>
+        )}
       </td>
       {isMulti && (
         <td style={ltdStyle}>
@@ -14969,6 +14986,13 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   const [highlightEan, setHighlightEan] = useState(null);
   const highlightRef = useRef(null);
 
+  // v3.20.9: zoneIndex (união de floors de todos os periods) → mostrar
+  // visualmente se cada produto já está destacado em alguma zona.
+  const zoneIndex = useMemo(() => {
+    const allFloors = (periods || []).flatMap(p => Array.isArray(p.floors) ? p.floors : []);
+    return buildZoneIndex(allFloors);
+  }, [periods]);
+
   useEffect(() => {
     try {
       const wantSearch = sessionStorage.getItem('changes.searchEan');
@@ -15481,6 +15505,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
               stockRowsPO3={stockRowsPO3}
               highlightEan={highlightEan}
               highlightRef={highlightRef}
+              zoneIndex={zoneIndex}
             />
           )}
         </>
@@ -15489,7 +15514,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
   );
 }
 
-function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef }) {
+function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterAveiro, setFilterAveiro, filterFamily, setFilterFamily, allFamilies, totalDiffProducts = 0, search, setSearch, filteredItems, dayFilter, setDayFilter, changeDateOptions, onClear, onExport, stockRowsPO3, highlightEan, highlightRef, zoneIndex }) {
   if (!diff) return null;
   const totalChanges = diff.added.length + diff.removed.length + diff.changed.length;
 
@@ -15653,6 +15678,7 @@ function ChangesReport({ snapshot, compareWith, diff, filter, setFilter, filterA
                       item={p}
                       rowRef={isHL ? highlightRef : null}
                       isHighlighted={!!isHL}
+                      zones={zoneIndex?.get(normalizeEAN(p.ean)) || []}
                     />
                   );
                 })}
@@ -15698,7 +15724,8 @@ function SummaryCard({ label, value, color, active, dimmed, onClick }) {
   );
 }
 
-const ChangeRow = React.memo(function ChangeRow({ item, rowRef, isHighlighted }) {
+const ChangeRow = React.memo(function ChangeRow({ item, rowRef, isHighlighted, zones = [] }) {
+  const isAssigned = zones.length > 0;
   const kindStyles = {
     added: { bg: T.green, label: 'NOVO', icon: Plus },
     removed: { bg: T.red, label: 'REMOVIDO', icon: Minus },
@@ -15711,7 +15738,9 @@ const ChangeRow = React.memo(function ChangeRow({ item, rowRef, isHighlighted })
   // v3.15.4: deep link visual — box-shadow accent durante 3s.
   // Aplicado ao próprio <tr> via outline (box-shadow tem comportamento
   // inconsistente em algumas browsers em <tr>) + background subtil.
-  const hlBg = isHighlighted ? `${T.accent}15` : 'transparent';
+  const hlBg = isHighlighted
+    ? `${T.accent}15`
+    : (isAssigned ? `${T.green}08` : 'transparent');
   const hlOutline = isHighlighted ? `2px solid ${T.accent}` : 'none';
 
   return (
@@ -15757,6 +15786,23 @@ const ChangeRow = React.memo(function ChangeRow({ item, rowRef, isHighlighted })
         <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 380 }} title={item.description}>
           {item.description || '—'}
         </div>
+        {isAssigned && (
+          <div style={{ marginTop: 3, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+            {zones.slice(0, 3).map((z, zi) => (
+              <span key={zi} title={`${z.floorName} → ${z.zoneName}`} style={{
+                fontSize: 9, padding: '1px 6px', background: `${T.green}18`,
+                color: T.green, borderRadius: 3, fontWeight: 600,
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                border: `1px solid ${T.green}40`,
+              }}>
+                <MapPin size={9} />{z.zoneName}
+              </span>
+            ))}
+            {zones.length > 3 && (
+              <span style={{ fontSize: 9, color: T.green, fontWeight: 600 }}>+{zones.length - 3}</span>
+            )}
+          </div>
+        )}
       </td>
       <td style={{ ...ltdStyle, textAlign: 'right' }}>
         {item.kind === 'changed' ? (
