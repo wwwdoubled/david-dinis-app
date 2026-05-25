@@ -889,8 +889,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.13';
-const APP_BUILD_DATE = '2026-05-25T13:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.14';
+const APP_BUILD_DATE = '2026-05-25T13:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -900,6 +900,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.14', date: '2026-05-25', summary: 'Visão Geral: removida a secção "Artigos atribuídos por família" — dependia de hydration de campaign rows que não está sempre pronta ao abrir a app, ficava em branco até entrar numa campanha. Em Análise de Vendas → Top Famílias tem-se essa info quando os dados estão hidratados.' },
   { version: '3.20.13', date: '2026-05-25', summary: 'Picker de departamento em cada login + diferenciação visual reforçada. (A) Admin escolhe vista (PTS / PES) em CADA login (não só no primeiro) — adminViewDepartment deixou de persistir em localStorage, reset detectado via user.id change. Refresh da página também força nova escolha. (B) Sidebar ganha badge GRANDE no topo com cor sólida do dept (azul=PTS, roxo=PES) + nome completo + ícone de seta — clicável para alternar instantaneamente, com hover lift. Borda esquerda 4px na cor do dept (sempre visível). (C) Main content ganha borda superior 3px na cor do dept. (D) Switcher pequeno antigo da secção do user removido (redundante).' },
   { version: '3.20.12', date: '2026-05-25', summary: 'Eager hydration + breakdown por família + Análise de Vendas no sidebar. (A) Eager row hydration agora também hidrata campanhas com rows vazios (não só _needsRows), apanhando casos onde a flag foi limpa mas rows nunca carregaram. Novo flag rowsHydrated propagado; ChangesView mostra banner "A carregar produtos das campanhas…" enquanto false. (B) Visão Geral: nova secção "Artigos atribuídos por família" — top 8 famílias com barras horizontais, total e %. Cruza EANs das zonas com Família 1 das campanhas via detectColumns. (C) Análise de Vendas volta ao sidebar (admin-only, hideFor:[PES]); removida da AdminView. (D) Atalho admin para Análise de Vendas no Dashboard.' },
   { version: '3.20.11', date: '2026-05-25', summary: 'Alterações: auto-pick activas + Só destacados + Refrescar. (A) autoPickPeriods() prefere campanhas com periodStatus===active para o "Novo"; ignora hidden. Auto-reset quando IDs guardados já não existem (campanha apagada/oculta) — vista nunca aparece em branco. (B) Toggle "Só destacados" (default ON) filtra diff a artigos presentes no zoneIndex (inseridos na blueprint). (C) Botão Refrescar (ícone RotateCcw) força re-pick manual.' },
@@ -5693,39 +5694,7 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
   // v3.20.8: ignorar periods 'hidden' (soft-delete) — admin gere-os em CampaignsView
   const periods = useMemo(() => (periodsAll || []).filter(p => !p.hidden), [periodsAll]);
 
-  // v3.20.12: artigos atribuídos por família 1
-  // Cruza EANs das zonas com headers de família das campanhas (col detection)
-  const familyBreakdown = useMemo(() => {
-    // Build EAN → family lookup a partir das campanhas
-    const eanFam = new Map();
-    (campaigns || []).forEach(camp => {
-      const cols = detectColumns(camp.headers || []);
-      if (!cols.ean || !cols.family) return;
-      (camp.rows || []).forEach(r => {
-        const k = normalizeEAN(r[cols.ean]);
-        if (!k) return;
-        const fam = String(r[cols.family] || '').trim();
-        if (fam && !eanFam.has(k)) eanFam.set(k, fam);
-      });
-    });
-    // Walk periods → zones → slots e conta EANs únicos por família
-    const counts = new Map();
-    const seen = new Set();
-    (periods || []).forEach(p => {
-      (p.floors || []).forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
-        const k = normalizeEAN(s.ref);
-        if (!k || seen.has(k)) return;
-        seen.add(k);
-        const fam = eanFam.get(k) || s.family || '— sem família —';
-        counts.set(fam, (counts.get(fam) || 0) + 1);
-      })));
-    });
-    const arr = Array.from(counts.entries())
-      .map(([family, count]) => ({ family, count }))
-      .sort((a, b) => b.count - a.count);
-    const total = arr.reduce((s, x) => s + x.count, 0);
-    return { items: arr, total };
-  }, [campaigns, periods]);
+  // v3.20.14: familyBreakdown removido (secção tirada da Visão Geral)
   // Plan ownership lives on PERIODS. Count ALL slots in every period's floors,
   // then deduplicate by EAN so the same product attributed to two zones
   // doesn't get counted twice.
@@ -5964,40 +5933,11 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
         <ActiveCampaignsSummary periods={periods} posters={posters} setView={setView} />
       )}
 
-      {/* v3.20.12: Breakdown por família (artigos atribuídos) — só faz sentido se há plano */}
-      {familyBreakdown.total > 0 && (
-        <div style={{ marginTop: 24, padding: 20, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-            <div>
-              <div style={{ fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Artigos atribuídos por família</div>
-              <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 4 }}>{familyBreakdown.total.toLocaleString('pt-PT')} EANs únicos em {familyBreakdown.items.length} famílias</div>
-            </div>
-            <button onClick={() => setView('campaigns')} style={{ padding: '6px 12px', background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 11, color: T.inkSoft, cursor: 'pointer' }}>Ver campanhas →</button>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {familyBreakdown.items.slice(0, 8).map(f => {
-              const pct = familyBreakdown.total > 0 ? (f.count / familyBreakdown.total * 100) : 0;
-              const maxBar = familyBreakdown.items[0]?.count || 1;
-              const barPct = (f.count / maxBar) * 100;
-              return (
-                <div key={f.family} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 50px', gap: 12, alignItems: 'center', fontSize: 12 }}>
-                  <div>
-                    <div style={{ marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.family}>{f.family}</div>
-                    <div style={{ height: 4, background: T.lineSoft, borderRadius: 2 }}>
-                      <div style={{ height: '100%', width: `${barPct}%`, background: T.accent, borderRadius: 2 }} />
-                    </div>
-                  </div>
-                  <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>{f.count}</div>
-                  <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: T.inkMute, fontSize: 11 }}>{pct.toFixed(1)}%</div>
-                </div>
-              );
-            })}
-            {familyBreakdown.items.length > 8 && (
-              <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>+{familyBreakdown.items.length - 8} famílias menores</div>
-            )}
-          </div>
-        </div>
-      )}
+      {/* v3.20.14: Breakdown por família removido da Visão Geral
+          (dependia de hydration de campaign rows que não está sempre pronta
+          ao abrir a app; ficava em branco sem ter entrado primeiro numa
+          campanha). Em Análise de Vendas → Top Famílias tem-se essa info
+          quando os dados estão hidratados. */}
 
       {/* v3.20.12: Atalho admin para Análise de Vendas */}
       {isAdmin && (
