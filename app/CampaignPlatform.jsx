@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.20';
-const APP_BUILD_DATE = '2026-05-25T17:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.21';
+const APP_BUILD_DATE = '2026-05-25T18:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.21', date: '2026-05-25', summary: 'Export metadata da cloud. Admin → Cloud → novo botão "Exportar metadata" descarrega ficheiro JSON timestamped (dd-backup-YYYY-MM-DD-HH-MM-SS.json) com lista de todos os periods, campanhas (sem rows para ficar leve) e stock snapshots. Útil para backups locais de configuração e auditoria.' },
   { version: '3.20.20', date: '2026-05-25', summary: 'Error boundary + acessibilidade. (A) AppErrorBoundary global em page.js — se algum componente crashar (excepção React), o user vê fallback amigável com botão Recarregar em vez da página em branco. Detalhes técnicos colapsáveis para diagnóstico. (B) prefers-reduced-motion respeitado — utilizadores com preferência por menos movimento desligam todas as animações automaticamente.' },
   { version: '3.20.19', date: '2026-05-25', summary: 'Toast notifications (Fase 1.3). (A) Sistema de toasts não-bloqueante no canto inferior direito — desliza, desaparece sozinho (3.5s info/success, 6s error), botão × para fechar manualmente. Kinds: info (azul), success (verde), error (vermelho), warn (laranja). aria-live=polite para screen readers. (B) window.alert é interceptado e mostra toast automaticamente — todas as ~90 chamadas existentes a alert() pela app passam a ser toasts elegantes sem bloquear a thread principal. Detecção heurística de erro vs info pelo texto. (C) Pode ser usado directamente via showToast(msg, { kind }) onde precisarmos de tipos explícitos.' },
   { version: '3.20.18', date: '2026-05-25', summary: 'PWA (Fase 4 parcial) — app instalável. (A) Novo public/manifest.json com nome, ícones, theme_color azul (#5B9BD5), display=standalone e shortcuts para Visão Geral/Campanhas/Stock. (B) Novo public/sw.js — service worker simples: cache-first para assets estáticos (Next.js static, fontes, imagens), network-first com fallback para cache em tudo o resto. Supabase API bypass (sempre cloud). (C) layout.js: link manifest, theme-color meta, apple-touch-icon, registo automático do SW no load. Resultado: chrome/edge/safari móvel mostram prompt "Add to Home Screen"; app abre em standalone mode sem barras do browser; offline funciona para navegação básica (IndexedDB já tem os dados). Ícones (icon-192.png / icon-512.png) precisam de ser criados manualmente no public/.' },
@@ -21806,8 +21807,8 @@ function AdminCloudTab() {
 
   return (
     <div>
-      {/* Section switcher */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
+      {/* Section switcher + Export */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap', alignItems: 'center' }}>
         {[
           { id: 'storage', label: 'Espaço', icon: Database },
           { id: 'campaigns', label: `Campanhas (${campaigns?.length ?? 0})`, icon: Layers },
@@ -21822,6 +21823,37 @@ function AdminCloudTab() {
             fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
           }}><Icon size={13} />{label}</button>
         ))}
+        <div style={{ marginLeft: 'auto' }}>
+          <button
+            onClick={() => {
+              try {
+                const exportPayload = {
+                  exported_at: new Date().toISOString(),
+                  app_version: APP_VERSION,
+                  periods: periods || [],
+                  campaigns: (campaigns || []).map(c => ({ ...c, rows: undefined, rows_compressed: undefined })),
+                  stock_snapshots: (snapshots || []).map(s => ({ ...s, rows: undefined, rows_compressed: undefined })),
+                };
+                const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `dd-backup-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                alert(`Backup exportado: ${exportPayload.periods.length} periods · ${exportPayload.campaigns.length} campanhas · ${exportPayload.stock_snapshots.length} snapshots`);
+              } catch (e) {
+                alert('Erro ao exportar: ' + e.message);
+              }
+            }}
+            title="Exportar metadata de periods, campanhas e snapshots para JSON (sem rows comprimidas para manter o ficheiro leve)"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+              borderRadius: 6, border: `1px solid ${T.accent}`,
+              background: T.bgEl, color: T.accent,
+              fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
+            }}><Download size={12} /> Exportar metadata</button>
+        </div>
       </div>
 
       {/* Storage — espaço utilizado por tabela */}
