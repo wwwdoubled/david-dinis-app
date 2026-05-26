@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.27';
-const APP_BUILD_DATE = '2026-05-25T21:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.28';
+const APP_BUILD_DATE = '2026-05-25T21:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.28', date: '2026-05-25', summary: 'Focus ring acessível em todos os elementos interactivos. Antes o outline só aparecia parcialmente; agora qualquer button/input/select/textarea/[role=button] tem outline 2px solid T.accent com offset quando recebe foco via teclado (focus-visible). Mouse clicks não disparam o ring (focus-visible discrimina). Beneficia screen readers e navegação por teclado.' },
   { version: '3.20.27', date: '2026-05-25', summary: '"O que há de novo" — modal que aparece automaticamente quando carregas a app pela primeira vez depois de um update. Mostra as 5 entradas mais recentes do changelog (a primeira destacada com gradient accent). localStorage rastreia última versão vista — só dispara em updates reais, não em novos logins. Não chateia novos utilizadores (só aparece se já viste pelo menos uma versão anterior). aria-modal/role=dialog para acessibilidade.' },
   { version: '3.20.26', date: '2026-05-25', summary: 'FIX CRÍTICO: rows desapareciam ~30s depois de qualquer edição. Causa: mergeCampaigns no poll 30s detectava cloud.updated_at > local.updated_at (porque local não absorvia o updated_at novo após upsert) e assumia "outro device editou" — wipava as rows locais (.rows=[], _needsRows=true). Fix 1: stale-while-revalidate em restoreRows — sempre preserva rows locais, só marca _needsRows=true para refetch silencioso. User continua a ver dados enquanto lazy hydration corre. Fix 2: pushCampaignsToCloud absorve res.data.updated_at após cada upsert → evita falsos positivos de "cloud é mais novo" no próximo poll.' },
   { version: '3.20.25', date: '2026-05-25', summary: 'Top Famílias do Plano: usa slot.family primeiro. Antes mostrava "Sem família 28 · 100%" quando os campaign.rows ainda não estavam hidratados — agora prefere slot.family (stamped no auto-fill ou edição manual). Se slot não tem family E rows não estão prontos, mostra empty state explicativo "A carregar dados das campanhas… abre uma campanha para sincronizar" em vez do "Sem família 100%" enganador. Também exibe contagem de slots "por classificar" no footer quando há matches parciais.' },
@@ -4758,6 +4759,16 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
         @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
         .fade-up { animation: fadeUp 0.4s ease-out backwards; }
         @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
+        /* v3.20.28: focus ring acessível em todos os elementos interactivos
+           — antes só estava no Tab path. Agora qualquer browser/teclado tem
+           outline visível e consistente. */
+        button:focus-visible, a:focus-visible, [role="button"]:focus-visible,
+        input:focus-visible, select:focus-visible, textarea:focus-visible {
+          outline: 2px solid ${T.accent};
+          outline-offset: 2px;
+          border-radius: 4px;
+        }
+        button:not(:focus-visible) { outline: none; }
         /* v3.20.20: respeitar prefers-reduced-motion */
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after {
