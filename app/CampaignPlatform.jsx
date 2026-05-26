@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.3';
-const APP_BUILD_DATE = '2026-05-26T00:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.4';
+const APP_BUILD_DATE = '2026-05-26T00:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.4', date: '2026-05-26', summary: 'Build fix: kbdStyle estava redefinida (já existia como objecto no GlobalSearch desde v3.12.0; v3.20.29 introduziu uma 2ª como função no OnboardingTour). Vercel rejeitava o build com SyntaxError "kbdStyle redefined". Renomeado o do OnboardingTour para kbdInlineStyle. Sem mudança funcional — todos os commits v3.20.29→3.21.3 estavam em código não-buildado em prod.' },
   { version: '3.21.3', date: '2026-05-26', summary: 'Fix: maintenance mode tinha botão Guardar muito acima na página (depois da menu visibility), e os utilizadores não percebiam que precisavam de scroll de volta. Adicionado botão de save INLINE dentro da própria secção de manutenção — laranja quando o toggle está ON (deixa óbvio o que vai acontecer) e cinza escuro quando OFF. Mesmo handleSave que inclui maintenance no payload. Mensagem "Não te esqueças" removida porque já não é necessária.' },
   { version: '3.21.2', date: '2026-05-25', summary: 'Multi-loja: app replicável para várias lojas com estruturas próprias. Migration: nova tabela "stores" (code, name, address, city, country, active, notes, settings) + helper my_store_id(). Adicionada FK store_id às tabelas user_profiles, campaigns, periods, stock_snapshots, novidades, devolucoes, protection_plans, store_floors. Backfill: tudo o que existe → loja "FNAC Aveiro" (seed AVR). Frontend: state stores + currentStoreId. Sidebar tem selector de loja (admin: dropdown; user: label fixo). filteredCampaigns e filteredPeriods filtram por loja. Nova tab Admin → "Lojas" com CRUD completo (código, nome, endereço, cidade, país, notas, active toggle), contagem por loja (users/campanhas/períodos), guia de fluxo "como adicionar nova loja". Periods criados ganham store_id automaticamente. cloudUpsertPeriod/Campaign aceitam opts.store_id.' },
   { version: '3.21.1', date: '2026-05-25', summary: 'Admin power tools (Fase B parcial). (A) Feature flags: nova tabela feature_flags com 8 seeds (flyer_editor, pdf_editor, inventory, credentials, pps, sales, notes, calendar). Sidebar filtra items quando flag=false. AdminConfigTab → painel "Feature flags" com toggle por flag + descrição + badge ACTIVO/DESLIGADO. logActivity em cada toggle. (B) Audit log export CSV em AdminActivityTab — botão "CSV (N)" exporta entradas filtradas com BOM UTF-8, separador ; (compatível Excel PT). (C) Nova tab "Sistema" em Admin com health dashboard: latência Supabase, status service worker, uso IndexedDB / quota, app version, totais por tabela (campanhas, periods, snapshots, users, activities, emails). Diagnóstico inline com hints.' },
@@ -23252,9 +23253,9 @@ function OnboardingTour({ isAdmin, userDepartment, onClose }) {
       title: 'Pesquisa global e atalhos',
       body: (
         <>
-          Carrega <kbd style={kbdStyle()}>⌘K</kbd> ou <kbd style={kbdStyle()}>/</kbd> em qualquer altura
+          Carrega <kbd style={kbdInlineStyle()}>⌘K</kbd> ou <kbd style={kbdInlineStyle()}>/</kbd> em qualquer altura
           para procurar períodos, campanhas, produtos por EAN, ou ir directo a uma vista.
-          Carrega <kbd style={kbdStyle()}>?</kbd> para ver todos os atalhos.
+          Carrega <kbd style={kbdInlineStyle()}>?</kbd> para ver todos os atalhos.
         </>
       ),
     },
@@ -23317,7 +23318,7 @@ function OnboardingTour({ isAdmin, userDepartment, onClose }) {
     </div>
   );
 }
-const kbdStyle = () => ({
+const kbdInlineStyle = () => ({
   padding: '2px 7px', background: T.bg, border: `1px solid ${T.line}`,
   borderRadius: 4, fontSize: 11, fontFamily: 'Geist Mono, monospace',
 });
