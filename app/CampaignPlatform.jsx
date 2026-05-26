@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.1';
-const APP_BUILD_DATE = '2026-05-25T23:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.2';
+const APP_BUILD_DATE = '2026-05-25T23:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.2', date: '2026-05-25', summary: 'Multi-loja: app replicável para várias lojas com estruturas próprias. Migration: nova tabela "stores" (code, name, address, city, country, active, notes, settings) + helper my_store_id(). Adicionada FK store_id às tabelas user_profiles, campaigns, periods, stock_snapshots, novidades, devolucoes, protection_plans, store_floors. Backfill: tudo o que existe → loja "FNAC Aveiro" (seed AVR). Frontend: state stores + currentStoreId. Sidebar tem selector de loja (admin: dropdown; user: label fixo). filteredCampaigns e filteredPeriods filtram por loja. Nova tab Admin → "Lojas" com CRUD completo (código, nome, endereço, cidade, país, notas, active toggle), contagem por loja (users/campanhas/períodos), guia de fluxo "como adicionar nova loja". Periods criados ganham store_id automaticamente. cloudUpsertPeriod/Campaign aceitam opts.store_id.' },
   { version: '3.21.1', date: '2026-05-25', summary: 'Admin power tools (Fase B parcial). (A) Feature flags: nova tabela feature_flags com 8 seeds (flyer_editor, pdf_editor, inventory, credentials, pps, sales, notes, calendar). Sidebar filtra items quando flag=false. AdminConfigTab → painel "Feature flags" com toggle por flag + descrição + badge ACTIVO/DESLIGADO. logActivity em cada toggle. (B) Audit log export CSV em AdminActivityTab — botão "CSV (N)" exporta entradas filtradas com BOM UTF-8, separador ; (compatível Excel PT). (C) Nova tab "Sistema" em Admin com health dashboard: latência Supabase, status service worker, uso IndexedDB / quota, app version, totais por tabela (campanhas, periods, snapshots, users, activities, emails). Diagnóstico inline com hints.' },
   { version: '3.21.0', date: '2026-05-25', summary: 'Foundation empresarial (Fase A). (A) Email templates editáveis na BD: nova tabela email_templates com 3 seeds (campaign_ending, welcome_user, password_reset). Admin → Configuração → novo painel "Templates de email" com selector de template + editor assunto/corpo Markdown leve + chips de variáveis disponíveis ({{var}}). Suporta **negrito**, *itálico*, [link](url). buildCampaignEndingEmail interpola template do cloud com fallback para hardcoded. (B) Maintenance mode: admin liga ui_config.global_settings.maintenance em AdminConfigTab. Non-admins vêem MaintenanceGate full-screen com mensagem custom + botões "Tentar de novo" e "Terminar sessão". Admin tem bypass total e vê banner fixo no topo enquanto está activo. Resolve deploys de migrations sem confundir users.' },
   { version: '3.20.29', date: '2026-05-25', summary: 'Onboarding tour + setup de testes + CI. (A) OnboardingTour: 4 passos para novos utilizadores (boas-vindas, campanhas, atalhos, app instalável). Dispara só na primeira visita (localStorage dd_onboarded). Botões Anterior/Próximo/Saltar; indicadores de passo. Mensagens contextuais para admin vs non-admin e dept PTS/PES. (B) Vitest configurado com smoke tests para helpers críticos (normalizeEAN, toIsoDate, isoWeek). Scripts npm test / test:watch / test:ui. (C) GitHub Actions CI .github/workflows/ci.yml — corre npm ci + tests + build em cada PR/push para main (build com env vars dummy).' },
@@ -1920,6 +1921,35 @@ async function markEmailSkipped(emailId) {
   await supabase.from('email_queue').update({ status: 'skipped' }).eq('id', emailId);
 }
 
+// v3.21.2: stores (multi-loja) — admin gere lojas separadas com floors próprios
+async function cloudFetchStores() {
+  if (!supabase) return [];
+  const { data, error } = await supabase.from('stores').select('*').order('name');
+  if (error) { console.warn('cloudFetchStores:', error.message); return []; }
+  return data || [];
+}
+async function cloudCreateStore(payload, userId) {
+  if (!supabase) return { ok: false };
+  const { data, error } = await supabase.from('stores').insert({
+    ...payload,
+    created_by: userId, updated_by: userId,
+  }).select().single();
+  return { ok: !error, data, error: error?.message };
+}
+async function cloudUpdateStore(id, patch, userId) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('stores').update({
+    ...patch, updated_by: userId, updated_at: new Date().toISOString(),
+  }).eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+async function cloudDeleteStore(id) {
+  if (!supabase) return { ok: false };
+  // FKs com on delete restrict — vai falhar se houver dados ligados
+  const { error } = await supabase.from('stores').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
 // v3.21.1: feature flags (admin liga/desliga módulos sem deploy)
 async function cloudFetchFeatureFlags() {
   if (!supabase) return null;
@@ -2130,6 +2160,8 @@ async function cloudUpsertPeriod(period, userId, opts = {}) {
     hidden: period.hidden || false,
     updated_at: new Date().toISOString(),
     department, // v3.17.0
+    // v3.21.2: stamp da loja (opcional — só passa se caller fornecer)
+    ...(opts.store_id || period.store_id ? { store_id: opts.store_id || period.store_id } : {}),
   };
   // Upsert: insert or update on conflict with id (primary key)
   const { error: upsertErr } = await supabase
@@ -2266,6 +2298,8 @@ async function cloudUpsertCampaign(campaign, userId, opts = {}) {
     updated_at: new Date().toISOString(),
     updated_by: userId,
     department, // v3.17.0
+    // v3.21.2: stamp da loja se fornecida
+    ...(opts.store_id || campaign.store_id ? { store_id: opts.store_id || campaign.store_id } : {}),
   };
   const hasRows = rows.length > 0;
   if (hasRows) {
@@ -3590,6 +3624,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     if (userDepartment) {
       cs = cs.filter(c => (c.department || 'PTS') === userDepartment);
     }
+    // v3.21.2: filtro por loja (admin escolhe; non-admin fica fixo no seu)
+    if (currentStoreId) {
+      cs = cs.filter(c => !c.store_id || c.store_id === currentStoreId);
+    }
     if (excludedFamilies && excludedFamilies.length > 0) {
       cs = cs.map(c => ({
         ...c,
@@ -3597,7 +3635,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       }));
     }
     return cs;
-  }, [campaigns, excludedFamilies, userDepartment]);
+  }, [campaigns, excludedFamilies, userDepartment, currentStoreId]);
 
   // v3.17.0 (filteredPeriods movido para depois do useState de `periods` na
   // linha ~3126 para evitar TDZ — periods é declarado mais à frente neste
@@ -3699,9 +3737,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // non-admin = vê só do seu dept). Aqui em vez de junto a filteredCampaigns
   // porque depende do useState de `periods` declarado nesta linha.
   const filteredPeriods = useMemo(() => {
-    if (!userDepartment) return periods;
-    return periods.filter(p => (p.department || 'PTS') === userDepartment);
-  }, [periods, userDepartment]);
+    let ps = periods;
+    if (userDepartment) ps = ps.filter(p => (p.department || 'PTS') === userDepartment);
+    // v3.21.2: filtro por loja
+    if (currentStoreId) ps = ps.filter(p => !p.store_id || p.store_id === currentStoreId);
+    return ps;
+  }, [periods, userDepartment, currentStoreId]);
   const [periodsLoaded, setPeriodsLoaded] = useState(false);
   // Refs so async closures (setInterval, etc.) always read current state
   const periodsRef = useRef([]);
@@ -3804,6 +3845,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [cloudDataLoaded, setCloudDataLoaded] = useState(false);
   const [rowsHydrated, setRowsHydrated] = useState(false); // v3.20.12: eager hydration done?
   const [featureFlags, setFeatureFlags] = useState({}); // v3.21.1: { key: enabled }
+  // v3.21.2: multi-loja
+  const [stores, setStores] = useState([]); // todas as lojas (admin vê tudo)
+  const [currentStoreId, setCurrentStoreId] = useStoredState('app.currentStoreId', null);
   const [migrationStatus, setMigrationStatus] = useState(null); // { migrated: n }
   const cloudLoadRanRef = useRef(false);
   useEffect(() => {
@@ -3836,6 +3880,17 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       cloudFetchEmailTemplates().catch(() => {});
       // v3.21.1: pré-carrega feature flags
       cloudFetchFeatureFlags().then(f => { if (f && !cancelled) setFeatureFlags(f); }).catch(() => {});
+      // v3.21.2: pré-carrega lojas (admin vê todas, user precisa pelo menos da sua)
+      cloudFetchStores().then(s => {
+        if (cancelled || !s) return;
+        setStores(s);
+        // Se não há store seleccionada, usa a do user_profile (ou primeira)
+        if (!currentStoreId) {
+          const userStoreId = userProfile?.store_id;
+          if (userStoreId) setCurrentStoreId(userStoreId);
+          else if (s.length > 0) setCurrentStoreId(s[0].id);
+        }
+      }).catch(() => {});
 
       // 2c. EAGER row hydration — load rows for ALL campaigns in background.
       // v3.20.12: hidratar também campanhas onde rows está vazio (não só
@@ -4323,6 +4378,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     // v3.17.0: stamp do depto do criador. Admin defaultará PTS (poderá no
     // futuro escolher dept ao criar — out of scope agora).
     p.department = userDepartment || userProfile?.department || 'PTS';
+    // v3.21.2: stamp da loja actual
+    p.store_id = currentStoreId || userProfile?.store_id || null;
     idbPutPeriod(p).catch(err => console.warn('Period save failed:', err));
     setPeriods(ps => [p, ...ps]);
     if (user && supabase) {
@@ -5217,6 +5274,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           syncStatus={syncStatus} isOnline={isOnline}
           theme={theme} toggleTheme={toggleTheme} setTheme={setTheme}
           featureFlags={featureFlags}
+          stores={stores}
+          currentStoreId={currentStoreId}
+          setCurrentStoreId={setCurrentStoreId}
         />
         <main style={{
           flex: 1, padding: '48px 40px', maxWidth: 1600, margin: '0 auto', width: '100%',
@@ -5564,7 +5624,8 @@ function SyncIndicator({ status, isOnline }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Sidebar
 // ─────────────────────────────────────────────────────────────────────────
-function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, userDepartment, adminViewDepartment, setAdminViewDepartment, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme, featureFlags = {} }) {
+function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, userDepartment, adminViewDepartment, setAdminViewDepartment, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme, featureFlags = {}, stores = [], currentStoreId, setCurrentStoreId }) {
+  const currentStore = stores.find(s => s.id === currentStoreId);
   const userRole = userProfile?.role || 'user';
   const notifCount = (notifications || []).length;
   // Detect mobile viewport — used to render-skip the absolute session widget
@@ -5648,6 +5709,37 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
           </div>
           <ArrowRight size={12} style={{ opacity: 0.7 }} />
         </button>
+      )}
+
+      {/* v3.21.2: Store selector — admin escolhe; user vê fixo */}
+      {stores.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>
+            🏬 Loja
+          </div>
+          {isAdmin && stores.length > 1 ? (
+            <select
+              value={currentStoreId || ''}
+              onChange={e => setCurrentStoreId(e.target.value)}
+              style={{
+                width: '100%', padding: '7px 8px', fontSize: 12,
+                border: `1px solid ${T.line}`, borderRadius: 4,
+                background: T.bg, color: T.ink, fontFamily: 'inherit',
+                cursor: 'pointer',
+              }}>
+              {stores.map(s => (
+                <option key={s.id} value={s.id}>{s.name}{!s.active ? ' (inactiva)' : ''}</option>
+              ))}
+            </select>
+          ) : (
+            <div style={{
+              padding: '7px 10px', fontSize: 12, fontWeight: 500,
+              background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4,
+            }}>
+              {currentStore?.name || '—'}
+            </div>
+          )}
+        </div>
       )}
 
       <div style={{ marginBottom: 40 }}>
@@ -21911,6 +22003,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       }}>
         {[
           { id: 'users', label: 'Utilizadores', icon: Users },
+          { id: 'stores', label: 'Lojas', icon: Store },
           { id: 'activity', label: 'Atividade', icon: Activity },
           { id: 'system', label: 'Sistema', icon: Activity },
           { id: 'cloud', label: 'Cloud', icon: Database },
@@ -21941,6 +22034,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
       {tab === 'system' && <AdminSystemTab />}
+      {tab === 'stores' && <AdminStoresTab currentUserId={user?.id} />}
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
@@ -21950,6 +22044,239 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
 }
 
 // ─── Cloud tab — view & delete all cloud data ────────────────────────────
+// v3.21.2: AdminStoresTab — gestão de lojas (multi-store)
+function AdminStoresTab({ currentUserId }) {
+  const [stores, setStores] = useState(null);
+  const [editing, setEditing] = useState(null); // null | {id?, code, name, address, city, country, active, notes}
+  const [saving, setSaving] = useState(false);
+  const [counts, setCounts] = useState({}); // store_id → { campaigns, periods, users }
+
+  const refresh = useCallback(async () => {
+    const list = await cloudFetchStores();
+    setStores(list);
+    // Best-effort counts (admins veem tudo via RLS)
+    if (supabase && list?.length) {
+      const next = {};
+      await Promise.all(list.map(async s => {
+        const [c, p, u] = await Promise.all([
+          supabase.from('campaigns').select('id', { count: 'exact', head: true }).eq('store_id', s.id),
+          supabase.from('periods').select('id', { count: 'exact', head: true }).eq('store_id', s.id),
+          supabase.from('user_profiles').select('user_id', { count: 'exact', head: true }).eq('store_id', s.id),
+        ]);
+        next[s.id] = { campaigns: c.count || 0, periods: p.count || 0, users: u.count || 0 };
+      }));
+      setCounts(next);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleSave = async () => {
+    if (!editing.code || !editing.name) {
+      alert('Código e nome são obrigatórios.');
+      return;
+    }
+    setSaving(true);
+    const payload = {
+      code: editing.code.toUpperCase().trim(),
+      name: editing.name.trim(),
+      address: editing.address || null,
+      city: editing.city || null,
+      country: editing.country || 'PT',
+      active: editing.active !== false,
+      notes: editing.notes || null,
+    };
+    let res;
+    if (editing.id) {
+      res = await cloudUpdateStore(editing.id, payload, currentUserId);
+    } else {
+      res = await cloudCreateStore(payload, currentUserId);
+    }
+    setSaving(false);
+    if (res.ok) {
+      await logActivity({ userId: currentUserId, action: editing.id ? 'update' : 'create', resourceType: 'store', resourceName: payload.name });
+      setEditing(null);
+      refresh();
+    } else {
+      alert('Erro: ' + (res.error || 'desconhecido'));
+    }
+  };
+
+  const handleDelete = async (s) => {
+    const count = counts[s.id];
+    if (count && (count.campaigns + count.periods + count.users) > 0) {
+      alert(`Não podes apagar — esta loja tem ${count.users} utilizadores, ${count.campaigns} campanhas, ${count.periods} períodos. Move ou apaga primeiro.`);
+      return;
+    }
+    if (!confirm(`Apagar a loja "${s.name}" definitivamente?`)) return;
+    const res = await cloudDeleteStore(s.id);
+    if (res.ok) {
+      await logActivity({ userId: currentUserId, action: 'delete', resourceType: 'store', resourceName: s.name });
+      refresh();
+    } else {
+      alert('Erro: ' + (res.error || 'desconhecido'));
+    }
+  };
+
+  if (!stores) return <div style={{ padding: 40, textAlign: 'center', color: T.inkMute }}>A carregar lojas…</div>;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div>
+          <div className="mono" style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.12em' }}>
+            🏬 Lojas registadas
+          </div>
+          <div style={{ fontSize: 12, color: T.inkSoft, marginTop: 4 }}>
+            Adiciona novas lojas para replicar a app. Cada loja tem os seus próprios pisos, zonas,
+            campanhas, stock e utilizadores. Configura os pisos depois em <strong>Layout da loja</strong>
+            (alterna no selector da sidebar).
+          </div>
+        </div>
+        <button
+          onClick={() => setEditing({ code: '', name: '', country: 'PT', active: true })}
+          style={{
+            padding: '8px 14px', background: T.ink, color: T.bg, border: 'none',
+            borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
+          }}>
+          <Plus size={12} /> Nova loja
+        </button>
+      </div>
+
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, overflow: 'hidden' }}>
+        {stores.length === 0 ? (
+          <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>Sem lojas. Cria a primeira.</div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: T.bg, color: T.inkMute }}>
+                <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11 }}>Código</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11 }}>Nome</th>
+                <th style={{ padding: '10px 12px', textAlign: 'left', fontSize: 11 }}>Local</th>
+                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 11 }}>Users</th>
+                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 11 }}>Campanhas</th>
+                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 11 }}>Períodos</th>
+                <th style={{ padding: '10px 12px', textAlign: 'center', fontSize: 11 }}>Estado</th>
+                <th style={{ padding: '10px 12px', textAlign: 'right', fontSize: 11 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {stores.map(s => {
+                const c = counts[s.id] || {};
+                return (
+                  <tr key={s.id} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                    <td style={{ padding: '10px 12px', fontFamily: 'monospace', fontWeight: 600 }}>{s.code}</td>
+                    <td style={{ padding: '10px 12px' }}>
+                      <div style={{ fontWeight: 500 }}>{s.name}</div>
+                      {s.address && <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2 }}>{s.address}</div>}
+                    </td>
+                    <td style={{ padding: '10px 12px', color: T.inkSoft, fontSize: 11 }}>{[s.city, s.country].filter(Boolean).join(', ') || '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.users ?? '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.campaigns ?? '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{c.periods ?? '—'}</td>
+                    <td style={{ padding: '10px 12px', textAlign: 'center' }}>
+                      <span style={{
+                        fontSize: 10, padding: '2px 8px', borderRadius: 3, fontWeight: 600,
+                        background: s.active ? T.green + '20' : T.inkMute + '20',
+                        color: s.active ? T.green : T.inkMute,
+                      }}>{s.active ? 'ACTIVA' : 'INACTIVA'}</span>
+                    </td>
+                    <td style={{ padding: '10px 12px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <button onClick={() => setEditing({ ...s })} title="Editar" style={{ padding: '4px 8px', background: 'transparent', border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 10, color: T.inkSoft, cursor: 'pointer', marginRight: 4 }}>Editar</button>
+                      <button onClick={() => handleDelete(s)} title="Apagar" style={{ padding: '4px 8px', background: 'transparent', border: `1px solid ${T.red}40`, borderRadius: 4, fontSize: 10, color: T.red, cursor: 'pointer' }}>Apagar</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div style={{ marginTop: 16, padding: 14, background: T.bg, border: `1px dashed ${T.line}`, borderRadius: 6, fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+        <strong>Fluxo para adicionar uma nova loja:</strong>
+        <ol style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+          <li>Cria a loja aqui (código curto + nome).</li>
+          <li>No selector da sidebar, alterna para a nova loja.</li>
+          <li>Vai a <strong>Layout da loja</strong> → "Importar layout default" ou cria pisos/zonas manualmente.</li>
+          <li>Cria utilizadores em <strong>Utilizadores</strong> e atribui-os à loja (em breve no modal de criar user).</li>
+          <li>Os utilizadores dessa loja só vêem dados da sua loja.</li>
+        </ol>
+      </div>
+
+      {editing && (
+        <div onClick={() => setEditing(null)} role="dialog" aria-modal="true" style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: 20,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10,
+            padding: 28, width: '100%', maxWidth: 520,
+          }}>
+            <h3 style={{ margin: '0 0 18px', fontSize: 18 }}>{editing.id ? 'Editar loja' : 'Nova loja'}</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', gap: 12 }}>
+              <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                Código
+                <input type="text" value={editing.code || ''} onChange={e => setEditing(d => ({ ...d, code: e.target.value }))}
+                  placeholder="AVR" maxLength={8}
+                  style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'monospace', textTransform: 'uppercase' }} />
+              </label>
+              <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                Nome
+                <input type="text" value={editing.name || ''} onChange={e => setEditing(d => ({ ...d, name: e.target.value }))}
+                  placeholder="FNAC Aveiro"
+                  style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'inherit' }} />
+              </label>
+            </div>
+            <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4, marginTop: 10 }}>
+              Endereço
+              <input type="text" value={editing.address || ''} onChange={e => setEditing(d => ({ ...d, address: e.target.value }))}
+                placeholder="Rua, número, …"
+                style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'inherit' }} />
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px', gap: 12, marginTop: 10 }}>
+              <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                Cidade
+                <input type="text" value={editing.city || ''} onChange={e => setEditing(d => ({ ...d, city: e.target.value }))}
+                  style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'inherit' }} />
+              </label>
+              <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                País
+                <input type="text" value={editing.country || ''} onChange={e => setEditing(d => ({ ...d, country: e.target.value }))}
+                  maxLength={2}
+                  style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'monospace', textTransform: 'uppercase' }} />
+              </label>
+            </div>
+            <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4, marginTop: 10 }}>
+              Notas (opcional)
+              <textarea value={editing.notes || ''} onChange={e => setEditing(d => ({ ...d, notes: e.target.value }))}
+                rows={2}
+                style={{ padding: '7px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, background: T.bg, color: T.ink, fontFamily: 'inherit', resize: 'vertical' }} />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, cursor: 'pointer' }}>
+              <input type="checkbox" checked={editing.active !== false} onChange={e => setEditing(d => ({ ...d, active: e.target.checked }))} />
+              <span style={{ fontSize: 12 }}>Loja activa (users podem entrar)</span>
+            </label>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20 }}>
+              <button onClick={() => setEditing(null)} style={{
+                padding: '8px 14px', background: 'transparent', color: T.inkSoft,
+                border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              }}>Cancelar</button>
+              <button onClick={handleSave} disabled={saving} style={{
+                padding: '8px 14px', background: saving ? T.inkMute : T.ink, color: T.bg,
+                border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                cursor: saving ? 'wait' : 'pointer',
+              }}>{saving ? 'A guardar…' : 'Guardar'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // v3.21.1: AdminSystemTab — health & status dashboard
 function AdminSystemTab() {
   const [stats, setStats] = useState(null);
