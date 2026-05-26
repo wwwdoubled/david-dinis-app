@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.28';
-const APP_BUILD_DATE = '2026-05-25T21:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.29';
+const APP_BUILD_DATE = '2026-05-25T22:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.29', date: '2026-05-25', summary: 'Onboarding tour + setup de testes + CI. (A) OnboardingTour: 4 passos para novos utilizadores (boas-vindas, campanhas, atalhos, app instalável). Dispara só na primeira visita (localStorage dd_onboarded). Botões Anterior/Próximo/Saltar; indicadores de passo. Mensagens contextuais para admin vs non-admin e dept PTS/PES. (B) Vitest configurado com smoke tests para helpers críticos (normalizeEAN, toIsoDate, isoWeek). Scripts npm test / test:watch / test:ui. (C) GitHub Actions CI .github/workflows/ci.yml — corre npm ci + tests + build em cada PR/push para main (build com env vars dummy).' },
   { version: '3.20.28', date: '2026-05-25', summary: 'Focus ring acessível em todos os elementos interactivos. Antes o outline só aparecia parcialmente; agora qualquer button/input/select/textarea/[role=button] tem outline 2px solid T.accent com offset quando recebe foco via teclado (focus-visible). Mouse clicks não disparam o ring (focus-visible discrimina). Beneficia screen readers e navegação por teclado.' },
   { version: '3.20.27', date: '2026-05-25', summary: '"O que há de novo" — modal que aparece automaticamente quando carregas a app pela primeira vez depois de um update. Mostra as 5 entradas mais recentes do changelog (a primeira destacada com gradient accent). localStorage rastreia última versão vista — só dispara em updates reais, não em novos logins. Não chateia novos utilizadores (só aparece se já viste pelo menos uma versão anterior). aria-modal/role=dialog para acessibilidade.' },
   { version: '3.20.26', date: '2026-05-25', summary: 'FIX CRÍTICO: rows desapareciam ~30s depois de qualquer edição. Causa: mergeCampaigns no poll 30s detectava cloud.updated_at > local.updated_at (porque local não absorvia o updated_at novo após upsert) e assumia "outro device editou" — wipava as rows locais (.rows=[], _needsRows=true). Fix 1: stale-while-revalidate em restoreRows — sempre preserva rows locais, só marca _needsRows=true para refetch silencioso. User continua a ver dados enquanto lazy hydration corre. Fix 2: pushCampaignsToCloud absorve res.data.updated_at após cada upsert → evita falsos positivos de "cloud é mais novo" no próximo poll.' },
@@ -4393,12 +4394,16 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // v3.20.27: "O que há de novo" — abre automaticamente na primeira
   // visita após cada update. localStorage guarda última versão vista.
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  // v3.20.29: onboarding tour para novos utilizadores
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
   useEffect(() => {
     try {
       const lastSeen = localStorage.getItem('dd_lastSeenVersion');
+      const onboarded = localStorage.getItem('dd_onboarded');
       if (lastSeen !== APP_VERSION) {
-        // só abre se já tinha visto pelo menos uma vez antes (não chateia novos users)
+        // Primeiro login → onboarding. Update conhecido → WhatsNew.
         if (lastSeen) setWhatsNewOpen(true);
+        else if (!onboarded) setOnboardingOpen(true);
         localStorage.setItem('dd_lastSeenVersion', APP_VERSION);
       }
     } catch {}
@@ -5362,6 +5367,17 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
       {/* v3.20.27: "O que há de novo" — auto após update */}
       {whatsNewOpen && <WhatsNewModal onClose={() => setWhatsNewOpen(false)} />}
+      {/* v3.20.29: Onboarding tour — primeira visita */}
+      {onboardingOpen && (
+        <OnboardingTour
+          isAdmin={isAdmin}
+          userDepartment={userDepartment}
+          onClose={() => {
+            try { localStorage.setItem('dd_onboarded', '1'); } catch {}
+            setOnboardingOpen(false);
+          }}
+        />
+      )}
 
       {/* v3.20.19: Toast container — substituto não-bloqueante para alert() */}
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -22597,6 +22613,111 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.20.29: OnboardingTour — tour de boas-vindas em 4 passos.
+function OnboardingTour({ isAdmin, userDepartment, onClose }) {
+  const [step, setStep] = useState(0);
+  const steps = [
+    {
+      icon: '👋',
+      title: 'Bem-vindo à Gestão de Campanhas',
+      body: (
+        <>
+          Esta é a tua nova ferramenta para gerir campanhas, stock, cartazes e análise de vendas.
+          {userDepartment === 'PES' && (
+            <p style={{ marginTop: 12 }}>Estás na vista <strong>PES</strong> — tens acesso a <strong>Novidades</strong> e <strong>Devoluções</strong> dedicadas.</p>
+          )}
+          {isAdmin && (
+            <p style={{ marginTop: 12 }}>Como <strong>admin</strong>, podes alternar entre PTS e PES via badge no topo da sidebar.</p>
+          )}
+        </>
+      ),
+    },
+    {
+      icon: '📅',
+      title: 'Campanhas e Períodos',
+      body: (
+        <>
+          Cria <strong>Períodos</strong> (datas) e dentro de cada período carrega Excels de produtos.
+          Os produtos podem ser atribuídos a zonas/móveis da loja no <strong>Plano</strong>.
+          O Pedido GU é gerado automaticamente.
+        </>
+      ),
+    },
+    {
+      icon: '⌨️',
+      title: 'Pesquisa global e atalhos',
+      body: (
+        <>
+          Carrega <kbd style={kbdStyle()}>⌘K</kbd> ou <kbd style={kbdStyle()}>/</kbd> em qualquer altura
+          para procurar períodos, campanhas, produtos por EAN, ou ir directo a uma vista.
+          Carrega <kbd style={kbdStyle()}>?</kbd> para ver todos os atalhos.
+        </>
+      ),
+    },
+    {
+      icon: '🚀',
+      title: 'Pronto para começar',
+      body: (
+        <>
+          Tudo o que fazes fica guardado automaticamente na cloud e funciona offline (PWA).
+          Podes instalar a app no telemóvel: menu do browser → <em>Adicionar ao ecrã principal</em>.
+        </>
+      ),
+    },
+  ];
+  const cur = steps[step];
+  const last = step === steps.length - 1;
+  return (
+    <div role="dialog" aria-modal="true" aria-labelledby="onb-title" style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      zIndex: 9992, padding: 20, backdropFilter: 'blur(3px)',
+    }}>
+      <div style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 36, width: '100%', maxWidth: 480,
+        boxShadow: '0 30px 80px -20px rgba(0,0,0,0.45)',
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 56, marginBottom: 16 }}>{cur.icon}</div>
+        <h2 id="onb-title" style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>{cur.title}</h2>
+        <div style={{ fontSize: 14, color: T.inkSoft, marginTop: 14, lineHeight: 1.6 }}>{cur.body}</div>
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, marginTop: 28 }}>
+          {steps.map((_, i) => (
+            <div key={i} style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: i === step ? T.accent : T.lineSoft,
+              transition: 'background 0.2s',
+            }} />
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 24, gap: 8 }}>
+          <button onClick={onClose} style={{
+            padding: '8px 14px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+          }}>Saltar</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {step > 0 && (
+              <button onClick={() => setStep(s => s - 1)} style={{
+                padding: '8px 14px', background: T.bg, color: T.ink,
+                border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              }}>← Anterior</button>
+            )}
+            <button onClick={() => last ? onClose() : setStep(s => s + 1)} style={{
+              padding: '8px 18px', background: T.ink, color: T.bg,
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            }}>{last ? 'Começar →' : 'Próximo →'}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+const kbdStyle = () => ({
+  padding: '2px 7px', background: T.bg, border: `1px solid ${T.line}`,
+  borderRadius: 4, fontSize: 11, fontFamily: 'Geist Mono, monospace',
+});
+
 // v3.20.27: WhatsNewModal — mostra as 5 entradas mais recentes do changelog
 // quando o user abre a app após um update. Auto via localStorage.
 function WhatsNewModal({ onClose }) {
