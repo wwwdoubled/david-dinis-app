@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.4';
-const APP_BUILD_DATE = '2026-05-26T00:30'; // Europe/Lisbon
+const APP_VERSION = '3.21.5';
+const APP_BUILD_DATE = '2026-05-26T01:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.5', date: '2026-05-26', summary: 'Fix TDZ multi-loja: currentStoreId estava declarado depois de filteredCampaigns e filteredPeriods, que o referenciavam → ReferenceError "Cannot access eA before initialization" em runtime após v3.21.2. Movida a declaração de stores/currentStoreId para imediatamente após excludedFamilies, antes dos useMemos que dependem.' },
   { version: '3.21.4', date: '2026-05-26', summary: 'Build fix: kbdStyle estava redefinida (já existia como objecto no GlobalSearch desde v3.12.0; v3.20.29 introduziu uma 2ª como função no OnboardingTour). Vercel rejeitava o build com SyntaxError "kbdStyle redefined". Renomeado o do OnboardingTour para kbdInlineStyle. Sem mudança funcional — todos os commits v3.20.29→3.21.3 estavam em código não-buildado em prod.' },
   { version: '3.21.3', date: '2026-05-26', summary: 'Fix: maintenance mode tinha botão Guardar muito acima na página (depois da menu visibility), e os utilizadores não percebiam que precisavam de scroll de volta. Adicionado botão de save INLINE dentro da própria secção de manutenção — laranja quando o toggle está ON (deixa óbvio o que vai acontecer) e cinza escuro quando OFF. Mesmo handleSave que inclui maintenance no payload. Mensagem "Não te esqueças" removida porque já não é necessária.' },
   { version: '3.21.2', date: '2026-05-25', summary: 'Multi-loja: app replicável para várias lojas com estruturas próprias. Migration: nova tabela "stores" (code, name, address, city, country, active, notes, settings) + helper my_store_id(). Adicionada FK store_id às tabelas user_profiles, campaigns, periods, stock_snapshots, novidades, devolucoes, protection_plans, store_floors. Backfill: tudo o que existe → loja "FNAC Aveiro" (seed AVR). Frontend: state stores + currentStoreId. Sidebar tem selector de loja (admin: dropdown; user: label fixo). filteredCampaigns e filteredPeriods filtram por loja. Nova tab Admin → "Lojas" com CRUD completo (código, nome, endereço, cidade, país, notas, active toggle), contagem por loja (users/campanhas/períodos), guia de fluxo "como adicionar nova loja". Periods criados ganham store_id automaticamente. cloudUpsertPeriod/Campaign aceitam opts.store_id.' },
@@ -3614,6 +3615,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     return Array.isArray(cfg) ? cfg : DEFAULT_EXCLUDED_FAMILIES;
   }, [uiConfig]);
 
+  // v3.21.2: multi-loja — declarado AQUI (antes de filteredCampaigns/Periods que o usam)
+  const [stores, setStores] = useState([]); // todas as lojas (admin vê tudo)
+  const [currentStoreId, setCurrentStoreId] = useStoredState('app.currentStoreId', null);
+
   // Campaigns with rows pre-filtered by excluded families.
   // Used by ALL views (dashboard, sales, changes, inventory, campaigns, calendar)
   // to ensure excluded families never appear unless admin explicitly re-enables.
@@ -3847,9 +3852,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [cloudDataLoaded, setCloudDataLoaded] = useState(false);
   const [rowsHydrated, setRowsHydrated] = useState(false); // v3.20.12: eager hydration done?
   const [featureFlags, setFeatureFlags] = useState({}); // v3.21.1: { key: enabled }
-  // v3.21.2: multi-loja
-  const [stores, setStores] = useState([]); // todas as lojas (admin vê tudo)
-  const [currentStoreId, setCurrentStoreId] = useStoredState('app.currentStoreId', null);
+  // v3.21.2: multi-loja (declarada cedo — usada por filteredCampaigns/Periods que vêm antes)
+  // NOTA: nunca mover para baixo — filteredCampaigns (~L3617) e filteredPeriods (~L3734) referem currentStoreId
   const [migrationStatus, setMigrationStatus] = useState(null); // { migrated: n }
   const cloudLoadRanRef = useRef(false);
   useEffect(() => {
