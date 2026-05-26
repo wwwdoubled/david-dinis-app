@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.26';
-const APP_BUILD_DATE = '2026-05-25T20:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.27';
+const APP_BUILD_DATE = '2026-05-25T21:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.27', date: '2026-05-25', summary: '"O que há de novo" — modal que aparece automaticamente quando carregas a app pela primeira vez depois de um update. Mostra as 5 entradas mais recentes do changelog (a primeira destacada com gradient accent). localStorage rastreia última versão vista — só dispara em updates reais, não em novos logins. Não chateia novos utilizadores (só aparece se já viste pelo menos uma versão anterior). aria-modal/role=dialog para acessibilidade.' },
   { version: '3.20.26', date: '2026-05-25', summary: 'FIX CRÍTICO: rows desapareciam ~30s depois de qualquer edição. Causa: mergeCampaigns no poll 30s detectava cloud.updated_at > local.updated_at (porque local não absorvia o updated_at novo após upsert) e assumia "outro device editou" — wipava as rows locais (.rows=[], _needsRows=true). Fix 1: stale-while-revalidate em restoreRows — sempre preserva rows locais, só marca _needsRows=true para refetch silencioso. User continua a ver dados enquanto lazy hydration corre. Fix 2: pushCampaignsToCloud absorve res.data.updated_at após cada upsert → evita falsos positivos de "cloud é mais novo" no próximo poll.' },
   { version: '3.20.25', date: '2026-05-25', summary: 'Top Famílias do Plano: usa slot.family primeiro. Antes mostrava "Sem família 28 · 100%" quando os campaign.rows ainda não estavam hidratados — agora prefere slot.family (stamped no auto-fill ou edição manual). Se slot não tem family E rows não estão prontos, mostra empty state explicativo "A carregar dados das campanhas… abre uma campanha para sincronizar" em vez do "Sem família 100%" enganador. Também exibe contagem de slots "por classificar" no footer quando há matches parciais.' },
   { version: '3.20.24', date: '2026-05-25', summary: 'Dark mode polish na Visão Geral. (A) Caixa "Atenção" (campanhas a terminar / sem produtos) deixa de ter fundo cream hardcoded — usa T.orange + alpha para o tint, T.bgEl para os cards internos. Cores do texto e bordas usam tokens do tema. (B) Cards de "Cartazes Pendentes" também: T.red + alpha em vez de #fef2f2 hardcoded. Resultado: ambas as secções respeitam o tema escuro.' },
@@ -4388,6 +4389,19 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   // v3.20.16: modal de ajuda com atalhos de teclado (Cmd+/)
   const [helpOpen, setHelpOpen] = useState(false);
+  // v3.20.27: "O que há de novo" — abre automaticamente na primeira
+  // visita após cada update. localStorage guarda última versão vista.
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
+  useEffect(() => {
+    try {
+      const lastSeen = localStorage.getItem('dd_lastSeenVersion');
+      if (lastSeen !== APP_VERSION) {
+        // só abre se já tinha visto pelo menos uma vez antes (não chateia novos users)
+        if (lastSeen) setWhatsNewOpen(true);
+        localStorage.setItem('dd_lastSeenVersion', APP_VERSION);
+      }
+    } catch {}
+  }, []);
 
   // v3.20.19: sistema de toasts não-bloqueante (substitui alert())
   const [toasts, setToasts] = useState([]);
@@ -5334,6 +5348,9 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
 
       {/* v3.20.16: Modal de ajuda — atalhos de teclado (Cmd+/ ou ?) */}
       {helpOpen && <HelpModal onClose={() => setHelpOpen(false)} />}
+
+      {/* v3.20.27: "O que há de novo" — auto após update */}
+      {whatsNewOpen && <WhatsNewModal onClose={() => setWhatsNewOpen(false)} />}
 
       {/* v3.20.19: Toast container — substituto não-bloqueante para alert() */}
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -22569,6 +22586,65 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.20.27: WhatsNewModal — mostra as 5 entradas mais recentes do changelog
+// quando o user abre a app após um update. Auto via localStorage.
+function WhatsNewModal({ onClose }) {
+  const recent = APP_CHANGELOG.slice(0, 5);
+  return (
+    <div onClick={onClose}
+      role="dialog" aria-modal="true" aria-labelledby="whats-new-title"
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        zIndex: 9991, padding: 20, backdropFilter: 'blur(3px)',
+      }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 12, padding: 28, width: '100%', maxWidth: 640,
+        maxHeight: '85vh', display: 'flex', flexDirection: 'column',
+        boxShadow: '0 24px 60px -16px rgba(0,0,0,0.4)',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <div>
+            <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.12em' }}>v{APP_VERSION}</div>
+            <h2 id="whats-new-title" style={{ margin: '4px 0 0', fontSize: 22, fontWeight: 600 }}>✨ O que há de novo</h2>
+          </div>
+          <button onClick={onClose} aria-label="Fechar" style={{
+            padding: '4px 10px', background: 'transparent', border: `1px solid ${T.line}`,
+            borderRadius: 4, fontSize: 11, color: T.inkSoft, cursor: 'pointer',
+          }}>Esc</button>
+        </div>
+        <p style={{ fontSize: 12, color: T.inkSoft, margin: '12px 0 16px' }}>
+          Últimas {recent.length} actualizações na app. Podes voltar a ver todas no rodapé da sidebar.
+        </p>
+        <div style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {recent.map((e, i) => (
+            <div key={e.version} style={{
+              padding: '12px 14px',
+              background: i === 0 ? T.accent + '12' : T.bg,
+              border: `1px solid ${i === 0 ? T.accent + '40' : T.line}`,
+              borderLeft: `3px solid ${i === 0 ? T.accent : T.line}`,
+              borderRadius: 6,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, alignItems: 'baseline' }}>
+                <strong style={{ fontSize: 12, color: T.ink, letterSpacing: '0.02em' }}>v{e.version}</strong>
+                <span className="mono" style={{ fontSize: 10, color: T.inkMute }}>{e.date}</span>
+              </div>
+              <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.55 }}>{e.summary}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <button onClick={onClose} style={{
+            padding: '8px 18px', background: T.ink, color: T.bg, border: 'none',
+            borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+          }}>Entendi</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // v3.20.19: ToastContainer — toasts não-bloqueantes no canto inferior direito.
 // Substitui o window.alert() por mensagens deslizantes que desaparecem sozinhas.
 function ToastContainer({ toasts, onDismiss }) {
