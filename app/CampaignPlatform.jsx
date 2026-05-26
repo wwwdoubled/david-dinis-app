@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.25';
-const APP_BUILD_DATE = '2026-05-25T20:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.26';
+const APP_BUILD_DATE = '2026-05-25T20:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.26', date: '2026-05-25', summary: 'FIX CRÍTICO: rows desapareciam ~30s depois de qualquer edição. Causa: mergeCampaigns no poll 30s detectava cloud.updated_at > local.updated_at (porque local não absorvia o updated_at novo após upsert) e assumia "outro device editou" — wipava as rows locais (.rows=[], _needsRows=true). Fix 1: stale-while-revalidate em restoreRows — sempre preserva rows locais, só marca _needsRows=true para refetch silencioso. User continua a ver dados enquanto lazy hydration corre. Fix 2: pushCampaignsToCloud absorve res.data.updated_at após cada upsert → evita falsos positivos de "cloud é mais novo" no próximo poll.' },
   { version: '3.20.25', date: '2026-05-25', summary: 'Top Famílias do Plano: usa slot.family primeiro. Antes mostrava "Sem família 28 · 100%" quando os campaign.rows ainda não estavam hidratados — agora prefere slot.family (stamped no auto-fill ou edição manual). Se slot não tem family E rows não estão prontos, mostra empty state explicativo "A carregar dados das campanhas… abre uma campanha para sincronizar" em vez do "Sem família 100%" enganador. Também exibe contagem de slots "por classificar" no footer quando há matches parciais.' },
   { version: '3.20.24', date: '2026-05-25', summary: 'Dark mode polish na Visão Geral. (A) Caixa "Atenção" (campanhas a terminar / sem produtos) deixa de ter fundo cream hardcoded — usa T.orange + alpha para o tint, T.bgEl para os cards internos. Cores do texto e bordas usam tokens do tema. (B) Cards de "Cartazes Pendentes" também: T.red + alpha em vez de #fef2f2 hardcoded. Resultado: ambas as secções respeitam o tema escuro.' },
   { version: '3.20.23', date: '2026-05-25', summary: 'Force PWA cache refresh + meta tags literais no <head>. Service worker bump CACHE_VERSION dd-v1→dd-v2 → invalida cache antiga (com manifest a apontar para icon-192.png inexistente). layout.js: meta tags escritas directamente no <head> em vez de via Next.js metadata.other (que às vezes não emitia). Auto-update do SW no registo (reg.update()) → próximo load apanha logo a versão nova.' },
@@ -2317,21 +2318,22 @@ function mergeCampaigns(localList, cloudList) {
     // invalidamos e marcamos _needsRows para lazy re-hydration. Se o cloud
     // é igual ou anterior (cenários a/b), mantemos as rows locais para não
     // perder o que o utilizador acabou de fazer upload localmente.
+    // v3.20.26: stale-while-revalidate — antes wipávamos as rows quando
+    // o cloud mostrava updated_at maior (assumindo "outro device editou"),
+    // mas isso também acontecia depois do PRÓPRIO user editar (porque o
+    // local não absorvia o updated_at novo). Resultado: rows desapareciam
+    // ~30s depois de qualquer edição. Agora: mantemos as rows visíveis;
+    // só marcamos _needsRows=true para o lazy hydration refetch em background.
     const restoreRows = (merged, src, cloudStrictlyNewer = false) => {
       const cloudHasRows = Array.isArray(merged.rows) && merged.rows.length > 0;
       const localHasRows = src && Array.isArray(src.rows) && src.rows.length > 0;
       if (cloudHasRows) return merged; // cloud sent rows — use them
       if (!localHasRows) return merged; // nothing to restore
-      if (cloudStrictlyNewer) {
-        // Outro device actualizou — flag para re-hydration na próxima view.
-        merged.rows = [];
-        merged.itemCount = -1;
-        merged._needsRows = true;
-      } else {
-        merged.rows = src.rows;
-        merged.itemCount = src.itemCount ?? src.rows.length;
-        merged._needsRows = false;
-      }
+      // SEMPRE preserva as rows locais. Se cloud é mais novo, sinaliza
+      // _needsRows para refetch silencioso mas o user continua a ver dados.
+      merged.rows = src.rows;
+      merged.itemCount = src.itemCount ?? src.rows.length;
+      merged._needsRows = cloudStrictlyNewer; // refetch quando hydration correr
       return merged;
     };
 
@@ -4092,8 +4094,18 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           const res = await cloudUpsertCampaign({ ...c, user_id: c.user_id || currentUser.id }, currentUser.id);
           if (res.ok) {
             lastPushedFloorsRef.current.set(c.id, sig);
-            // If cloud assigned a new UUID (new insert), update the local campaign id
-            if (res.data?.id && !isUUID(String(c.id))) {
+            // v3.20.26: absorver updated_at do cloud para evitar que o
+            // próximo poll detecte "outro device editou" e re-fetch (sem
+            // perder rows porque agora é stale-while-revalidate, mas reduz
+            // network igual)
+            if (res.data?.updated_at) {
+              setCampaignsFn(prev => prev.map(x =>
+                (x.id === c.id || (res.data?.id && x.id === res.data.id))
+                  ? { ...x, updatedAt: res.data.updated_at, id: res.data.id || x.id, user_id: res.data.user_id || x.user_id }
+                  : x
+              ));
+            } else if (res.data?.id && !isUUID(String(c.id))) {
+              // If cloud assigned a new UUID (new insert), update the local campaign id
               setCampaignsFn(prev => prev.map(x =>
                 x.id === c.id ? { ...x, id: res.data.id, user_id: res.data.user_id || currentUser.id } : x
               ));
