@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.29';
-const APP_BUILD_DATE = '2026-05-25T22:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.0';
+const APP_BUILD_DATE = '2026-05-25T22:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.0', date: '2026-05-25', summary: 'Foundation empresarial (Fase A). (A) Email templates editáveis na BD: nova tabela email_templates com 3 seeds (campaign_ending, welcome_user, password_reset). Admin → Configuração → novo painel "Templates de email" com selector de template + editor assunto/corpo Markdown leve + chips de variáveis disponíveis ({{var}}). Suporta **negrito**, *itálico*, [link](url). buildCampaignEndingEmail interpola template do cloud com fallback para hardcoded. (B) Maintenance mode: admin liga ui_config.global_settings.maintenance em AdminConfigTab. Non-admins vêem MaintenanceGate full-screen com mensagem custom + botões "Tentar de novo" e "Terminar sessão". Admin tem bypass total e vê banner fixo no topo enquanto está activo. Resolve deploys de migrations sem confundir users.' },
   { version: '3.20.29', date: '2026-05-25', summary: 'Onboarding tour + setup de testes + CI. (A) OnboardingTour: 4 passos para novos utilizadores (boas-vindas, campanhas, atalhos, app instalável). Dispara só na primeira visita (localStorage dd_onboarded). Botões Anterior/Próximo/Saltar; indicadores de passo. Mensagens contextuais para admin vs non-admin e dept PTS/PES. (B) Vitest configurado com smoke tests para helpers críticos (normalizeEAN, toIsoDate, isoWeek). Scripts npm test / test:watch / test:ui. (C) GitHub Actions CI .github/workflows/ci.yml — corre npm ci + tests + build em cada PR/push para main (build com env vars dummy).' },
   { version: '3.20.28', date: '2026-05-25', summary: 'Focus ring acessível em todos os elementos interactivos. Antes o outline só aparecia parcialmente; agora qualquer button/input/select/textarea/[role=button] tem outline 2px solid T.accent com offset quando recebe foco via teclado (focus-visible). Mouse clicks não disparam o ring (focus-visible discrimina). Beneficia screen readers e navegação por teclado.' },
   { version: '3.20.27', date: '2026-05-25', summary: '"O que há de novo" — modal que aparece automaticamente quando carregas a app pela primeira vez depois de um update. Mostra as 5 entradas mais recentes do changelog (a primeira destacada com gradient accent). localStorage rastreia última versão vista — só dispara em updates reais, não em novos logins. Não chateia novos utilizadores (só aparece se já viste pelo menos uma versão anterior). aria-modal/role=dialog para acessibilidade.' },
@@ -1918,8 +1919,70 @@ async function markEmailSkipped(emailId) {
   await supabase.from('email_queue').update({ status: 'skipped' }).eq('id', emailId);
 }
 
+// v3.21.0: cache de email templates (carregado na startup pela MainApp)
+let _emailTemplatesCache = null;
+
+async function cloudFetchEmailTemplates() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from('email_templates').select('*');
+  if (error) { console.warn('cloudFetchEmailTemplates:', error.message); return null; }
+  const map = {};
+  (data || []).forEach(t => { map[t.key] = t; });
+  _emailTemplatesCache = map;
+  return map;
+}
+
+async function cloudUpsertEmailTemplate(key, patch, userId) {
+  if (!supabase) return { ok: false, error: 'No supabase' };
+  const { data, error } = await supabase.from('email_templates')
+    .update({ ...patch, updated_by: userId || null, updated_at: new Date().toISOString() })
+    .eq('key', key)
+    .select()
+    .single();
+  if (error) return { ok: false, error: error.message };
+  if (_emailTemplatesCache) _emailTemplatesCache[key] = data;
+  return { ok: true, data };
+}
+
+// Interpolação simples {{var}} → vars[var]. Mantém placeholder se variável não existe.
+function interpolateTemplate(text, vars) {
+  return String(text || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (m, k) =>
+    vars[k] != null ? String(vars[k]) : m);
+}
+
+// Conversão Markdown leve → HTML. Suporta **negrito**, *itálico*, [link](url), \n→<br>.
+function mdLightToHtml(md) {
+  return String(md || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+    .replace(/\n/g, '<br>');
+}
+
 // Build email content for a "campaign ending" alert
 function buildCampaignEndingEmail(period, postersToRemove, daysLeft) {
+  // v3.21.0: tenta usar template do cloud; fallback para hardcoded
+  const tpl = _emailTemplatesCache?.['campaign_ending'];
+  if (tpl) {
+    const dateStr = period.endDate ? new Date(period.endDate).toLocaleDateString('pt-PT', { day: '2-digit', month: 'long', year: 'numeric' }) : '';
+    const vars = {
+      campaign_name: period.name || '',
+      days_left: String(daysLeft),
+      end_date: dateStr,
+      store: 'Aveiro',
+      posters_count: String(postersToRemove || 0),
+    };
+    const subject = interpolateTemplate(tpl.subject, vars);
+    const bodyText = interpolateTemplate(tpl.body_md, vars);
+    const bodyHtml = `<!DOCTYPE html><html><body style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#222;line-height:1.6">
+      ${mdLightToHtml(bodyText)}
+      <hr style="margin:24px 0 12px;border:none;border-top:1px solid #eee;">
+      <p style="font-size:11px;color:#999;">David Dinis · Gestão de Campanhas</p>
+    </body></html>`;
+    return { subject, bodyText, bodyHtml };
+  }
+  // Fallback hardcoded (compatibilidade)
   const dateStr = new Date(period.endDate).toLocaleDateString('pt-PT', { day: '2-digit', month: 'long', year: 'numeric' });
   const urgency = daysLeft === 0 ? 'HOJE' : `em ${daysLeft} ${daysLeft === 1 ? 'dia' : 'dias'}`;
   const subject = daysLeft === 0
@@ -3750,6 +3813,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setPeriods(earlyMergedPeriods);
       setCampaigns(earlyMergedCampaigns);
       setCloudDataLoaded(true); // unblock the rest of the app immediately
+      // v3.21.0: pré-carrega email templates em background (não bloqueia)
+      cloudFetchEmailTemplates().catch(() => {});
 
       // 2c. EAGER row hydration — load rows for ALL campaigns in background.
       // v3.20.12: hidratar também campanhas onde rows está vazio (não só
@@ -4738,6 +4803,21 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       {/* v3.17.0: admin escolhe vista (PTS/PES) na entrada. Bloqueia até escolher. */}
       {showAdminViewPicker && !mustChangePassword && (
         <AdminViewPickerModal onPick={(dept) => setAdminViewDepartment(dept)} />
+      )}
+      {/* v3.21.0: Maintenance gate — non-admin vê ecrã de manutenção */}
+      {!mustChangePassword && !isAdmin && uiConfig?.global_settings?.maintenance?.enabled && (
+        <MaintenanceGate message={uiConfig.global_settings.maintenance.message} onLogout={onLogout} />
+      )}
+      {/* v3.21.0: Banner persistente para admin quando maintenance está ON */}
+      {isAdmin && uiConfig?.global_settings?.maintenance?.enabled && (
+        <div className="no-print" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+          padding: '8px 16px', background: T.orange, color: '#fff',
+          textAlign: 'center', fontSize: 12, fontWeight: 600,
+          boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+        }}>
+          🛠 MODO MANUTENÇÃO ACTIVO — non-admins estão a ver ecrã de manutenção. Desactiva em Admin → Configuração.
+        </div>
       )}
       {/* v3.20.15: gate de hidratação — bloqueia até as rows das campanhas estarem carregadas */}
       {!mustChangePassword && !showAdminViewPicker && (!cloudDataLoaded || !rowsHydrated) && (
@@ -22613,6 +22693,47 @@ function adminActionBtn(color) {
 // v3.16.0: modal mostrado APÓS criar/reset de utilizador, com a password
 // temporária gerada pela Edge Function. A password só aparece UMA vez —
 // admin tem de copiar e dar ao utilizador. No próximo login do utilizador,
+// v3.21.0: MaintenanceGate — non-admins vêem ecrã de manutenção quando
+// admin liga ui_config.global_settings.maintenance.enabled. Admin sempre passa.
+function MaintenanceGate({ message, onLogout }) {
+  return (
+    <div role="alert" style={{
+      position: 'fixed', inset: 0, background: T.bg, zIndex: 10100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+    }}>
+      <div style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 16, padding: 48, maxWidth: 460, width: '100%',
+        textAlign: 'center', boxShadow: '0 30px 80px -20px rgba(0,0,0,0.3)',
+      }}>
+        <div style={{ fontSize: 64, marginBottom: 18 }}>🛠</div>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 600 }}>Estamos em manutenção</h2>
+        <p style={{ fontSize: 13, color: T.inkSoft, marginTop: 14, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+          {message || 'A aplicação está temporariamente indisponível para actualizações. Volta dentro de momentos.'}
+        </p>
+        <div style={{ marginTop: 24, display: 'flex', gap: 8, justifyContent: 'center' }}>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              padding: '8px 16px', background: T.ink, color: T.bg,
+              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            }}
+          >Tentar de novo</button>
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              style={{
+                padding: '8px 16px', background: 'transparent', color: T.inkSoft,
+                border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              }}
+            >Terminar sessão</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // v3.20.29: OnboardingTour — tour de boas-vindas em 4 passos.
 function OnboardingTour({ isAdmin, userDepartment, onClose }) {
   const [step, setStep] = useState(0);
@@ -23535,6 +23656,25 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
   });
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  // v3.21.0: maintenance mode
+  const [maintenanceEnabled, setMaintenanceEnabled] = useState(() => !!uiConfig?.global_settings?.maintenance?.enabled);
+  const [maintenanceMessage, setMaintenanceMessage] = useState(() => uiConfig?.global_settings?.maintenance?.message || 'Estamos a fazer manutenção. Volta dentro de momentos.');
+  // v3.21.0: email templates editor
+  const [templates, setTemplates] = useState(null);
+  const [selectedTplKey, setSelectedTplKey] = useState('campaign_ending');
+  const [tplDraft, setTplDraft] = useState(null);
+  const [tplSaving, setTplSaving] = useState(false);
+  useEffect(() => {
+    cloudFetchEmailTemplates().then(setTemplates).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (templates && templates[selectedTplKey]) {
+      setTplDraft({
+        subject: templates[selectedTplKey].subject,
+        body_md: templates[selectedTplKey].body_md,
+      });
+    }
+  }, [templates, selectedTplKey]);
 
   // All known families = DEFAULT list (admin can add/remove from it)
   const ALL_KNOWN_FAMILIES = [
@@ -23590,6 +23730,12 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
       warn_days_before_end: parsedWarnDays.length > 0 ? parsedWarnDays : DEFAULT_WARN_DAYS,
       emails_enabled: emailsEnabled,
       excluded_families: excludedFamsDraft,
+      // v3.21.0: maintenance mode
+      maintenance: {
+        enabled: maintenanceEnabled,
+        message: maintenanceMessage,
+        updated_at: new Date().toISOString(),
+      },
     };
     const res = await saveUIConfig(draft, currentUserId, globalSettings);
     if (res.ok) {
@@ -23810,6 +23956,132 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
         >
           <RotateCcw size={13} /> Limpar dados locais e recarregar
         </button>
+      </div>
+
+      {/* v3.21.0: Maintenance mode */}
+      <div style={{ marginTop: 32, padding: 18, background: maintenanceEnabled ? T.orange + '14' : T.bgEl, border: `1px solid ${maintenanceEnabled ? T.orange + '60' : T.line}`, borderRadius: 8 }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+          🛠 Modo manutenção
+        </div>
+        <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 12, lineHeight: 1.5 }}>
+          Quando activo, todos os utilizadores (excepto admin) vêem um ecrã de manutenção.
+          Útil para fazer migrations / deploys sem confundir users.
+        </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', marginBottom: 12 }}>
+          <input type="checkbox" checked={maintenanceEnabled} onChange={e => setMaintenanceEnabled(e.target.checked)} />
+          <span style={{ fontSize: 13, fontWeight: 500 }}>
+            {maintenanceEnabled ? '🟠 MODO MANUTENÇÃO ACTIVO' : 'Activar modo manutenção'}
+          </span>
+        </label>
+        <label style={{ display: 'block', fontSize: 11, color: T.inkSoft, marginBottom: 6 }}>Mensagem mostrada aos utilizadores:</label>
+        <textarea
+          value={maintenanceMessage}
+          onChange={e => setMaintenanceMessage(e.target.value)}
+          rows={2}
+          placeholder="Ex: A actualizar a base de dados. Volta em ~5 min."
+          style={{
+            width: '100%', padding: '8px 10px', fontSize: 12,
+            border: `1px solid ${T.line}`, borderRadius: 4,
+            background: T.bg, color: T.ink, fontFamily: 'inherit',
+            resize: 'vertical',
+          }}
+        />
+        <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6 }}>Não te esqueças de carregar "Guardar configuração" no fim da página.</div>
+      </div>
+
+      {/* v3.21.0: Email Templates editor */}
+      <div style={{ marginTop: 32, padding: 18, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+          ✉ Templates de email
+        </div>
+        <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 12, lineHeight: 1.5 }}>
+          Edita o assunto e o corpo dos emails que a app envia. Suporta Markdown leve:
+          {' '}<code style={{ background: T.bg, padding: '1px 4px', borderRadius: 3 }}>**negrito**</code>,
+          {' '}<code style={{ background: T.bg, padding: '1px 4px', borderRadius: 3 }}>*itálico*</code>,
+          {' '}<code style={{ background: T.bg, padding: '1px 4px', borderRadius: 3 }}>[link](url)</code>.
+          Variáveis: <code style={{ background: T.bg, padding: '1px 4px', borderRadius: 3 }}>{'{{var}}'}</code>.
+        </div>
+        {!templates ? (
+          <div style={{ fontSize: 12, color: T.inkMute }}>A carregar templates…</div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+              {Object.keys(templates).map(k => (
+                <button key={k} onClick={() => setSelectedTplKey(k)} style={{
+                  padding: '6px 12px', fontSize: 11, borderRadius: 4,
+                  border: `1px solid ${selectedTplKey === k ? T.accent : T.line}`,
+                  background: selectedTplKey === k ? T.accent : 'transparent',
+                  color: selectedTplKey === k ? '#fff' : T.inkSoft, cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}>{k}</button>
+              ))}
+            </div>
+            {tplDraft && templates[selectedTplKey] && (
+              <>
+                {templates[selectedTplKey].description && (
+                  <div style={{ fontSize: 11, color: T.inkSoft, fontStyle: 'italic', marginBottom: 10 }}>
+                    {templates[selectedTplKey].description}
+                  </div>
+                )}
+                <div style={{ marginBottom: 10 }}>
+                  <label style={{ fontSize: 11, color: T.inkSoft, display: 'block', marginBottom: 4 }}>Variáveis disponíveis:</label>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {(templates[selectedTplKey].variables || []).map(v => (
+                      <span key={v} className="mono" style={{
+                        fontSize: 10, padding: '2px 8px', background: T.accent + '20', color: T.accent,
+                        border: `1px solid ${T.accent}40`, borderRadius: 3,
+                      }}>{`{{${v}}}`}</span>
+                    ))}
+                  </div>
+                </div>
+                <label style={{ fontSize: 11, color: T.inkSoft, display: 'block', marginBottom: 4 }}>Assunto:</label>
+                <input
+                  type="text"
+                  value={tplDraft.subject}
+                  onChange={e => setTplDraft(d => ({ ...d, subject: e.target.value }))}
+                  style={{
+                    width: '100%', padding: '8px 10px', fontSize: 12, marginBottom: 10,
+                    border: `1px solid ${T.line}`, borderRadius: 4,
+                    background: T.bg, color: T.ink, fontFamily: 'inherit',
+                  }}
+                />
+                <label style={{ fontSize: 11, color: T.inkSoft, display: 'block', marginBottom: 4 }}>Corpo (Markdown):</label>
+                <textarea
+                  value={tplDraft.body_md}
+                  onChange={e => setTplDraft(d => ({ ...d, body_md: e.target.value }))}
+                  rows={8}
+                  style={{
+                    width: '100%', padding: '8px 10px', fontSize: 12,
+                    border: `1px solid ${T.line}`, borderRadius: 4,
+                    background: T.bg, color: T.ink, fontFamily: 'Geist Mono, monospace',
+                    resize: 'vertical',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+                  <button
+                    onClick={async () => {
+                      setTplSaving(true);
+                      const res = await cloudUpsertEmailTemplate(selectedTplKey, tplDraft, currentUserId);
+                      setTplSaving(false);
+                      if (res.ok) {
+                        setTemplates(prev => ({ ...prev, [selectedTplKey]: { ...prev[selectedTplKey], ...tplDraft } }));
+                        await logActivity({ userId: currentUserId, action: 'update', resourceType: 'email_template', resourceName: selectedTplKey });
+                        alert('Template guardado ✓');
+                      } else {
+                        alert('Erro: ' + (res.error || 'desconhecido'));
+                      }
+                    }}
+                    disabled={tplSaving}
+                    style={{
+                      padding: '8px 16px', background: tplSaving ? T.inkMute : T.accent, color: '#fff',
+                      border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                      cursor: tplSaving ? 'wait' : 'pointer',
+                    }}>{tplSaving ? 'A guardar…' : 'Guardar template'}</button>
+                </div>
+              </>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
