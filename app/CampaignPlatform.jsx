@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.23';
-const APP_BUILD_DATE = '2026-05-25T19:00'; // Europe/Lisbon
+const APP_VERSION = '3.20.24';
+const APP_BUILD_DATE = '2026-05-25T19:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.24', date: '2026-05-25', summary: 'Dark mode polish na Visão Geral. (A) Caixa "Atenção" (campanhas a terminar / sem produtos) deixa de ter fundo cream hardcoded — usa T.orange + alpha para o tint, T.bgEl para os cards internos. Cores do texto e bordas usam tokens do tema. (B) Cards de "Cartazes Pendentes" também: T.red + alpha em vez de #fef2f2 hardcoded. Resultado: ambas as secções respeitam o tema escuro.' },
   { version: '3.20.23', date: '2026-05-25', summary: 'Force PWA cache refresh + meta tags literais no <head>. Service worker bump CACHE_VERSION dd-v1→dd-v2 → invalida cache antiga (com manifest a apontar para icon-192.png inexistente). layout.js: meta tags escritas directamente no <head> em vez de via Next.js metadata.other (que às vezes não emitia). Auto-update do SW no registo (reg.update()) → próximo load apanha logo a versão nova.' },
   { version: '3.20.22', date: '2026-05-25', summary: 'Fix PWA: ícones SVG + meta-tag actualizada. Criado public/icon.svg (gradient azul→roxo com "DD" itálico) que serve para qualquer tamanho — manifest e apple-touch-icon usam-no. Adicionado meta name="mobile-web-app-capable" (a tag actual moderna; apple-mobile-web-app-capable está deprecated mas mantida para Safari iOS antigo). Remove os 404 do icon-192.png/icon-512.png.' },
   { version: '3.20.21', date: '2026-05-25', summary: 'Export metadata da cloud. Admin → Cloud → novo botão "Exportar metadata" descarrega ficheiro JSON timestamped (dd-backup-YYYY-MM-DD-HH-MM-SS.json) com lista de todos os periods, campanhas (sem rows para ficar leve) e stock snapshots. Útil para backups locais de configuração e auditoria.' },
@@ -6012,43 +6013,57 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
 
       {/* Atenção — only when there are pressing items */}
       {showAttention && (
-        <div style={{ marginBottom: 32, padding: 18, background: '#fffbeb', border: `1px solid #fde68a`, borderRadius: 10 }}>
+        <div style={{
+          marginBottom: 32, padding: 18, borderRadius: 10,
+          // v3.20.24: dark-mode friendly — tint do T.orange em vez de #fffbeb hardcoded
+          background: T.orange + '14',
+          border: `1px solid ${T.orange}40`,
+        }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-            <AlertTriangle size={14} style={{ color: '#d97706' }} />
-            <h3 className="mono" style={{ margin: 0, fontSize: 11, letterSpacing: '0.15em', color: '#92400e', textTransform: 'uppercase' }}>
+            <AlertTriangle size={14} style={{ color: T.orange }} />
+            <h3 className="mono" style={{ margin: 0, fontSize: 11, letterSpacing: '0.15em', color: T.orange, textTransform: 'uppercase' }}>
               Atenção
             </h3>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
-            {endingSoon.filter(i => i.days <= 2).map(({ period, days }) => (
-              <button key={`end-${period.id}`}
-                onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', period.id); window.location.reload(); }}
-                style={{
-                  padding: '10px 12px', background: '#fff', border: `1px solid ${days <= 0 || days === 0 ? T.red : '#fbbf24'}`,
-                  borderLeft: `3px solid ${days <= 0 || days === 0 ? T.red : '#d97706'}`,
-                  borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-                }}
-              >
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="mono" style={{ fontSize: 9, color: days <= 0 ? T.red : '#d97706', letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 2 }}>
-                    {days < 0 ? `Terminou há ${Math.abs(days)}d` : days === 0 ? 'Termina hoje' : days === 1 ? 'Termina amanhã' : `Termina em ${days} dias`}
+            {endingSoon.filter(i => i.days <= 2).map(({ period, days }) => {
+              const critical = days <= 0;
+              return (
+                <button key={`end-${period.id}`}
+                  onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', period.id); window.location.reload(); }}
+                  style={{
+                    padding: '10px 12px',
+                    background: T.bgEl,
+                    border: `1px solid ${critical ? T.red : T.orange}60`,
+                    borderLeft: `3px solid ${critical ? T.red : T.orange}`,
+                    borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                    color: T.ink,
+                  }}
+                >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="mono" style={{ fontSize: 9, color: critical ? T.red : T.orange, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 700, marginBottom: 2 }}>
+                      {days < 0 ? `Terminou há ${Math.abs(days)}d` : days === 0 ? 'Termina hoje' : days === 1 ? 'Termina amanhã' : `Termina em ${days} dias`}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={period.name}>
+                      {period.name}
+                    </div>
                   </div>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={period.name}>
-                    {period.name}
-                  </div>
-                </div>
-                <ArrowRight size={14} style={{ color: T.inkMute, flexShrink: 0 }} />
-              </button>
-            ))}
+                  <ArrowRight size={14} style={{ color: T.inkMute, flexShrink: 0 }} />
+                </button>
+              );
+            })}
             {periodsWithoutPlan.slice(0, 3).map(p => (
               <button key={`noplan-${p.id}`}
                 onClick={() => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', p.id); window.location.reload(); }}
                 style={{
-                  padding: '10px 12px', background: '#fff', border: `1px solid ${T.line}`,
+                  padding: '10px 12px',
+                  background: T.bgEl,
+                  border: `1px solid ${T.line}`,
                   borderLeft: `3px solid ${T.inkMute}`,
                   borderRadius: 6, textAlign: 'left', cursor: 'pointer', fontFamily: 'inherit',
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                  color: T.ink,
                 }}
               >
                 <div style={{ minWidth: 0, flex: 1 }}>
@@ -6213,7 +6228,7 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
             {pendingPosters.map(({ period, count, daysOverdue }) => (
               <div key={period.id}
                 style={{
-                  padding: '8px 10px', background: '#fef2f2', border: `1px solid #fecaca`,
+                  padding: '8px 10px', background: T.red + '14', border: `1px solid ${T.red}40`,
                   borderRadius: 6, display: 'flex', alignItems: 'center', gap: 10,
                 }}
               >
