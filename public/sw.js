@@ -2,7 +2,7 @@
 // network-first para tudo o resto (incluindo Supabase). App funciona
 // offline para navegação básica (UI/HTML/JS/CSS) e dados em IndexedDB.
 
-const CACHE_VERSION = 'dd-v1';
+const CACHE_VERSION = 'dd-v2'; // v3.20.23: bump → invalida cache antiga com manifest a apontar para icon-192.png inexistente
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 

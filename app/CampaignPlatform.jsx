@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.22';
-const APP_BUILD_DATE = '2026-05-25T18:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.23';
+const APP_BUILD_DATE = '2026-05-25T19:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.23', date: '2026-05-25', summary: 'Force PWA cache refresh + meta tags literais no <head>. Service worker bump CACHE_VERSION dd-v1→dd-v2 → invalida cache antiga (com manifest a apontar para icon-192.png inexistente). layout.js: meta tags escritas directamente no <head> em vez de via Next.js metadata.other (que às vezes não emitia). Auto-update do SW no registo (reg.update()) → próximo load apanha logo a versão nova.' },
   { version: '3.20.22', date: '2026-05-25', summary: 'Fix PWA: ícones SVG + meta-tag actualizada. Criado public/icon.svg (gradient azul→roxo com "DD" itálico) que serve para qualquer tamanho — manifest e apple-touch-icon usam-no. Adicionado meta name="mobile-web-app-capable" (a tag actual moderna; apple-mobile-web-app-capable está deprecated mas mantida para Safari iOS antigo). Remove os 404 do icon-192.png/icon-512.png.' },
   { version: '3.20.21', date: '2026-05-25', summary: 'Export metadata da cloud. Admin → Cloud → novo botão "Exportar metadata" descarrega ficheiro JSON timestamped (dd-backup-YYYY-MM-DD-HH-MM-SS.json) com lista de todos os periods, campanhas (sem rows para ficar leve) e stock snapshots. Útil para backups locais de configuração e auditoria.' },
   { version: '3.20.20', date: '2026-05-25', summary: 'Error boundary + acessibilidade. (A) AppErrorBoundary global em page.js — se algum componente crashar (excepção React), o user vê fallback amigável com botão Recarregar em vez da página em branco. Detalhes técnicos colapsáveis para diagnóstico. (B) prefers-reduced-motion respeitado — utilizadores com preferência por menos movimento desligam todas as animações automaticamente.' },
