@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.20.24';
-const APP_BUILD_DATE = '2026-05-25T19:30'; // Europe/Lisbon
+const APP_VERSION = '3.20.25';
+const APP_BUILD_DATE = '2026-05-25T20:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.20.25', date: '2026-05-25', summary: 'Top Famílias do Plano: usa slot.family primeiro. Antes mostrava "Sem família 28 · 100%" quando os campaign.rows ainda não estavam hidratados — agora prefere slot.family (stamped no auto-fill ou edição manual). Se slot não tem family E rows não estão prontos, mostra empty state explicativo "A carregar dados das campanhas… abre uma campanha para sincronizar" em vez do "Sem família 100%" enganador. Também exibe contagem de slots "por classificar" no footer quando há matches parciais.' },
   { version: '3.20.24', date: '2026-05-25', summary: 'Dark mode polish na Visão Geral. (A) Caixa "Atenção" (campanhas a terminar / sem produtos) deixa de ter fundo cream hardcoded — usa T.orange + alpha para o tint, T.bgEl para os cards internos. Cores do texto e bordas usam tokens do tema. (B) Cards de "Cartazes Pendentes" também: T.red + alpha em vez de #fef2f2 hardcoded. Resultado: ambas as secções respeitam o tema escuro.' },
   { version: '3.20.23', date: '2026-05-25', summary: 'Force PWA cache refresh + meta tags literais no <head>. Service worker bump CACHE_VERSION dd-v1→dd-v2 → invalida cache antiga (com manifest a apontar para icon-192.png inexistente). layout.js: meta tags escritas directamente no <head> em vez de via Next.js metadata.other (que às vezes não emitia). Auto-update do SW no registo (reg.update()) → próximo load apanha logo a versão nova.' },
   { version: '3.20.22', date: '2026-05-25', summary: 'Fix PWA: ícones SVG + meta-tag actualizada. Criado public/icon.svg (gradient azul→roxo com "DD" itálico) que serve para qualquer tamanho — manifest e apple-touch-icon usam-no. Adicionado meta name="mobile-web-app-capable" (a tag actual moderna; apple-mobile-web-app-capable está deprecated mas mantida para Safari iOS antigo). Remove os 404 do icon-192.png/icon-512.png.' },
@@ -5916,11 +5917,15 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
   }, [periods]);
 
   // ─── Top famílias do plano: agrega EANs nos slots e cruza com cols.family ─
+  // v3.20.25: usa slot.family primeiro (stamped no criação/auto-fill),
+  // fallback para EAN→família via campaigns.rows. Resolve o caso de
+  // todos os slots aparecerem como "Sem família" quando campaign.rows
+  // ainda não está hidratado.
   const topFamilies = useMemo(() => {
-    // Build EAN → family map
+    // Build EAN → family map (best-effort; só preenche se rows hidratados)
     const eanFamily = new Map();
     campaigns.forEach(c => {
-      if (!c.rows) return;
+      if (!c.rows || c.rows.length === 0) return;
       const cols = detectColumns(c.headers || []);
       if (!cols.ean || !cols.family) return;
       c.rows.forEach(r => {
@@ -5933,12 +5938,18 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
     // Count families across all period slots
     const counts = new Map();
     let totalSlots = 0;
+    let unmatched = 0;
     (periods || []).forEach(p => {
       const floors = Array.isArray(p.floors) ? p.floors : [];
       floors.forEach(f => (f.zones || []).forEach(z => (z.slots || []).forEach(s => {
+        // Preferência: slot.family (stamped); fallback: lookup por EAN
         const k = normalizeEAN(s.ref);
-        const fam = eanFamily.get(k) || 'Sem família';
-        counts.set(fam, (counts.get(fam) || 0) + 1);
+        const fam = (s.family && s.family.trim()) || eanFamily.get(k) || '';
+        if (fam) {
+          counts.set(fam, (counts.get(fam) || 0) + 1);
+        } else {
+          unmatched++;
+        }
         totalSlots++;
       })));
     });
@@ -5946,7 +5957,7 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
       .map(([name, count]) => ({ name, count, pct: totalSlots ? (count / totalSlots) * 100 : 0 }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
-    return { list, total: totalSlots };
+    return { list, total: totalSlots, unmatched, hasMatches: counts.size > 0 };
   }, [campaigns, periods]);
 
   // ─── Cartazes pendentes: posters activos em períodos já terminados ──
@@ -6146,30 +6157,41 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
 
       {/* Insights grid — 2x2 of useful sections */}
       <div style={{ marginTop: 32, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 16 }}>
-        {/* Top famílias do plano */}
+        {/* Top famílias do plano — v3.20.25: só renderiza se houve matches reais.
+            Antes mostrava "Sem família 100%" quando rows não estavam hidratadas. */}
         <DashboardCard
           title="Top Famílias do Plano"
           icon={Tag}
-          empty={topFamilies.list.length === 0 ? 'Sem produtos atribuídos ainda' : null}
-          footer={topFamilies.total > 0 ? `${topFamilies.total} slots no total` : null}
+          empty={
+            topFamilies.total === 0
+              ? 'Sem produtos atribuídos ainda'
+              : !topFamilies.hasMatches
+                ? 'A carregar dados das campanhas… abre uma campanha para sincronizar'
+                : null
+          }
+          footer={topFamilies.hasMatches
+            ? `${topFamilies.total} slots no total${topFamilies.unmatched > 0 ? ` · ${topFamilies.unmatched} por classificar` : ''}`
+            : null}
         >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {topFamilies.list.map((f, i) => (
-              <div key={f.name}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12 }}>
-                  <span style={{ color: T.ink, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>{f.name}</span>
-                  <span className="mono" style={{ color: T.inkMute, marginLeft: 8 }}>{f.count} · {f.pct.toFixed(0)}%</span>
+          {topFamilies.hasMatches && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {topFamilies.list.map((f, i) => (
+                <div key={f.name}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12 }}>
+                    <span style={{ color: T.ink, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={f.name}>{f.name}</span>
+                    <span className="mono" style={{ color: T.inkMute, marginLeft: 8 }}>{f.count} · {f.pct.toFixed(0)}%</span>
+                  </div>
+                  <div style={{ height: 5, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${f.pct}%`, height: '100%',
+                      background: i === 0 ? T.accent : i === 1 ? T.green : i === 2 ? '#0ea5e9' : T.inkMute,
+                      transition: 'width 0.4s',
+                    }} />
+                  </div>
                 </div>
-                <div style={{ height: 5, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
-                  <div style={{
-                    width: `${f.pct}%`, height: '100%',
-                    background: i === 0 ? T.accent : i === 1 ? T.green : i === 2 ? '#0ea5e9' : T.inkMute,
-                    transition: 'width 0.4s',
-                  }} />
-                </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </DashboardCard>
 
         {/* Próximas campanhas */}
