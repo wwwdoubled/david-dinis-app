@@ -929,8 +929,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.0';
-const APP_BUILD_DATE = '2026-05-25T22:30'; // Europe/Lisbon
+const APP_VERSION = '3.21.1';
+const APP_BUILD_DATE = '2026-05-25T23:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +940,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.1', date: '2026-05-25', summary: 'Admin power tools (Fase B parcial). (A) Feature flags: nova tabela feature_flags com 8 seeds (flyer_editor, pdf_editor, inventory, credentials, pps, sales, notes, calendar). Sidebar filtra items quando flag=false. AdminConfigTab → painel "Feature flags" com toggle por flag + descrição + badge ACTIVO/DESLIGADO. logActivity em cada toggle. (B) Audit log export CSV em AdminActivityTab — botão "CSV (N)" exporta entradas filtradas com BOM UTF-8, separador ; (compatível Excel PT). (C) Nova tab "Sistema" em Admin com health dashboard: latência Supabase, status service worker, uso IndexedDB / quota, app version, totais por tabela (campanhas, periods, snapshots, users, activities, emails). Diagnóstico inline com hints.' },
   { version: '3.21.0', date: '2026-05-25', summary: 'Foundation empresarial (Fase A). (A) Email templates editáveis na BD: nova tabela email_templates com 3 seeds (campaign_ending, welcome_user, password_reset). Admin → Configuração → novo painel "Templates de email" com selector de template + editor assunto/corpo Markdown leve + chips de variáveis disponíveis ({{var}}). Suporta **negrito**, *itálico*, [link](url). buildCampaignEndingEmail interpola template do cloud com fallback para hardcoded. (B) Maintenance mode: admin liga ui_config.global_settings.maintenance em AdminConfigTab. Non-admins vêem MaintenanceGate full-screen com mensagem custom + botões "Tentar de novo" e "Terminar sessão". Admin tem bypass total e vê banner fixo no topo enquanto está activo. Resolve deploys de migrations sem confundir users.' },
   { version: '3.20.29', date: '2026-05-25', summary: 'Onboarding tour + setup de testes + CI. (A) OnboardingTour: 4 passos para novos utilizadores (boas-vindas, campanhas, atalhos, app instalável). Dispara só na primeira visita (localStorage dd_onboarded). Botões Anterior/Próximo/Saltar; indicadores de passo. Mensagens contextuais para admin vs non-admin e dept PTS/PES. (B) Vitest configurado com smoke tests para helpers críticos (normalizeEAN, toIsoDate, isoWeek). Scripts npm test / test:watch / test:ui. (C) GitHub Actions CI .github/workflows/ci.yml — corre npm ci + tests + build em cada PR/push para main (build com env vars dummy).' },
   { version: '3.20.28', date: '2026-05-25', summary: 'Focus ring acessível em todos os elementos interactivos. Antes o outline só aparecia parcialmente; agora qualquer button/input/select/textarea/[role=button] tem outline 2px solid T.accent com offset quando recebe foco via teclado (focus-visible). Mouse clicks não disparam o ring (focus-visible discrimina). Beneficia screen readers e navegação por teclado.' },
@@ -1917,6 +1918,23 @@ async function markEmailSent(emailId) {
 async function markEmailSkipped(emailId) {
   if (!supabase) return;
   await supabase.from('email_queue').update({ status: 'skipped' }).eq('id', emailId);
+}
+
+// v3.21.1: feature flags (admin liga/desliga módulos sem deploy)
+async function cloudFetchFeatureFlags() {
+  if (!supabase) return null;
+  const { data, error } = await supabase.from('feature_flags').select('*');
+  if (error) { console.warn('cloudFetchFeatureFlags:', error.message); return null; }
+  const map = {};
+  (data || []).forEach(f => { map[f.key] = !!f.enabled; });
+  return map;
+}
+async function cloudUpdateFeatureFlag(key, enabled, userId) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('feature_flags')
+    .update({ enabled, updated_by: userId || null, updated_at: new Date().toISOString() })
+    .eq('key', key);
+  return { ok: !error, error: error?.message };
 }
 
 // v3.21.0: cache de email templates (carregado na startup pela MainApp)
@@ -3785,6 +3803,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // and migrate any local-only items to the cloud once.
   const [cloudDataLoaded, setCloudDataLoaded] = useState(false);
   const [rowsHydrated, setRowsHydrated] = useState(false); // v3.20.12: eager hydration done?
+  const [featureFlags, setFeatureFlags] = useState({}); // v3.21.1: { key: enabled }
   const [migrationStatus, setMigrationStatus] = useState(null); // { migrated: n }
   const cloudLoadRanRef = useRef(false);
   useEffect(() => {
@@ -3815,6 +3834,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       setCloudDataLoaded(true); // unblock the rest of the app immediately
       // v3.21.0: pré-carrega email templates em background (não bloqueia)
       cloudFetchEmailTemplates().catch(() => {});
+      // v3.21.1: pré-carrega feature flags
+      cloudFetchFeatureFlags().then(f => { if (f && !cancelled) setFeatureFlags(f); }).catch(() => {});
 
       // 2c. EAGER row hydration — load rows for ALL campaigns in background.
       // v3.20.12: hidratar também campanhas onde rows está vazio (não só
@@ -5195,6 +5216,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           notifications={notifications}
           syncStatus={syncStatus} isOnline={isOnline}
           theme={theme} toggleTheme={toggleTheme} setTheme={setTheme}
+          featureFlags={featureFlags}
         />
         <main style={{
           flex: 1, padding: '48px 40px', maxWidth: 1600, margin: '0 auto', width: '100%',
@@ -5542,7 +5564,7 @@ function SyncIndicator({ status, isOnline }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Sidebar
 // ─────────────────────────────────────────────────────────────────────────
-function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, userDepartment, adminViewDepartment, setAdminViewDepartment, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme }) {
+function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfile, uiConfig, userDepartment, adminViewDepartment, setAdminViewDepartment, notifications, syncStatus, isOnline, theme, toggleTheme, setTheme, featureFlags = {} }) {
   const userRole = userProfile?.role || 'user';
   const notifCount = (notifications || []).length;
   // Detect mobile viewport — used to render-skip the absolute session widget
@@ -5578,9 +5600,12 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
   ];
   // v3.17.0: filtro dept-aware. Tanto admin (com switcher) como non-admin (fixo)
   // respeitam o userDepartment actual.
+  // v3.21.1: também respeita feature flags — admin pode desligar módulos em Admin → Configuração
   const items = allItems.filter(it => {
     if (it.hideFor?.includes(userDepartment)) return false;
     if (it.showFor && !it.showFor.includes(userDepartment)) return false;
+    // featureFlags está vazio enquanto carrega; só esconde quando flag está explicitamente false
+    if (featureFlags && featureFlags[it.id] === false) return false;
     return canSeeMenuItem(it.id, userRole, isAdmin, uiConfig);
   });
   // Always append admin item at the end if admin
@@ -21887,6 +21912,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
         {[
           { id: 'users', label: 'Utilizadores', icon: Users },
           { id: 'activity', label: 'Atividade', icon: Activity },
+          { id: 'system', label: 'Sistema', icon: Activity },
           { id: 'cloud', label: 'Cloud', icon: Database },
           { id: 'layout', label: 'Layout da loja', icon: Layers },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
@@ -21914,6 +21940,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'users' && <AdminUsersTab currentUserId={user?.id} currentUserEmail={user?.email} />}
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
+      {tab === 'system' && <AdminSystemTab />}
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
@@ -21923,6 +21950,134 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
 }
 
 // ─── Cloud tab — view & delete all cloud data ────────────────────────────
+// v3.21.1: AdminSystemTab — health & status dashboard
+function AdminSystemTab() {
+  const [stats, setStats] = useState(null);
+  const [pingMs, setPingMs] = useState(null);
+  const [idbBytes, setIdbBytes] = useState(null);
+  const [swState, setSwState] = useState('checking…');
+
+  useEffect(() => {
+    // Ping ao Supabase (round-trip)
+    const t0 = performance.now();
+    if (supabase) {
+      supabase.from('admins').select('user_id', { head: true, count: 'exact' })
+        .then(() => setPingMs(Math.round(performance.now() - t0)))
+        .catch(() => setPingMs(-1));
+    }
+
+    // IDB usage estimate
+    if (navigator.storage && navigator.storage.estimate) {
+      navigator.storage.estimate().then(e => {
+        setIdbBytes({ used: e.usage || 0, quota: e.quota || 0 });
+      }).catch(() => {});
+    }
+
+    // Service worker state
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistration().then(reg => {
+        if (!reg) setSwState('não registado');
+        else if (reg.active) setSwState('ACTIVO · ' + reg.active.scriptURL.split('/').pop());
+        else setSwState('a instalar…');
+      }).catch(() => setSwState('erro'));
+    } else {
+      setSwState('não suportado');
+    }
+
+    // Conta items por tabela (best-effort)
+    if (!supabase) return;
+    Promise.all([
+      supabase.from('campaigns').select('id', { count: 'exact', head: true }),
+      supabase.from('periods').select('id', { count: 'exact', head: true }),
+      supabase.from('stock_snapshots').select('id', { count: 'exact', head: true }),
+      supabase.from('user_profiles').select('user_id', { count: 'exact', head: true }),
+      supabase.from('activity_log').select('id', { count: 'exact', head: true }),
+      supabase.from('email_queue').select('id', { count: 'exact', head: true }),
+    ]).then(([c, p, s, u, a, e]) => {
+      setStats({
+        campaigns: c.count || 0,
+        periods: p.count || 0,
+        snapshots: s.count || 0,
+        users: u.count || 0,
+        activities: a.count || 0,
+        emails: e.count || 0,
+      });
+    }).catch(() => {});
+  }, []);
+
+  const fmtBytes = (b) => {
+    if (b == null) return '—';
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    if (b < 1024 * 1024 * 1024) return `${(b / 1048576).toFixed(1)} MB`;
+    return `${(b / 1073741824).toFixed(2)} GB`;
+  };
+
+  const StatCard = ({ label, value, sub, accent }) => (
+    <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${accent || T.accent}` }}>
+      <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 500, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+          ❤ Saúde do sistema
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+          <StatCard
+            label="Latência Supabase"
+            value={pingMs == null ? '…' : pingMs < 0 ? 'falhou' : `${pingMs} ms`}
+            sub="round-trip a admins"
+            accent={pingMs == null ? T.inkMute : pingMs < 0 ? T.red : pingMs < 300 ? T.green : T.orange}
+          />
+          <StatCard
+            label="Service Worker"
+            value={swState}
+            sub="PWA cache"
+            accent={swState.startsWith('ACTIVO') ? T.green : T.inkMute}
+          />
+          <StatCard
+            label="IndexedDB"
+            value={idbBytes ? fmtBytes(idbBytes.used) : '…'}
+            sub={idbBytes ? `de ${fmtBytes(idbBytes.quota)} quota` : 'a calcular…'}
+          />
+          <StatCard
+            label="App version"
+            value={`v${APP_VERSION}`}
+            sub={APP_BUILD_DATE}
+          />
+        </div>
+      </div>
+
+      {stats && (
+        <div>
+          <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+            📊 Cloud — totais por tabela
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12 }}>
+            <StatCard label="Campanhas" value={stats.campaigns.toLocaleString('pt-PT')} />
+            <StatCard label="Períodos" value={stats.periods.toLocaleString('pt-PT')} />
+            <StatCard label="Stock snapshots" value={stats.snapshots.toLocaleString('pt-PT')} />
+            <StatCard label="Utilizadores" value={stats.users.toLocaleString('pt-PT')} />
+            <StatCard label="Activity log" value={stats.activities.toLocaleString('pt-PT')} />
+            <StatCard label="Email queue" value={stats.emails.toLocaleString('pt-PT')} />
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: 14, background: T.bg, border: `1px dashed ${T.line}`, borderRadius: 6, fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+        <strong>Diagnóstico:</strong> Se a latência Supabase está acima de 500ms, há problemas de rede ou
+        o projecto está em pausa. Se o service worker mostra "não registado", PWA não vai funcionar offline.
+        Se o IDB está perto da quota, considera apagar cache em <code>Limpar dados locais</code>.
+      </div>
+    </div>
+  );
+}
+
 function AdminCloudTab() {
   const [campaigns, setCampaigns] = useState(null);
   const [snapshots, setSnapshots] = useState(null);
@@ -23542,6 +23697,31 @@ function AdminActivityTab({ currentUserId }) {
         <button onClick={refresh} style={adminActionBtn()}>
           <RotateCcw size={11} /> Atualizar
         </button>
+        {/* v3.21.1: Export CSV — útil para compliance/auditoria */}
+        <button onClick={() => {
+          if (!filtered.length) { alert('Sem dados para exportar.'); return; }
+          const escape = (s) => {
+            const str = String(s ?? '');
+            return /[",\n;]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+          };
+          const lines = ['Data;Utilizador;Acção;Tipo;Nome;ID;Revertido;Metadata'];
+          filtered.forEach(e => {
+            lines.push([
+              e.created_at, e.user_email, e.action, e.resource_type,
+              e.resource_name || '', e.resource_id || '',
+              e.reverted ? 'sim' : 'não',
+              e.metadata ? JSON.stringify(e.metadata) : '',
+            ].map(escape).join(';'));
+          });
+          const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = `audit-log-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }} style={adminActionBtn()} title="Exportar CSV das entradas filtradas">
+          <Download size={11} /> CSV ({filtered.length})
+        </button>
       </div>
 
       {loading ? (
@@ -23667,6 +23847,25 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
   useEffect(() => {
     cloudFetchEmailTemplates().then(setTemplates).catch(() => {});
   }, []);
+  // v3.21.1: feature flags editor
+  const [flags, setFlags] = useState(null);
+  const [flagsSaving, setFlagsSaving] = useState(false);
+  useEffect(() => {
+    supabase?.from('feature_flags').select('*').order('key').then(({ data }) => {
+      if (data) setFlags(data);
+    });
+  }, []);
+  const toggleFlag = async (key, enabled) => {
+    setFlagsSaving(true);
+    const res = await cloudUpdateFeatureFlag(key, enabled, currentUserId);
+    if (res.ok) {
+      setFlags(prev => (prev || []).map(f => f.key === key ? { ...f, enabled } : f));
+      await logActivity({ userId: currentUserId, action: 'update', resourceType: 'feature_flag', resourceName: key, metadata: { enabled } });
+    } else {
+      alert('Erro: ' + (res.error || 'desconhecido'));
+    }
+    setFlagsSaving(false);
+  };
   useEffect(() => {
     if (templates && templates[selectedTplKey]) {
       setTplDraft({
@@ -23987,6 +24186,48 @@ function AdminConfigTab({ uiConfig, setUIConfig, currentUserId }) {
           }}
         />
         <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6 }}>Não te esqueças de carregar "Guardar configuração" no fim da página.</div>
+      </div>
+
+      {/* v3.21.1: Feature flags — admin liga/desliga módulos sem deploy */}
+      <div style={{ marginTop: 32, padding: 18, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>
+          🚩 Feature flags
+        </div>
+        <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 14, lineHeight: 1.5 }}>
+          Liga ou desliga módulos para todos os utilizadores. Útil para desactivar
+          temporariamente uma funcionalidade ou para roll-outs graduais.
+        </div>
+        {!flags ? (
+          <div style={{ fontSize: 12, color: T.inkMute }}>A carregar…</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {flags.map(f => (
+              <label key={f.key} style={{
+                display: 'grid', gridTemplateColumns: '24px 1fr auto', gap: 12,
+                alignItems: 'center', padding: '8px 10px', background: T.bg,
+                borderRadius: 4, cursor: 'pointer',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={!!f.enabled}
+                  disabled={flagsSaving}
+                  onChange={e => toggleFlag(f.key, e.target.checked)}
+                />
+                <div>
+                  <div className="mono" style={{ fontSize: 12, fontWeight: 600 }}>{f.key}</div>
+                  {f.description && (
+                    <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 2 }}>{f.description}</div>
+                  )}
+                </div>
+                <span style={{
+                  fontSize: 10, padding: '2px 8px', borderRadius: 3, fontWeight: 600,
+                  background: f.enabled ? T.green + '20' : T.red + '20',
+                  color: f.enabled ? T.green : T.red,
+                }}>{f.enabled ? 'ACTIVO' : 'DESLIGADO'}</span>
+              </label>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* v3.21.0: Email Templates editor */}
