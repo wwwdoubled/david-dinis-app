@@ -1040,8 +1040,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.8';
-const APP_BUILD_DATE = '2026-05-27T13:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.9';
+const APP_BUILD_DATE = '2026-05-27T13:45'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1051,6 +1051,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.9', date: '2026-05-27', summary: 'Fix: botão "Administração" no sidebar ficava escondido atrás do widget de Sessão quando havia muitos items na nav. Aside passou a flex column; nav ganha flex:1 + overflowY:auto (scroll interno quando preciso); widget de Sessão deixou de ser position:absolute e passou a flex item normal no fim — sempre visível, nunca sobrepõe.' },
   { version: '3.21.8', date: '2026-05-27', summary: 'Listagem: avisa quando um artigo já está em móveis de OUTRAS campanhas/periods. Novo helper buildCrossPeriodZoneIndex(periods, excludePeriodId) que indexa slots por EAN cruzando todos os periods (excepto o actual e os hidden). ProductListing recebe allPeriods+currentPeriodId, computa otherZones por produto e renderiza badges laranja tracejados ao lado das zonas verdes existentes — formato "PeriodName · ZoneName" com tooltip do floor. Mostra até 2 inline + "+N noutras" se houver mais. Previne destacar o mesmo artigo em campanhas que correm em paralelo sem aperceber.' },
   { version: '3.21.7', date: '2026-05-27', summary: 'Multi-loja + análise de vendas em cloud + UX. (A) Sidebar: selector de loja redesenhado — card com badge gradiente (código da loja), nome + cidade, dropdown nativo invisível por cima para admin. (B) Admin pode mudar departamento E loja de qualquer utilizador via novo botão "Editar" na lista de utilizadores; nova EditUserModal. Badge da loja (código) aparece em cada UserRow. NewUserModal ganha dropdown de loja; Edge function admin-user-mgmt aceita storeId. Novos helpers setUserDepartment/setUserStore/cloudFetchStores. (C) Análise de Vendas guardada em cloud por chunks mensais — nova migration sales_chunks + counter_sales_chunks (PK store_id+year_month, gzip+base64, admin-only RLS). Ao subir um novo ficheiro, só os meses presentes são substituídos via upsert; restantes meses mantêm-se. Helpers cloudUploadSalesChunks/cloudFetchSalesChunks. Snapshot reconstruído via snapFromCloudChunks ao logar noutro device. (D) Novo filtro de meses na SalesView — pill bar multi-select acima dos filtros existentes, deriva meses da data; "Todos" repõe. Indicador "X meses na cloud" + status de sincronização. (E) handleClear apaga local E cloud (com confirmação explícita).' },
   { version: '3.21.6', date: '2026-05-27', summary: 'Multi-loja: scoping correcto de layout/zonas/cartazes. (A) Nova migration store_zones.store_id (a anterior 20260525220000 esqueceu-se desta tabela). Backfill para Aveiro + index. (B) cloudFetchStoreLayout agora filtra zones por store_id+department; floors continuam só por store_id (partilhados entre PTS/PES). (C) cloudCreateZone aceita storeId e faz stamp; cloudSeedDefaultLayout propaga storeId. (D) MainApp defaultLayout effect e NovidadesView passam currentStoreId; useEffect deps actualizadas. (E) Cartazes (slot.cartaz) seguem campaign — periods já tem store_id+department, scoping automático. Resultado: ao criar loja "Porto", admin gere pisos partilhados Porto + zonas isoladas PTS-Porto/PES-Porto sem afectar Aveiro.' },
@@ -5837,6 +5838,10 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
       width: 240, padding: '40px 24px', borderRight: `1px solid ${T.line}`,
       borderLeft: showDeptBadge ? `4px solid ${deptColor}` : 'none',
       position: 'sticky', top: 0, height: '100vh', background: T.bgEl, flexShrink: 0,
+      // v3.21.9: flex column → o nav cresce e dá scroll quando há muitos items
+      // (impede o botão "Administração" de ficar escondido atrás do widget Sessão)
+      display: 'flex', flexDirection: 'column',
+      boxSizing: 'border-box',
     }}>
       {/* v3.20.13: badge dept-color clicável (admin) — substitui o switcher pequeno antigo */}
       {showDeptBadge && (
@@ -5957,7 +5962,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
         </div>
       </div>
 
-      <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <nav style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden', paddingRight: 4, marginRight: -4 }}>
         {items.map((item, idx) => {
           const { id, label, icon: Icon, badge, accent, dot } = item;
           const active = view === id;
@@ -6011,7 +6016,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
       </nav>
 
       {!isMobile && (
-      <div className="sidebar-session-widget" style={{ position: 'absolute', bottom: 32, left: 24, right: 24 }}>
+      <div className="sidebar-session-widget" style={{ marginTop: 16, flexShrink: 0 }}>
         <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 16, boxShadow: `0 1px 0 ${T.line}, 0 8px 22px -14px rgba(0,0,0,0.08)` }}>
           <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 6 }}>
             {user ? 'Sessão' : 'Workspace'}
