@@ -1040,8 +1040,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.9';
-const APP_BUILD_DATE = '2026-05-27T13:45'; // Europe/Lisbon
+const APP_VERSION = '3.21.10';
+const APP_BUILD_DATE = '2026-05-27T14:15'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1051,6 +1051,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.10', date: '2026-05-27', summary: 'Fix HydrationGate preso: (A) "Continuar mesmo assim" passou a também ligar cloudDataLoaded=true (antes só ligava rowsHydrated → ficava preso se o fetch da cloud falhasse). (B) Botão skip aparece após 4s (antes 8s). (C) Novo auto-skip de segurança aos 30s — gate nunca mais fica preso indefinidamente, mesmo sem clique. Resultado: ao primeiro login ou refresh com cloud lenta/offline, a app desbloqueia sempre.' },
   { version: '3.21.9', date: '2026-05-27', summary: 'Fix: botão "Administração" no sidebar ficava escondido atrás do widget de Sessão quando havia muitos items na nav. Aside passou a flex column; nav ganha flex:1 + overflowY:auto (scroll interno quando preciso); widget de Sessão deixou de ser position:absolute e passou a flex item normal no fim — sempre visível, nunca sobrepõe.' },
   { version: '3.21.8', date: '2026-05-27', summary: 'Listagem: avisa quando um artigo já está em móveis de OUTRAS campanhas/periods. Novo helper buildCrossPeriodZoneIndex(periods, excludePeriodId) que indexa slots por EAN cruzando todos os periods (excepto o actual e os hidden). ProductListing recebe allPeriods+currentPeriodId, computa otherZones por produto e renderiza badges laranja tracejados ao lado das zonas verdes existentes — formato "PeriodName · ZoneName" com tooltip do floor. Mostra até 2 inline + "+N noutras" se houver mais. Previne destacar o mesmo artigo em campanhas que correm em paralelo sem aperceber.' },
   { version: '3.21.7', date: '2026-05-27', summary: 'Multi-loja + análise de vendas em cloud + UX. (A) Sidebar: selector de loja redesenhado — card com badge gradiente (código da loja), nome + cidade, dropdown nativo invisível por cima para admin. (B) Admin pode mudar departamento E loja de qualquer utilizador via novo botão "Editar" na lista de utilizadores; nova EditUserModal. Badge da loja (código) aparece em cada UserRow. NewUserModal ganha dropdown de loja; Edge function admin-user-mgmt aceita storeId. Novos helpers setUserDepartment/setUserStore/cloudFetchStores. (C) Análise de Vendas guardada em cloud por chunks mensais — nova migration sales_chunks + counter_sales_chunks (PK store_id+year_month, gzip+base64, admin-only RLS). Ao subir um novo ficheiro, só os meses presentes são substituídos via upsert; restantes meses mantêm-se. Helpers cloudUploadSalesChunks/cloudFetchSalesChunks. Snapshot reconstruído via snapFromCloudChunks ao logar noutro device. (D) Novo filtro de meses na SalesView — pill bar multi-select acima dos filtros existentes, deriva meses da data; "Todos" repõe. Indicador "X meses na cloud" + status de sincronização. (E) handleClear apaga local E cloud (com confirmação explícita).' },
@@ -5055,7 +5056,12 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           cloudDataLoaded={cloudDataLoaded}
           rowsHydrated={rowsHydrated}
           campaigns={campaigns}
-          onSkip={() => setRowsHydrated(true)}
+          onSkip={() => {
+            // v3.21.10: skip TEM de desbloquear ambas as condições, senão o
+            // gate fica preso quando o fetch da cloud está pendurado.
+            setCloudDataLoaded(true);
+            setRowsHydrated(true);
+          }}
         />
       )}
       <style>{fonts}{`
@@ -24074,9 +24080,12 @@ function HelpModal({ onClose }) {
 function HydrationGate({ cloudDataLoaded, rowsHydrated, campaigns, onSkip }) {
   const [allowSkip, setAllowSkip] = useState(false);
   useEffect(() => {
-    const t = setTimeout(() => setAllowSkip(true), 8000);
-    return () => clearTimeout(t);
-  }, []);
+    // v3.21.10: skip disponível mais cedo (4s) + auto-skip de segurança a 30s
+    // para que a app nunca fique presa indefinidamente
+    const t1 = setTimeout(() => setAllowSkip(true), 4000);
+    const t2 = setTimeout(() => { onSkip?.(); }, 30000);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [onSkip]);
   const total = (campaigns || []).length;
   const loaded = (campaigns || []).filter(c => Array.isArray(c.rows) && c.rows.length > 0).length;
   const pct = total > 0 ? Math.round((loaded / total) * 100) : 0;
