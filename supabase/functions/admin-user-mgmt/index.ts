@@ -103,7 +103,7 @@ Deno.serve(async (req) => {
     // 3) Cliente service-role para Admin API
     const adminClient = createClient(supabaseUrl, serviceKey);
 
-    let body: { action?: string; email?: string; userId?: string; department?: string };
+    let body: { action?: string; email?: string; userId?: string; department?: string; storeId?: string };
     try {
       body = await req.json();
     } catch {
@@ -112,6 +112,8 @@ Deno.serve(async (req) => {
     const { action, email, userId } = body || {};
     // v3.17.0: department é 'PTS' (default) | 'PES'. Qualquer outra string vira PTS.
     const department = body?.department === 'PES' ? 'PES' : 'PTS';
+    // v3.21.7: storeId opcional — uuid da loja para alocar o user
+    const storeId = typeof body?.storeId === 'string' && body.storeId.length > 10 ? body.storeId : null;
     const tempPassword = generateTempPassword();
 
     // ─── action: create ─────────────────────────────────────────────
@@ -133,12 +135,13 @@ Deno.serve(async (req) => {
         return jsonResponse({ error: error?.message || 'create_failed' }, 400);
       }
 
-      // upsert do profile com a flag + departamento
+      // upsert do profile com a flag + departamento + loja (v3.21.7)
       await adminClient.from('user_profiles').upsert({
         user_id: data.user.id,
         email: cleanEmail,
         must_change_password: true,
         department, // v3.17.0
+        ...(storeId ? { store_id: storeId } : {}),
       }, { onConflict: 'user_id' });
 
       return jsonResponse({
@@ -148,6 +151,7 @@ Deno.serve(async (req) => {
         userId: data.user.id,
         email: cleanEmail,
         department,
+        storeId,
       });
     }
 

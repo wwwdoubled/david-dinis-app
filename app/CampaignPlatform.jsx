@@ -10,7 +10,7 @@ import {
   GitCompareArrows, ArrowRight, Minus, NotebookPen, Mail, ArrowLeft, UserPlus,
   Shield, Users, Activity, Settings, ShieldCheck, ShieldOff, Clock, Circle,
   Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap,
-  KeyRound, EyeOff, Copy, FileDown, Printer, PackageOpen
+  KeyRound, EyeOff, Copy, FileDown, Printer, PackageOpen, ChevronDown
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
@@ -815,6 +815,117 @@ async function idbListSalesSnapshotsMeta() {
   } catch { return []; }
 }
 
+// ─── Sales cloud chunks (v3.21.7) ───────────────────────────────────────
+// Particiona rows por YYYY-MM e faz upsert por chunk → ao subir um novo
+// ficheiro, só os meses presentes são substituídos. Compressão gzip+base64.
+// Tabelas: sales_chunks / counter_sales_chunks (admin-only RLS).
+//
+// `kind` = 'sales' (detalhadas FNAC) | 'counter' (vendas ao mostrador)
+function _chunksTable(kind) {
+  return kind === 'counter' ? 'counter_sales_chunks' : 'sales_chunks';
+}
+
+function _partitionRowsByMonth(rows) {
+  const byMonth = new Map();
+  for (const r of rows || []) {
+    const ym = (r.date || '').slice(0, 7); // 'YYYY-MM'
+    if (!ym || ym.length !== 7) continue;
+    if (!byMonth.has(ym)) byMonth.set(ym, []);
+    byMonth.get(ym).push(r);
+  }
+  return byMonth;
+}
+
+async function cloudUploadSalesChunks({ kind, storeId, snap, userId, onProgress }) {
+  if (!supabase || !storeId || !snap || !Array.isArray(snap.rows)) {
+    return { ok: false, error: 'sem supabase/storeId/snap' };
+  }
+  const table = _chunksTable(kind);
+  const byMonth = _partitionRowsByMonth(snap.rows);
+  const months = Array.from(byMonth.keys()).sort();
+  if (months.length === 0) return { ok: false, error: 'snap sem rows datados' };
+  let done = 0;
+  const errors = [];
+  for (const ym of months) {
+    const rows = byMonth.get(ym);
+    try {
+      const rows_compressed = await gzipJSON(rows);
+      const dates = rows.map(r => r.date).filter(Boolean).sort();
+      const payload = {
+        store_id: storeId,
+        year_month: ym,
+        rows_compressed,
+        rows_count: rows.length,
+        date_from: dates[0] || null,
+        date_to:   dates[dates.length - 1] || null,
+        filename: snap.filename || null,
+        updated_by: userId || null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = await supabase.from(table).upsert(payload, {
+        onConflict: 'store_id,year_month',
+      });
+      if (error) errors.push(`${ym}: ${error.message}`);
+    } catch (e) {
+      errors.push(`${ym}: ${e?.message || e}`);
+    }
+    done++;
+    onProgress?.({ stage: 'cloud-upload', current: done, total: months.length, ym });
+  }
+  return { ok: errors.length === 0, months: months.length, errors };
+}
+
+async function cloudFetchSalesChunks({ kind, storeId, months = null }) {
+  if (!supabase || !storeId) return null;
+  const table = _chunksTable(kind);
+  let q = supabase.from(table).select('*').eq('store_id', storeId);
+  if (Array.isArray(months) && months.length > 0) q = q.in('year_month', months);
+  const { data, error } = await q;
+  if (error) {
+    console.warn(`cloudFetchSalesChunks(${kind}):`, error.message);
+    return null;
+  }
+  if (!data || data.length === 0) return { rows: [], chunks: [] };
+  const allRows = [];
+  for (const c of data) {
+    try {
+      const rows = await gunzipJSON(c.rows_compressed);
+      if (Array.isArray(rows)) for (const r of rows) allRows.push(r);
+    } catch (e) {
+      console.warn(`gunzip chunk ${c.year_month} falhou:`, e);
+    }
+  }
+  return { rows: allRows, chunks: data };
+}
+
+async function cloudDeleteSalesChunks({ kind, storeId }) {
+  if (!supabase || !storeId) return { ok: false };
+  const table = _chunksTable(kind);
+  const { error } = await supabase.from(table).delete().eq('store_id', storeId);
+  return { ok: !error, error: error?.message };
+}
+
+// Reconstrói um snap a partir de chunks cloud (formato compatível com
+// idbPutSalesSnapshot). Útil ao logar como admin noutro device.
+function snapFromCloudChunks({ kind, storeId, storeName, chunks, rows }) {
+  const dateFroms = chunks.map(c => c.date_from).filter(Boolean).sort();
+  const dateTos   = chunks.map(c => c.date_to).filter(Boolean).sort();
+  const importedAt = chunks.reduce((acc, c) => {
+    const t = c.updated_at || c.created_at; return t > acc ? t : acc;
+  }, '');
+  return {
+    id: `${kind}-cloud-${storeId}`,
+    store: storeName || '—',
+    filename: chunks[0]?.filename || '(cloud)',
+    dateFrom: dateFroms[0] || null,
+    dateTo:   dateTos[dateTos.length - 1] || null,
+    importedAt: importedAt || new Date().toISOString(),
+    rowsCount: rows.length,
+    rows,
+    fromCloud: true,
+  };
+}
+
 async function idbDeleteSalesSnapshot(id) {
   const db = await idbOpen();
   return new Promise((resolve, reject) => {
@@ -929,8 +1040,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.5';
-const APP_BUILD_DATE = '2026-05-26T01:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.7';
+const APP_BUILD_DATE = '2026-05-27T11:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -940,6 +1051,8 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.7', date: '2026-05-27', summary: 'Multi-loja + análise de vendas em cloud + UX. (A) Sidebar: selector de loja redesenhado — card com badge gradiente (código da loja), nome + cidade, dropdown nativo invisível por cima para admin. (B) Admin pode mudar departamento E loja de qualquer utilizador via novo botão "Editar" na lista de utilizadores; nova EditUserModal. Badge da loja (código) aparece em cada UserRow. NewUserModal ganha dropdown de loja; Edge function admin-user-mgmt aceita storeId. Novos helpers setUserDepartment/setUserStore/cloudFetchStores. (C) Análise de Vendas guardada em cloud por chunks mensais — nova migration sales_chunks + counter_sales_chunks (PK store_id+year_month, gzip+base64, admin-only RLS). Ao subir um novo ficheiro, só os meses presentes são substituídos via upsert; restantes meses mantêm-se. Helpers cloudUploadSalesChunks/cloudFetchSalesChunks. Snapshot reconstruído via snapFromCloudChunks ao logar noutro device. (D) Novo filtro de meses na SalesView — pill bar multi-select acima dos filtros existentes, deriva meses da data; "Todos" repõe. Indicador "X meses na cloud" + status de sincronização. (E) handleClear apaga local E cloud (com confirmação explícita).' },
+  { version: '3.21.6', date: '2026-05-27', summary: 'Multi-loja: scoping correcto de layout/zonas/cartazes. (A) Nova migration store_zones.store_id (a anterior 20260525220000 esqueceu-se desta tabela). Backfill para Aveiro + index. (B) cloudFetchStoreLayout agora filtra zones por store_id+department; floors continuam só por store_id (partilhados entre PTS/PES). (C) cloudCreateZone aceita storeId e faz stamp; cloudSeedDefaultLayout propaga storeId. (D) MainApp defaultLayout effect e NovidadesView passam currentStoreId; useEffect deps actualizadas. (E) Cartazes (slot.cartaz) seguem campaign — periods já tem store_id+department, scoping automático. Resultado: ao criar loja "Porto", admin gere pisos partilhados Porto + zonas isoladas PTS-Porto/PES-Porto sem afectar Aveiro.' },
   { version: '3.21.5', date: '2026-05-26', summary: 'Fix TDZ multi-loja: currentStoreId estava declarado depois de filteredCampaigns e filteredPeriods, que o referenciavam → ReferenceError "Cannot access eA before initialization" em runtime após v3.21.2. Movida a declaração de stores/currentStoreId para imediatamente após excludedFamilies, antes dos useMemos que dependem.' },
   { version: '3.21.4', date: '2026-05-26', summary: 'Build fix: kbdStyle estava redefinida (já existia como objecto no GlobalSearch desde v3.12.0; v3.20.29 introduziu uma 2ª como função no OnboardingTour). Vercel rejeitava o build com SyntaxError "kbdStyle redefined". Renomeado o do OnboardingTour para kbdInlineStyle. Sem mudança funcional — todos os commits v3.20.29→3.21.3 estavam em código não-buildado em prod.' },
   { version: '3.21.3', date: '2026-05-26', summary: 'Fix: maintenance mode tinha botão Guardar muito acima na página (depois da menu visibility), e os utilizadores não percebiam que precisavam de scroll de volta. Adicionado botão de save INLINE dentro da própria secção de manutenção — laranja quando o toggle está ON (deixa óbvio o que vai acontecer) e cinza escuro quando OFF. Mesmo handleSave que inclui maintenance no payload. Mensagem "Não te esqueças" removida porque já não é necessária.' },
@@ -1155,6 +1268,41 @@ async function setUserSuspended(userId, suspended) {
     .update({ suspended, updated_at: new Date().toISOString() })
     .eq('user_id', userId);
   return { ok: !error, error: error?.message };
+}
+
+// v3.21.7: admin pode mudar departamento de um user existente
+async function setUserDepartment(userId, department) {
+  if (!supabase) return { ok: false };
+  const dept = department === 'PES' ? 'PES' : 'PTS';
+  const { error } = await supabase
+    .from('user_profiles')
+    .update({ department: dept, updated_at: new Date().toISOString() })
+    .eq('user_id', userId);
+  return { ok: !error, error: error?.message };
+}
+
+// v3.21.7: admin aloca/muda a loja de um user
+async function setUserStore(userId, storeId) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase
+    .from('user_profiles')
+    .update({ store_id: storeId || null, updated_at: new Date().toISOString() })
+    .eq('user_id', userId);
+  return { ok: !error, error: error?.message };
+}
+
+// v3.21.7: lista todas as lojas (para selectors no admin)
+async function cloudFetchStores() {
+  if (!supabase) return [];
+  const { data, error } = await supabase
+    .from('stores')
+    .select('*')
+    .order('name', { ascending: true });
+  if (error) {
+    console.warn('cloudFetchStores failed:', error.message);
+    return [];
+  }
+  return data || [];
 }
 
 // ─── Realtime presence ─────────────────────────────────────────────────
@@ -1376,16 +1524,19 @@ async function deletePosterZone(id) {
 // Substitui o DEFAULT_FLOORS hardcoded. Schema: ver supabase/migrations/
 // 2026-05-12_store_layout.sql
 // ─────────────────────────────────────────────────────────────────────────
-async function cloudFetchStoreLayout(department) {
+async function cloudFetchStoreLayout(department, storeId) {
   if (!supabase) return null;
   try {
-    // store_floors são partilhados entre PTS/PES; zonas são per-dept.
-    // Para admins (que vêem todas via RLS) filtramos por department para
-    // mostrar apenas as do dept que está a "viewing as".
-    let zonesQ = supabase.from('store_zones').select('*').order('display_order', { ascending: true });
+    // store_floors: por loja (cada loja tem o seu próprio layout físico).
+    // store_zones: por dept dentro da loja (PTS e PES têm zonas diferentes).
+    // v3.21.6: filtro por store_id quando fornecido.
+    let floorsQ = supabase.from('store_floors').select('*').order('display_order', { ascending: true });
+    let zonesQ  = supabase.from('store_zones').select('*').order('display_order', { ascending: true });
+    if (storeId) floorsQ = floorsQ.eq('store_id', storeId);
+    if (storeId) zonesQ = zonesQ.eq('store_id', storeId);
     if (department) zonesQ = zonesQ.eq('department', department);
     const [floorsRes, zonesRes] = await Promise.all([
-      supabase.from('store_floors').select('*').order('display_order', { ascending: true }),
+      floorsQ,
       zonesQ,
     ]);
     if (floorsRes.error) {
@@ -1419,7 +1570,7 @@ async function cloudFetchStoreLayout(department) {
   }
 }
 
-async function cloudCreateFloor({ name, color, star, displayOrder, createdBy }) {
+async function cloudCreateFloor({ name, color, star, displayOrder, createdBy, storeId }) {
   if (!supabase) return { ok: false };
   const { data, error } = await supabase
     .from('store_floors')
@@ -1427,6 +1578,8 @@ async function cloudCreateFloor({ name, color, star, displayOrder, createdBy }) 
       name, color: color || '#5DA050', star: !!star,
       display_order: displayOrder ?? 0,
       created_by: createdBy,
+      // v3.21.6: stamp da loja (multi-store)
+      ...(storeId ? { store_id: storeId } : {}),
     })
     .select()
     .single();
@@ -1446,7 +1599,7 @@ async function cloudDeleteFloor(id) {
   return { ok: !error, error: error?.message };
 }
 
-async function cloudCreateZone({ floorId, name, displayOrder, createdBy, department }) {
+async function cloudCreateZone({ floorId, name, displayOrder, createdBy, department, storeId }) {
   if (!supabase) return { ok: false };
   const { data, error } = await supabase
     .from('store_zones')
@@ -1455,6 +1608,8 @@ async function cloudCreateZone({ floorId, name, displayOrder, createdBy, departm
       display_order: displayOrder ?? 0,
       created_by: createdBy,
       department: department || 'PTS',
+      // v3.21.6: stamp da loja (multi-store)
+      ...(storeId ? { store_id: storeId } : {}),
     })
     .select()
     .single();
@@ -1474,7 +1629,7 @@ async function cloudDeleteZone(id) {
 }
 
 // Seed inicial: copia DEFAULT_FLOORS para a cloud (chamado uma vez via admin)
-async function cloudSeedDefaultLayout(createdBy, department) {
+async function cloudSeedDefaultLayout(createdBy, department, storeId) {
   if (!supabase) return { ok: false, error: 'Supabase indisponível' };
   let floorsCreated = 0;
   let zonesCreated = 0;
@@ -1485,6 +1640,7 @@ async function cloudSeedDefaultLayout(createdBy, department) {
     const floorRes = await cloudCreateFloor({
       name: f.name, color: f.color, star: f.star,
       displayOrder: i, createdBy,
+      storeId, // v3.21.6: stamp da loja
     });
     if (!floorRes.ok) {
       errors.push(`Piso "${f.name}": ${floorRes.error || 'erro desconhecido'}`);
@@ -1495,7 +1651,7 @@ async function cloudSeedDefaultLayout(createdBy, department) {
     for (let j = 0; j < (f.zones || []).length; j++) {
       const z = f.zones[j];
       zonesAttempted++;
-      const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy, department });
+      const zRes = await cloudCreateZone({ floorId, name: z.name, displayOrder: j, createdBy, department, storeId });
       if (zRes.ok) zonesCreated++;
       else errors.push(`Zona "${z.name}" em "${f.name}": ${zRes.error || 'erro'}`);
     }
@@ -4133,7 +4289,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
     if (!supabase) return;
     let cancelled = false;
     const load = async () => {
-      const cloudLayout = await cloudFetchStoreLayout(userDepartment);
+      const cloudLayout = await cloudFetchStoreLayout(userDepartment, currentStoreId);
       if (cancelled) return;
       if (cloudLayout && Array.isArray(cloudLayout) && cloudLayout.length > 0) {
         const next = layoutOnly(cloudLayout);
@@ -4151,7 +4307,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
       cancelled = true;
       window.removeEventListener('dd:store-layout-changed', onChange);
     };
-  }, [userDepartment]);
+  }, [userDepartment, currentStoreId]);
 
   // One-time migration (per session): for each period without floors,
   // copy floors from the oldest campaign in that period (legacy plan owned
@@ -5351,7 +5507,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {/* v3.20.12: 'sales' no sidebar (admin-only) + também acessível dentro de Admin */}
-          {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} />}
+          {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} currentStoreId={currentStoreId} currentStoreName={stores.find(s => s.id === currentStoreId)?.name} currentUserId={user?.id} />}
           {view === 'sales' && !isAdmin && (
             <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
               <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
@@ -5389,7 +5545,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             </div>
           )}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
-          {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} />}
+          {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} currentStoreId={currentStoreId} />}
           {view === 'devolucoes' && <DevolucoesView user={user} userDepartment={userDepartment} />}
           {view === 'admin' && isAdmin && (
             <AdminView
@@ -5401,6 +5557,8 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               stockRowsPO3={stockRowsPO3}
               stockMapPO2={stockMapPO2}
               stockMapPO3={stockMapPO3}
+              currentStoreId={currentStoreId}
+              currentStoreName={stores.find(s => s.id === currentStoreId)?.name}
             />
           )}
           {view === 'admin' && !isAdmin && (
@@ -5717,32 +5875,87 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
         </button>
       )}
 
-      {/* v3.21.2: Store selector — admin escolhe; user vê fixo */}
+      {/* v3.21.7: Store selector polido — card com ícone, código e nome */}
       {stores.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>
-            🏬 Loja
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Store size={10} /> Loja actual
           </div>
           {isAdmin && stores.length > 1 ? (
-            <select
-              value={currentStoreId || ''}
-              onChange={e => setCurrentStoreId(e.target.value)}
-              style={{
-                width: '100%', padding: '7px 8px', fontSize: 12,
-                border: `1px solid ${T.line}`, borderRadius: 4,
-                background: T.bg, color: T.ink, fontFamily: 'inherit',
+            <div style={{ position: 'relative' }}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '10px 36px 10px 12px', borderRadius: 8,
+                background: T.bgEl, border: `1.5px solid ${T.line}`,
                 cursor: 'pointer',
-              }}>
-              {stores.map(s => (
-                <option key={s.id} value={s.id}>{s.name}{!s.active ? ' (inactiva)' : ''}</option>
-              ))}
-            </select>
+                transition: 'border-color 0.15s, box-shadow 0.15s',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = T.accent; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = T.line; }}
+              >
+                {/* Badge com código da loja */}
+                <div style={{
+                  width: 34, height: 34, borderRadius: 8,
+                  background: `linear-gradient(135deg, ${T.accent}, ${T.purple || '#7c3aed'})`,
+                  color: '#fff', display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', fontWeight: 700, fontSize: 11,
+                  letterSpacing: '0.04em', fontFamily: 'Geist Mono',
+                  flexShrink: 0,
+                }}>
+                  {(currentStore?.code || '—').slice(0, 3).toUpperCase()}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 600, color: T.ink,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    lineHeight: 1.2,
+                  }}>{currentStore?.name || '—'}</div>
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, display: 'flex', alignItems: 'center', gap: 5 }}>
+                    {currentStore?.city || currentStore?.country || '—'}
+                    {currentStore && !currentStore.active && (
+                      <span style={{ padding: '0 5px', background: T.lineSoft, borderRadius: 3, fontSize: 9, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft }}>Inactiva</span>
+                    )}
+                  </div>
+                </div>
+                <ChevronDown size={14} style={{ position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', color: T.inkMute, pointerEvents: 'none' }} />
+              </div>
+              {/* Native select por cima (invisível) para abrir o dropdown OS-native */}
+              <select
+                value={currentStoreId || ''}
+                onChange={e => setCurrentStoreId(e.target.value)}
+                aria-label="Mudar de loja"
+                style={{
+                  position: 'absolute', inset: 0, width: '100%', height: '100%',
+                  opacity: 0, cursor: 'pointer', fontFamily: 'inherit',
+                }}>
+                {stores.map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.code}){!s.active ? ' — inactiva' : ''}</option>
+                ))}
+              </select>
+            </div>
           ) : (
             <div style={{
-              padding: '7px 10px', fontSize: 12, fontWeight: 500,
-              background: T.bg, border: `1px solid ${T.line}`, borderRadius: 4,
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 12px', borderRadius: 8,
+              background: T.bgEl, border: `1.5px solid ${T.line}`,
             }}>
-              {currentStore?.name || '—'}
+              <div style={{
+                width: 34, height: 34, borderRadius: 8,
+                background: `linear-gradient(135deg, ${T.accent}, ${T.purple || '#7c3aed'})`,
+                color: '#fff', display: 'flex', alignItems: 'center',
+                justifyContent: 'center', fontWeight: 700, fontSize: 11,
+                letterSpacing: '0.04em', fontFamily: 'Geist Mono', flexShrink: 0,
+              }}>
+                {(currentStore?.code || '—').slice(0, 3).toUpperCase()}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: T.ink, lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {currentStore?.name || '—'}
+                </div>
+                <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2 }}>
+                  {currentStore?.city || currentStore?.country || '—'}
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -6946,12 +7159,16 @@ function isoWeek(dateIso) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}) {
+function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, currentStoreId, currentStoreName, currentUserId } = {}) {
   const [snapshot, setSnapshot] = useState(null);
   const [loading, setLoading]   = useState(true);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState(null);
   const [importProgress, setImportProgress] = useState(null); // v3.20.17: { stage, message, total, current }
+  // v3.21.7: cloud sync (chunked por mês) + filtro de meses
+  const [cloudSyncing, setCloudSyncing] = useState(false);
+  const [cloudStatus, setCloudStatus] = useState(null); // { months, lastSyncAt }
+  const [selectedMonths, setSelectedMonths] = useState(null); // null = todos; Set<'YYYY-MM'> = filtrar
   const [tab, setTab] = useStoredState('sales.tab', 'overview');
   const [from, setFrom] = useState('');
   const [to, setTo]     = useState('');
@@ -6983,30 +7200,79 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
 
   useEffect(() => {
     let alive = true;
-    idbGetActiveSalesSnapshot().then(s => {
+    (async () => {
+      const local = await idbGetActiveSalesSnapshot();
       if (!alive) return;
-      setSnapshot(s);
-      if (s) {
-        setFrom(s.dateFrom || '');
-        setTo(s.dateTo || '');
+      // v3.21.7: tenta cloud também (chunked por mês) e mantém o mais fresco
+      let cloud = null;
+      if (currentStoreId) {
+        cloud = await cloudFetchSalesChunks({ kind: 'sales', storeId: currentStoreId });
+      }
+      let chosen = local;
+      if (cloud && cloud.rows.length > 0) {
+        if (!local || cloud.rows.length > (local.rowsCount || 0)) {
+          chosen = snapFromCloudChunks({ kind: 'sales', storeId: currentStoreId, storeName: currentStoreName, chunks: cloud.chunks, rows: cloud.rows });
+          // hidrata IDB para uso offline
+          try { await idbPutSalesSnapshot(chosen); } catch {}
+        }
+        setCloudStatus({ months: cloud.chunks.length, lastSyncAt: cloud.chunks.reduce((acc, c) => (c.updated_at > acc ? c.updated_at : acc), '') });
+      }
+      if (!alive) return;
+      setSnapshot(chosen);
+      if (chosen) {
+        setFrom(chosen.dateFrom || '');
+        setTo(chosen.dateTo || '');
       }
       setLoading(false);
-    });
+    })();
     return () => { alive = false; };
-  }, []);
+  }, [currentStoreId, currentStoreName]);
 
   const handleFile = async (file) => {
     setImporting(true);
     setImportError(null);
     setImportProgress({ stage: 'read', message: 'A ler ficheiro…' });
     try {
-      const snap = await parseFnacSalesExcel(file, (p) => setImportProgress(p));
-      await idbPutSalesSnapshot(snap);
-      setSnapshot(snap);
-      setFrom(snap.dateFrom || '');
-      setTo(snap.dateTo || '');
+      const newSnap = await parseFnacSalesExcel(file, (p) => setImportProgress(p));
+      // v3.21.7: merge incremental — mantém rows de meses NÃO presentes neste
+      // ficheiro; substitui apenas os meses contidos no upload.
+      let mergedSnap = newSnap;
+      if (snapshot && Array.isArray(snapshot.rows) && snapshot.rows.length > 0) {
+        const newMonths = new Set(Array.from(_partitionRowsByMonth(newSnap.rows).keys()));
+        const kept = snapshot.rows.filter(r => {
+          const ym = (r.date || '').slice(0, 7);
+          return ym && !newMonths.has(ym);
+        });
+        const allRows = kept.concat(newSnap.rows);
+        const dates = allRows.map(r => r.date).filter(Boolean).sort();
+        mergedSnap = {
+          ...newSnap,
+          id: newSnap.id,
+          rows: allRows,
+          rowsCount: allRows.length,
+          dateFrom: dates[0] || newSnap.dateFrom,
+          dateTo:   dates[dates.length - 1] || newSnap.dateTo,
+        };
+      }
+      await idbPutSalesSnapshot(mergedSnap);
+      setSnapshot(mergedSnap);
+      setFrom(mergedSnap.dateFrom || '');
+      setTo(mergedSnap.dateTo || '');
       setDrillPath([]);
       setFam1Filter('all');
+      // v3.21.7: push para cloud (só os meses presentes no NEW snap → upsert
+      // substitui os chunks desses meses, os outros mantêm-se intactos)
+      if (currentStoreId) {
+        setCloudSyncing(true);
+        setImportProgress({ stage: 'cloud-upload', message: 'A guardar na cloud…' });
+        const r = await cloudUploadSalesChunks({
+          kind: 'sales', storeId: currentStoreId, snap: newSnap, userId: currentUserId,
+          onProgress: (p) => setImportProgress(p),
+        });
+        if (!r.ok) console.warn('cloud sync (sales):', r.errors);
+        else setCloudStatus({ months: r.months, lastSyncAt: new Date().toISOString() });
+        setCloudSyncing(false);
+      }
     } catch (err) {
       setImportError(err.message || String(err));
     } finally {
@@ -7016,36 +7282,65 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   };
 
   const handleClear = async () => {
-    if (!snapshot || !confirm('Apagar o snapshot importado? Esta acção é local (não afecta outros admins).')) return;
+    if (!snapshot || !confirm('Apagar o snapshot importado? Esta acção é local E na cloud (afecta todos os admins desta loja).')) return;
     await idbDeleteSalesSnapshot(snapshot.id);
+    if (currentStoreId) await cloudDeleteSalesChunks({ kind: 'sales', storeId: currentStoreId });
     setSnapshot(null);
     setFrom(''); setTo('');
+    setCloudStatus(null);
+    setSelectedMonths(null);
   };
 
   // ── Counter sales (Equipa) ───────────────────────────────────────────
   useEffect(() => {
     let alive = true;
-    idbGetActiveCounterSalesSnapshot().then(s => {
+    (async () => {
+      const local = await idbGetActiveCounterSalesSnapshot();
       if (!alive) return;
-      setCounterSnap(s);
-      if (s) {
-        setTeamFrom(s.dateFrom || '');
-        setTeamTo(s.dateTo || '');
+      let chosen = local;
+      if (currentStoreId) {
+        const cloud = await cloudFetchSalesChunks({ kind: 'counter', storeId: currentStoreId });
+        if (cloud && cloud.rows.length > (local?.rowsCount || 0)) {
+          chosen = snapFromCloudChunks({ kind: 'counter', storeId: currentStoreId, storeName: currentStoreName, chunks: cloud.chunks, rows: cloud.rows });
+          try { await idbPutCounterSalesSnapshot(chosen); } catch {}
+        }
       }
-    });
+      if (!alive) return;
+      setCounterSnap(chosen);
+      if (chosen) {
+        setTeamFrom(chosen.dateFrom || '');
+        setTeamTo(chosen.dateTo || '');
+      }
+    })();
     return () => { alive = false; };
-  }, []);
+  }, [currentStoreId, currentStoreName]);
 
   const handleCounterFile = async (file) => {
     setCounterImporting(true);
     setCounterError(null);
     try {
-      const snap = await parseCounterSalesExcel(file);
-      await idbPutCounterSalesSnapshot(snap);
-      setCounterSnap(snap);
-      setTeamFrom(snap.dateFrom || '');
-      setTeamTo(snap.dateTo || '');
+      const newSnap = await parseCounterSalesExcel(file);
+      // Merge incremental por mês
+      let mergedSnap = newSnap;
+      if (counterSnap && Array.isArray(counterSnap.rows) && counterSnap.rows.length > 0) {
+        const newMonths = new Set(Array.from(_partitionRowsByMonth(newSnap.rows).keys()));
+        const kept = counterSnap.rows.filter(r => {
+          const ym = (r.date || '').slice(0, 7);
+          return ym && !newMonths.has(ym);
+        });
+        const allRows = kept.concat(newSnap.rows);
+        const dates = allRows.map(r => r.date).filter(Boolean).sort();
+        mergedSnap = { ...newSnap, rows: allRows, rowsCount: allRows.length, dateFrom: dates[0] || newSnap.dateFrom, dateTo: dates[dates.length - 1] || newSnap.dateTo };
+      }
+      await idbPutCounterSalesSnapshot(mergedSnap);
+      setCounterSnap(mergedSnap);
+      setTeamFrom(mergedSnap.dateFrom || '');
+      setTeamTo(mergedSnap.dateTo || '');
       setSelectedCollab(null);
+      if (currentStoreId) {
+        const r = await cloudUploadSalesChunks({ kind: 'counter', storeId: currentStoreId, snap: newSnap, userId: currentUserId });
+        if (!r.ok) console.warn('cloud sync (counter):', r.errors);
+      }
     } catch (err) {
       setCounterError(err.message || String(err));
     } finally {
@@ -7054,8 +7349,9 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   };
 
   const handleCounterClear = async () => {
-    if (!counterSnap || !confirm('Apagar o snapshot de vendas ao mostrador?')) return;
+    if (!counterSnap || !confirm('Apagar o snapshot de vendas ao mostrador? Esta acção é local E na cloud.')) return;
     await idbDeleteCounterSalesSnapshot(counterSnap.id);
+    if (currentStoreId) await cloudDeleteSalesChunks({ kind: 'counter', storeId: currentStoreId });
     setCounterSnap(null);
     setTeamFrom(''); setTeamTo(''); setSelectedCollab(null);
   };
@@ -7503,9 +7799,25 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
   }, [counterFiltered, counterSnap, teamGoals, eligibleFams]);
 
   // ── Filtragem global (date range + família 1 + POS + price + margem) ─
+  // v3.21.7: meses disponíveis (derivados das rows)
+  const availableMonths = useMemo(() => {
+    if (!snapshot) return [];
+    const s = new Set();
+    for (const r of snapshot.rows) {
+      const ym = (r.date || '').slice(0, 7);
+      if (ym && ym.length === 7) s.add(ym);
+    }
+    return Array.from(s).sort();
+  }, [snapshot]);
+
   const filteredRows = useMemo(() => {
     if (!snapshot) return [];
     return snapshot.rows.filter(r => {
+      // v3.21.7: filtro de meses (multi-select). null = todos.
+      if (selectedMonths && selectedMonths.size > 0) {
+        const ym = (r.date || '').slice(0, 7);
+        if (!selectedMonths.has(ym)) return false;
+      }
       if (from && r.date && r.date < from) return false;
       if (to   && r.date && r.date > to)   return false;
       if (fam1Filter !== 'all' && r.fam1 !== fam1Filter) return false;
@@ -7525,7 +7837,7 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
       }
       return true;
     });
-  }, [snapshot, from, to, fam1Filter, posFilter, priceRange, marginCat]);
+  }, [snapshot, from, to, fam1Filter, posFilter, priceRange, marginCat, selectedMonths]);
 
   // Lista de famílias 1 únicas (para dropdown)
   const allFam1 = useMemo(() => {
@@ -8298,6 +8610,57 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 } = {}
           <X size={11} /> Apagar
         </button>
       </div>
+
+      {/* v3.21.7: Filtro de meses (pill bar) */}
+      {availableMonths.length > 1 && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 12, padding: '10px 14px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono', letterSpacing: '0.1em', textTransform: 'uppercase', marginRight: 4 }}>
+            Meses
+          </span>
+          <button
+            onClick={() => setSelectedMonths(null)}
+            title="Mostrar todos os meses"
+            style={{
+              padding: '5px 10px', fontSize: 11, borderRadius: 12,
+              border: `1px solid ${!selectedMonths ? T.accent : T.line}`,
+              background: !selectedMonths ? T.accent : 'transparent',
+              color: !selectedMonths ? '#fff' : T.inkSoft,
+              cursor: 'pointer', fontFamily: 'inherit', fontWeight: 500,
+            }}
+          >Todos ({availableMonths.length})</button>
+          {availableMonths.map(ym => {
+            const on = selectedMonths?.has(ym);
+            const [y, m] = ym.split('-');
+            const label = `${['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][Number(m) - 1]}/${y.slice(2)}`;
+            return (
+              <button
+                key={ym}
+                onClick={() => {
+                  setSelectedMonths(prev => {
+                    const next = new Set(prev || []);
+                    next.has(ym) ? next.delete(ym) : next.add(ym);
+                    return next.size === 0 ? null : next;
+                  });
+                }}
+                style={{
+                  padding: '5px 10px', fontSize: 11, borderRadius: 12,
+                  border: `1px solid ${on ? T.accent : T.line}`,
+                  background: on ? T.accent : 'transparent',
+                  color: on ? '#fff' : T.inkSoft,
+                  cursor: 'pointer', fontFamily: 'inherit', fontWeight: 500,
+                }}
+              >{label}</button>
+            );
+          })}
+          {cloudStatus && (
+            <div style={{ marginLeft: 'auto', fontSize: 10, color: T.inkMute, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Database size={10} />
+              {cloudStatus.months} mês{cloudStatus.months !== 1 ? 'es' : ''} na cloud
+              {cloudSyncing && <span style={{ color: T.accent }}>· a sincronizar…</span>}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Filtros */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', marginBottom: 20, flexWrap: 'wrap' }}>
@@ -19789,7 +20152,7 @@ const CREDENTIAL_TYPES = [
 // Lista de artigos com data de lançamento + alocação a piso/zona da loja.
 // Reusa store_floors + store_zones para o dropdown de alocação.
 // ─────────────────────────────────────────────────────────────────────────
-function NovidadesView({ user, userDepartment }) {
+function NovidadesView({ user, userDepartment, currentStoreId }) {
   const [items, setItems] = useState(null);
   const [editing, setEditing] = useState(null); // null | {id?, ...}
   const [search, setSearch] = useState('');
@@ -19807,14 +20170,14 @@ function NovidadesView({ user, userDepartment }) {
   // Carrega pisos + zonas para o dropdown de alocação (filtrado pelo dept)
   useEffect(() => {
     let alive = true;
-    cloudFetchStoreLayout(userDepartment).then(layout => {
+    cloudFetchStoreLayout(userDepartment, currentStoreId).then(layout => {
       if (!alive || !layout) return;
       setFloors(layout);
       const allZones = layout.flatMap(f => (f.zones || []).map(z => ({ ...z, floorId: f.id, floorName: f.name })));
       setZones(allZones);
     });
     return () => { alive = false; };
-  }, [userDepartment]);
+  }, [userDepartment, currentStoreId]);
 
   const filtered = useMemo(() => {
     if (!items) return [];
@@ -21990,7 +22353,7 @@ function BPSlotFull({ slot }) {
 // AdminView — administration panel (only visible to admins)
 // Tabs: Utilizadores | Atividade | Configuração | Estatísticas
 // ─────────────────────────────────────────────────────────────────────────
-function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3 }) {
+function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, currentStoreId, currentStoreName }) {
   const [tab, setTab] = useStoredState('admin.tab', 'users');
 
   return (
@@ -22041,7 +22404,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
       {tab === 'system' && <AdminSystemTab />}
       {tab === 'stores' && <AdminStoresTab currentUserId={user?.id} />}
-      {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} />}
+      {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} currentStoreId={currentStoreId} currentStoreName={currentStoreName} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
@@ -22802,6 +23165,10 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
   const [tempPwModal, setTempPwModal] = useState(null); // { email, tempPassword, action, department? }
   const [busyAction, setBusyAction] = useState(false);
   const [newUserModal, setNewUserModal] = useState(false); // v3.17.0: modal de criação com dept
+  // v3.21.7: lista de lojas + modal de edição
+  const [stores, setStores] = useState([]);
+  const [editingUser, setEditingUser] = useState(null); // { user_id, email, department, store_id }
+  useEffect(() => { cloudFetchStores().then(setStores); }, []);
 
   // Tick the clock every 15s for real-time online indicator
   useEffect(() => {
@@ -22874,20 +23241,62 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
     if (busyAction) return;
     setNewUserModal(true);
   };
-  const handleNewUserSubmit = async (email, department) => {
+  const handleNewUserSubmit = async (email, department, storeId) => {
     setBusyAction(true);
     try {
-      const data = await callAdminFn({ action: 'create', email: email.trim(), department });
+      const data = await callAdminFn({ action: 'create', email: email.trim(), department, storeId });
       setNewUserModal(false);
+      // Se Edge Function não suportar storeId ainda, faz o stamp directamente
+      if (storeId && data?.userId) {
+        try { await setUserStore(data.userId, storeId); } catch {}
+      }
       setTempPwModal({ email: data.email, tempPassword: data.tempPassword, action: 'create', department: data.department });
       await logActivity({
         userId: currentUserId, userEmail: currentUserEmail,
         action: 'create', resourceType: 'user', resourceName: data.email,
-        resourceId: data.userId, metadata: { department: data.department },
+        resourceId: data.userId, metadata: { department: data.department, store_id: storeId || null },
       });
       refresh();
     } catch (err) {
       alert('Erro a criar utilizador: ' + err.message);
+    } finally {
+      setBusyAction(false);
+    }
+  };
+
+  // v3.21.7: editar dept + loja de um user
+  const handleEditUser = (u) => setEditingUser({
+    user_id: u.user_id, email: u.email,
+    department: u.department || 'PTS',
+    store_id: u.store_id || '',
+  });
+  const handleEditUserSubmit = async (patch) => {
+    if (!editingUser) return;
+    setBusyAction(true);
+    try {
+      const changes = {};
+      if (patch.department && patch.department !== editingUser.department) {
+        const r = await setUserDepartment(editingUser.user_id, patch.department);
+        if (!r.ok) throw new Error('dept: ' + (r.error || ''));
+        changes.department = patch.department;
+      }
+      if ((patch.store_id || null) !== (editingUser.store_id || null)) {
+        const r = await setUserStore(editingUser.user_id, patch.store_id || null);
+        if (!r.ok) throw new Error('store: ' + (r.error || ''));
+        changes.store_id = patch.store_id || null;
+      }
+      if (Object.keys(changes).length > 0) {
+        await logActivity({
+          userId: currentUserId, userEmail: currentUserEmail,
+          action: 'update', resourceType: 'user',
+          resourceId: editingUser.user_id, resourceName: editingUser.email,
+          metadata: changes,
+        });
+      }
+      setEditingUser(null);
+      refresh();
+    } catch (err) {
+      alert('Erro a editar: ' + err.message);
     } finally {
       setBusyAction(false);
     }
@@ -23020,11 +23429,13 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
             <UserRow
               key={u.user_id}
               user={u}
+              stores={stores}
               isCurrent={u.user_id === currentUserId}
               isLast={idx === filtered.length - 1}
               onToggleAdmin={() => handleToggleAdmin(u)}
               onToggleSuspend={() => handleToggleSuspend(u)}
               onResetPw={() => handleResetPw(u)}
+              onEdit={() => handleEditUser(u)}
               busyAction={busyAction}
             />
           ))}
@@ -23048,13 +23459,91 @@ function AdminUsersTab({ currentUserId, currentUserEmail }) {
           busy={busyAction}
           onCreate={handleNewUserSubmit}
           onClose={() => setNewUserModal(false)}
+          stores={stores}
+        />
+      )}
+
+      {/* v3.21.7: editar dept + loja de um user existente */}
+      {editingUser && (
+        <EditUserModal
+          user={editingUser}
+          stores={stores}
+          busy={busyAction}
+          onSubmit={handleEditUserSubmit}
+          onClose={() => setEditingUser(null)}
         />
       )}
     </div>
   );
 }
 
-function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend, onResetPw, busyAction }) {
+// v3.21.7: modal de edição (dept + loja) de um user existente
+function EditUserModal({ user, stores, busy, onSubmit, onClose }) {
+  const [department, setDepartment] = useState(user.department || 'PTS');
+  const [storeId, setStoreId] = useState(user.store_id || '');
+  useEffect(() => {
+    const onKey = (ev) => { if (ev.key === 'Escape' && !busy) onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [busy, onClose]);
+  const submit = () => { if (!busy) onSubmit({ department, store_id: storeId || null }); };
+  return (
+    <div onClick={() => !busy && onClose()} style={{
+      position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.55)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9000, padding: 20,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: T.bgEl, border: `1px solid ${T.line}`,
+        borderRadius: 14, padding: 28, maxWidth: 440, width: '100%',
+        boxShadow: '0 24px 60px -20px rgba(0,0,0,0.4)',
+      }}>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 8 }}>
+          Editar utilizador
+        </div>
+        <h3 style={{ margin: '0 0 4px', fontSize: 18, fontWeight: 600, color: T.ink }}>{user.email}</h3>
+        <div style={{ fontSize: 11, color: T.inkMute, marginBottom: 18 }}>Departamento + loja</div>
+
+        <label style={{ display: 'block', marginBottom: 14 }}>
+          <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500 }}>Departamento</div>
+          <select value={department} onChange={(e) => setDepartment(e.target.value)} disabled={busy}
+            style={{ width: '100%', padding: '11px 14px', fontSize: 14, fontFamily: 'inherit', background: T.paper || '#fff', color: T.ink, border: `1.5px solid ${T.line}`, borderRadius: 14, cursor: 'pointer' }}>
+            <option value="PTS">PTS — Produtos Técnicos e Serviços</option>
+            <option value="PES">PES — Produtos Editoriais e Serviços</option>
+          </select>
+        </label>
+
+        {stores.length > 0 && (
+          <label style={{ display: 'block', marginBottom: 18 }}>
+            <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Store size={12} /> Loja
+            </div>
+            <select value={storeId} onChange={(e) => setStoreId(e.target.value)} disabled={busy}
+              style={{ width: '100%', padding: '11px 14px', fontSize: 14, fontFamily: 'inherit', background: T.paper || '#fff', color: T.ink, border: `1.5px solid ${T.line}`, borderRadius: 14, cursor: 'pointer' }}>
+              <option value="">— sem loja —</option>
+              {stores.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.code}){!s.active ? ' — inactiva' : ''}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={submit} disabled={busy} style={{
+            flex: 1, padding: '10px 16px', background: busy ? T.line : T.accent, color: busy ? T.inkMute : '#fff',
+            border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 500, cursor: busy ? 'wait' : 'pointer',
+          }}>{busy ? 'A guardar…' : 'Guardar'}</button>
+          <button onClick={onClose} disabled={busy} style={{
+            padding: '10px 16px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 13, cursor: busy ? 'not-allowed' : 'pointer',
+          }}>Cancelar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UserRow({ user, stores = [], isCurrent, isLast, onToggleAdmin, onToggleSuspend, onResetPw, onEdit, busyAction }) {
+  const userStore = stores.find(s => s.id === user.store_id);
   const lastSeen = user.last_seen_at ? new Date(user.last_seen_at) : null;
   const lastSeenText = !lastSeen ? 'nunca'
     : user.online ? 'online agora'
@@ -23119,6 +23608,18 @@ function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend, onRe
               fontFamily: 'Geist Mono', textTransform: 'uppercase',
             }}>{user.department}</span>
           )}
+          {/* v3.21.7: badge da loja */}
+          {userStore && (
+            <span title={userStore.name} style={{
+              fontSize: 9, padding: '1px 5px',
+              background: T.lineSoft, color: T.inkSoft,
+              borderRadius: 2, fontWeight: 600, letterSpacing: '0.05em',
+              fontFamily: 'Geist Mono', textTransform: 'uppercase',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}>
+              <Store size={8} /> {userStore.code}
+            </span>
+          )}
         </div>
         <div style={{ fontSize: 11, color: T.inkMute, marginTop: 2, display: 'flex', gap: 10 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
@@ -23135,6 +23636,17 @@ function UserRow({ user, isCurrent, isLast, onToggleAdmin, onToggleSuspend, onRe
       {/* Actions */}
       {!isCurrent && (
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {onEdit && (
+            <button
+              onClick={onEdit}
+              disabled={busyAction}
+              title="Editar departamento e loja"
+              style={adminActionBtn(T.accent)}
+            >
+              <Pencil size={11} />
+              Editar
+            </button>
+          )}
           {onResetPw && (
             <button
               onClick={onResetPw}
@@ -23657,9 +24169,10 @@ function AdminViewPickerModal({ onPick }) {
 
 // v3.17.0: modal de criar utilizador. Email + dept dropdown. Submit chama
 // Edge Function admin-user-mgmt (via parent handler) que gera temp pw.
-function NewUserModal({ busy, onCreate, onClose }) {
+function NewUserModal({ busy, onCreate, onClose, stores = [], defaultStoreId = null }) {
   const [email, setEmail] = useState('');
   const [department, setDepartment] = useState('PTS');
+  const [storeId, setStoreId] = useState(defaultStoreId || (stores[0]?.id || ''));
   const [error, setError] = useState('');
 
   const submit = () => {
@@ -23667,7 +24180,8 @@ function NewUserModal({ busy, onCreate, onClose }) {
     setError('');
     const e = email.trim();
     if (!e.includes('@')) { setError('Email inválido.'); return; }
-    onCreate(e, department);
+    if (stores.length > 0 && !storeId) { setError('Escolhe uma loja.'); return; }
+    onCreate(e, department, storeId || null);
   };
 
   useEffect(() => {
@@ -23726,9 +24240,36 @@ function NewUserModal({ busy, onCreate, onClose }) {
             <option value="PES">PES — Produtos Editoriais e Serviços</option>
           </select>
           <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6, lineHeight: 1.4 }}>
-            O utilizador só verá dados (campanhas, períodos, stock) do departamento escolhido. PES tem também acesso a Novidades e Devoluções. Não é alterável depois.
+            O utilizador só verá dados (campanhas, períodos, stock) do departamento escolhido. PES tem também acesso a Novidades e Devoluções. Admin pode mudar mais tarde.
           </div>
         </label>
+
+        {/* v3.21.7: loja inicial — pode ser mudada depois */}
+        {stores.length > 0 && (
+          <label style={{ display: 'block', marginBottom: 18 }}>
+            <div style={{ fontSize: 12, color: T.ink, marginBottom: 6, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Store size={12} /> Loja
+            </div>
+            <select
+              value={storeId}
+              onChange={(e) => setStoreId(e.target.value)}
+              disabled={busy}
+              style={{
+                width: '100%', padding: '11px 14px', fontSize: 14,
+                fontFamily: 'inherit',
+                background: T.paper || '#fff', color: T.ink,
+                border: `1.5px solid ${T.line}`, borderRadius: 14, outline: 'none',
+                cursor: 'pointer',
+              }}>
+              {stores.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.code}){!s.active ? ' — inactiva' : ''}</option>
+              ))}
+            </select>
+            <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6, lineHeight: 1.4 }}>
+              O utilizador vai ver apenas dados desta loja. Admin pode mudar depois em "Editar".
+            </div>
+          </label>
+        )}
 
         {error && (
           <div style={{
@@ -25290,7 +25831,7 @@ const SummaryCampaignCard = React.memo(function SummaryCampaignCard({ period, se
 // AdminStoreLayoutTab — gestão de pisos + zonas/móveis (layout físico da loja)
 // Substitui o DEFAULT_FLOORS hardcoded por dados em Supabase, geríveis.
 // ─────────────────────────────────────────────────────────────────────────
-function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
+function AdminStoreLayoutTab({ currentUserId, userDepartment, currentStoreId, currentStoreName }) {
   const [layout, setLayout] = useState(null); // null while loading; [] when empty; [{...}] when loaded
   const [loading, setLoading] = useState(true);
   const [error, setError]   = useState(null);
@@ -25302,15 +25843,17 @@ function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const res = await cloudFetchStoreLayout(userDepartment);
+    // v3.21.6: filtra pelo store_id actual (multi-loja) — admin pode mudar
+    // de loja no selector da sidebar e o layout segue.
+    const res = await cloudFetchStoreLayout(userDepartment, currentStoreId);
     if (res == null) {
-      setError('Não foi possível carregar o layout. Verifica se as tabelas store_floors / store_zones existem (corre o SQL em supabase/migrations/2026-05-12_store_layout.sql).');
+      setError('Não foi possível carregar o layout.');
       setLayout([]);
     } else {
       setLayout(res);
     }
     setLoading(false);
-  }, [userDepartment]);
+  }, [userDepartment, currentStoreId]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -25323,9 +25866,9 @@ function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
   };
 
   const handleSeed = async () => {
-    if (!confirm('Importar layout default (PISO 1, PISO 0, DESTAQUES PORTÁTEIS) com todas as zonas predefinidas?')) return;
+    if (!confirm(`Importar layout default (PISO 1, PISO 0, DESTAQUES PORTÁTEIS) com todas as zonas predefinidas para a loja "${currentStoreName || 'actual'}"?`)) return;
     setSeeding(true);
-    const res = await cloudSeedDefaultLayout(currentUserId, userDepartment);
+    const res = await cloudSeedDefaultLayout(currentUserId, userDepartment, currentStoreId);
     setSeeding(false);
     if (res.ok) {
       fireChanged();
@@ -25346,6 +25889,7 @@ function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
       res = await cloudCreateFloor({
         name: data.name, color: data.color, star: !!data.star,
         displayOrder: data.displayOrder, createdBy: currentUserId,
+        storeId: currentStoreId, // v3.21.6: stamp da loja actual
       });
     }
     if (res?.ok === true) { fireChanged(); setEditingFloor(null); refresh(); }
@@ -25374,6 +25918,7 @@ function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
         floorId: data.floorId, name: data.name,
         displayOrder: data.displayOrder, createdBy: currentUserId,
         department: userDepartment,
+        storeId: currentStoreId, // v3.21.6: stamp loja
       });
     }
     if (res?.ok === true) { fireChanged(); setEditingZone(null); refresh(); }
@@ -25402,6 +25947,21 @@ function AdminStoreLayoutTab({ currentUserId, userDepartment }) {
 
   return (
     <div>
+      {/* v3.21.6: header da loja actual */}
+      {currentStoreName && (
+        <div style={{
+          padding: '10px 14px', marginBottom: 16,
+          background: T.accent + '12', border: `1px solid ${T.accent}40`, borderRadius: 6,
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 18 }}>🏬</span>
+          <div style={{ flex: 1 }}>
+            <div className="mono" style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Loja actual</div>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{currentStoreName}</div>
+          </div>
+          <div style={{ fontSize: 11, color: T.inkSoft }}>Layout abaixo é exclusivo desta loja. Para outras lojas, alterna no selector da sidebar.</div>
+        </div>
+      )}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 16, gap: 16 }}>
         <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5, maxWidth: 620 }}>
           Define os <strong>pisos</strong> da loja e os <strong>móveis/zonas</strong> dentro de cada piso.
