@@ -394,6 +394,142 @@ function parseFnacSalesExcelMainThread(file) {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Parser TX_Penetração_<Mes>_<Ano>.xlsx — sheet RESUMO (v3.21.11)
+// Layout: header categorias na linha 3, sub-headers (EQUIP/SEGUROS/TAXA) na
+// linha 4, dados das lojas começam na linha 5 (índice 5 do AOA). TOTAL na
+// última linha. Cada categoria ocupa 3 colunas. Output:
+//   { month, monthKey, importedAt, filename, stores: [{...}], total: {...} }
+// ─────────────────────────────────────────────────────────────────────────
+const PENETRATION_CATEGORIES = [
+  { key: 'tv',        label: 'TV/Vídeo',     col: 2 },
+  { key: 'foto',      label: 'Foto',         col: 5 },
+  { key: 'hardware',  label: 'Hardware',     col: 8 },
+  { key: 'telecom',   label: 'Telecom',      col: 11 },
+  { key: 'telecomU',  label: 'Telecom <399€', col: 14 },
+  { key: 'telecomO',  label: 'Telecom >399€', col: 17 },
+  { key: 'gaming',    label: 'Gaming',       col: 20 },
+  { key: 'smartwatch',label: 'Smartwatch',   col: 23 },
+  { key: 'restart',   label: 'Restart',      col: 26 },
+  { key: 'mob',       label: 'Mob. Eléctrica',col: 29 },
+  { key: 'drones',    label: 'Drones',       col: 32 },
+  { key: 'total',     label: 'TOTAL',        col: 35 },
+];
+
+function _ddrFromFilename(name) {
+  // "TX_Penetração_Mai_26.xlsx" → { month: 'Mai/26', monthKey: '2026-05' }
+  const m = (name || '').match(/(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[_\- ]+(\d{2,4})/i);
+  if (!m) return { month: null, monthKey: null };
+  const months = { jan:1,fev:2,mar:3,abr:4,mai:5,jun:6,jul:7,ago:8,set:9,out:10,nov:11,dez:12 };
+  const mm = months[m[1].toLowerCase()];
+  let yy = Number(m[2]); if (yy < 100) yy = 2000 + yy;
+  return {
+    month: `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()}/${String(yy).slice(-2)}`,
+    monthKey: `${yy}-${String(mm).padStart(2, '0')}`,
+  };
+}
+
+function parsePenetrationExcel(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        onProgress?.({ stage: 'parse', message: 'A ler ficheiro…' });
+        // Truque chave: sheets:['RESUMO'] reduz dramaticamente a memória
+        // — só carrega esta sheet. Ficheiro original tem 25 sheets, ~96MB.
+        const wb = XLSX.read(new Uint8Array(e.target.result), {
+          type: 'array', sheets: ['RESUMO'], cellDates: false,
+        });
+        const sh = wb.Sheets['RESUMO'];
+        if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
+        const aoa = XLSX.utils.sheet_to_json(sh, { header: 1, blankrows: false, defval: null });
+        if (aoa.length < 6) return reject(new Error('Sheet RESUMO vazia.'));
+        // R5 .. último = lojas; última linha = TOTAL
+        const extract = (row) => {
+          const out = {};
+          for (const cat of PENETRATION_CATEGORIES) {
+            const equip = Number(row[cat.col]) || 0;
+            const seg   = Number(row[cat.col + 1]) || 0;
+            const taxa  = Number(row[cat.col + 2]) || 0;
+            out[cat.key] = { equip, seg, taxa };
+          }
+          out.addonRate = Number(row[42]) || 0; // TP ADDON %
+          out.deliveryPct = Number(row[80]) || 0; // TX ENTREGA PP
+          return out;
+        };
+        const stores = [];
+        let total = null;
+        for (let r = 5; r < aoa.length; r++) {
+          const row = aoa[r];
+          if (!row) continue;
+          const name = row[1];
+          if (!name || typeof name !== 'string') continue;
+          const data = { name: name.trim(), ...extract(row) };
+          if (data.name.toUpperCase() === 'TOTAL') { total = data; continue; }
+          stores.push(data);
+        }
+        if (stores.length === 0) return reject(new Error('Sem lojas no ficheiro.'));
+        if (!total) {
+          // fallback: calcula média ponderada
+          const sums = {};
+          for (const cat of PENETRATION_CATEGORIES) sums[cat.key] = { equip: 0, seg: 0 };
+          for (const s of stores) for (const cat of PENETRATION_CATEGORIES) {
+            sums[cat.key].equip += s[cat.key].equip;
+            sums[cat.key].seg   += s[cat.key].seg;
+          }
+          total = { name: 'TOTAL' };
+          for (const cat of PENETRATION_CATEGORIES) {
+            const e = sums[cat.key].equip, sg = sums[cat.key].seg;
+            total[cat.key] = { equip: e, seg: sg, taxa: e > 0 ? sg / e : 0 };
+          }
+          total.addonRate = 0;
+        }
+        const dd = _ddrFromFilename(file.name);
+        resolve({
+          month: dd.month || 'Mês não detectado',
+          monthKey: dd.monthKey,
+          importedAt: new Date().toISOString(),
+          filename: file.name,
+          stores, total,
+        });
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+// Cloud: 1 linha por (store_id, month_key). Admin-only via RLS.
+async function cloudUploadPenetrationSnapshot({ storeId, snap, userId }) {
+  if (!supabase || !snap) return { ok: false, error: 'sem supabase/snap' };
+  const payload = {
+    store_id: storeId || null,
+    month_key: snap.monthKey,
+    filename: snap.filename,
+    imported_by: userId || null,
+    payload: snap,
+  };
+  const { error } = await supabase.from('penetration_snapshots').upsert(payload, {
+    onConflict: 'store_id,month_key',
+  });
+  return { ok: !error, error: error?.message };
+}
+
+async function cloudFetchPenetrationSnapshots({ storeId, limit = 12 } = {}) {
+  if (!supabase) return [];
+  let q = supabase.from('penetration_snapshots').select('*').order('month_key', { ascending: false }).limit(limit);
+  if (storeId) q = q.eq('store_id', storeId);
+  const { data, error } = await q;
+  if (error) { console.warn('cloudFetchPenetrationSnapshots:', error.message); return []; }
+  return data || [];
+}
+
+async function cloudDeletePenetrationSnapshot(id) {
+  if (!supabase || !id) return { ok: false };
+  const { error } = await supabase.from('penetration_snapshots').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
 function toIsoDate(ddmmyyyy) {
   // "01-01-2026" → "2026-01-01"
   const m = ddmmyyyy.match(/^(\d{2})-(\d{2})-(\d{4})$/);
@@ -1040,8 +1176,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.10';
-const APP_BUILD_DATE = '2026-05-27T14:15'; // Europe/Lisbon
+const APP_VERSION = '3.21.11';
+const APP_BUILD_DATE = '2026-05-27T16:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1051,6 +1187,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.11', date: '2026-05-27', summary: 'Nova vista admin-only "Tx Penetração". (A) Parser parsePenetrationExcel lê APENAS a sheet RESUMO do ficheiro TX_Penetração_<Mes>_<Ano>.xlsx (via sheets:["RESUMO"] no XLSX.read → poupa memória num ficheiro de 96MB). Extrai por loja: EQUIP/SEGUROS/TAXA por categoria (TV, Foto, Hardware, Telecom <399€/>399€, Gaming, Smartwatch, Restart, Mob.Eléctrica, Drones, Total) + TP Addon + Tx Entrega Cartões. Detecta mês do nome do ficheiro. (B) Migration penetration_snapshots: jsonb por (store_id, month_key), admin-only RLS, upsert substitui o mês ao re-importar. (C) Nova sidebar item "Tx Penetração" (TrendingUp icon) com adminOnly:true — só admin vê. (D) PenetrationView: upload + dropdown de mês + cards (loja/companhia/diferença/ranking) + tabela detalhada por categoria com barras de comparação (verde=acima, vermelho=abaixo) + top 10 lojas com destaque da própria. (E) PenetrationDashboardCard no Visão Geral (admin only, no topo) — resumo da última taxa importada com delta vs companhia; clica abre detalhes.' },
   { version: '3.21.10', date: '2026-05-27', summary: 'Fix HydrationGate preso: (A) "Continuar mesmo assim" passou a também ligar cloudDataLoaded=true (antes só ligava rowsHydrated → ficava preso se o fetch da cloud falhasse). (B) Botão skip aparece após 4s (antes 8s). (C) Novo auto-skip de segurança aos 30s — gate nunca mais fica preso indefinidamente, mesmo sem clique. Resultado: ao primeiro login ou refresh com cloud lenta/offline, a app desbloqueia sempre.' },
   { version: '3.21.9', date: '2026-05-27', summary: 'Fix: botão "Administração" no sidebar ficava escondido atrás do widget de Sessão quando havia muitos items na nav. Aside passou a flex column; nav ganha flex:1 + overflowY:auto (scroll interno quando preciso); widget de Sessão deixou de ser position:absolute e passou a flex item normal no fim — sempre visível, nunca sobrepõe.' },
   { version: '3.21.8', date: '2026-05-27', summary: 'Listagem: avisa quando um artigo já está em móveis de OUTRAS campanhas/periods. Novo helper buildCrossPeriodZoneIndex(periods, excludePeriodId) que indexa slots por EAN cruzando todos os periods (excepto o actual e os hidden). ProductListing recebe allPeriods+currentPeriodId, computa otherZones por produto e renderiza badges laranja tracejados ao lado das zonas verdes existentes — formato "PeriodName · ZoneName" com tooltip do floor. Mostra até 2 inline + "+N noutras" se houver mais. Previne destacar o mesmo artigo em campanhas que correm em paralelo sem aperceber.' },
@@ -5481,7 +5618,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               }}
             />
           )}
-          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} isAdmin={isAdmin} />}
+          {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} isAdmin={isAdmin} currentStoreName={stores.find(s => s.id === currentStoreId)?.name} />}
           {view === 'campaigns' && <CampaignsView
             campaigns={campaigns} setCampaigns={setCampaigns}
             periods={filteredPeriods}
@@ -5503,6 +5640,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {/* v3.20.12: 'sales' no sidebar (admin-only) + também acessível dentro de Admin */}
+          {view === 'penetration' && isAdmin && (
+            <PenetrationView
+              currentStoreId={currentStoreId}
+              currentStoreName={stores.find(s => s.id === currentStoreId)?.name}
+              currentUserId={user?.id}
+            />
+          )}
           {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} currentStoreId={currentStoreId} currentStoreName={stores.find(s => s.id === currentStoreId)?.name} currentUserId={user?.id} />}
           {view === 'sales' && !isAdmin && (
             <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
@@ -5806,6 +5950,8 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
     // v3.20.12: 'sales' volta ao sidebar — admin-only via canSeeMenuItem (roles=[] visible=false)
     { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, hideFor: ['PES'] },
+    // v3.21.11: Taxa de Penetração — admin-only (gating extra abaixo)
+    { id: 'penetration', label: 'Tx Penetração',       icon: TrendingUp, hideFor: ['PES'], adminOnly: true },
     { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
@@ -5823,6 +5969,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
   // respeitam o userDepartment actual.
   // v3.21.1: também respeita feature flags — admin pode desligar módulos em Admin → Configuração
   const items = allItems.filter(it => {
+    if (it.adminOnly && !isAdmin) return false; // v3.21.11
     if (it.hideFor?.includes(userDepartment)) return false;
     if (it.showFor && !it.showFor.includes(userDepartment)) return false;
     // featureFlags está vazio enquanto carrega; só esconde quando flag está explicitamente false
@@ -6302,7 +6449,7 @@ const SearchInput = React.memo(function SearchInput({ value = '', onCommit, debo
 // Section 2: Active campaigns summary (existing)
 // Section 3: Acesso rápido (quick action grid replacing recommended flow)
 // ─────────────────────────────────────────────────────────────────────────
-function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods: periodsAll, posters, notifications, isAdmin = false }) {
+function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setView, onExport, onImport, periods: periodsAll, posters, notifications, isAdmin = false, currentStoreName = null }) {
   // v3.20.8: ignorar periods 'hidden' (soft-delete) — admin gere-os em CampaignsView
   const periods = useMemo(() => (periodsAll || []).filter(p => !p.hidden), [periodsAll]);
 
@@ -6464,6 +6611,14 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
   return (
     <div className="fade-up">
       <Header eyebrow="Início" title="Visão geral" subtitle="Carrega ficheiros, analisa vendas, distribui produtos pelas zonas da loja e gera os materiais finais." />
+
+      {/* v3.21.11: Card admin — Taxa Penetração resumida (clica para detalhes) */}
+      {isAdmin && (
+        <PenetrationDashboardCard
+          currentStoreName={currentStoreName}
+          onOpen={() => setView('penetration')}
+        />
+      )}
 
       {/* Stats row — clickable cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
@@ -22400,6 +22555,359 @@ function BPSlotFull({ slot }) {
             </>
           )}
           {p?.isStar && <Star size={9} fill={T.yellow} stroke="none" />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PenetrationView (v3.21.11) — admin-only. Mostra taxa de penetração
+// mensal: linha desta loja + média da companhia + breakdown por categoria.
+// ─────────────────────────────────────────────────────────────────────────
+function pctFmt(v) { return `${(Number(v) * 100).toFixed(1)}%`; }
+function pctDelta(v) {
+  const n = Number(v) * 100;
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${n.toFixed(1)}pp`;
+}
+
+function PenetrationView({ currentStoreId, currentStoreName, currentUserId }) {
+  const [snapshots, setSnapshots] = useState([]); // todos os meses na cloud
+  const [loading, setLoading] = useState(true);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState(null);
+  const [importProgress, setImportProgress] = useState(null);
+  const [selectedMonthKey, setSelectedMonthKey] = useStoredState('penetration.month', null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    const list = await cloudFetchPenetrationSnapshots({ limit: 24 });
+    setSnapshots(list);
+    if (list.length > 0 && !selectedMonthKey) setSelectedMonthKey(list[0].month_key);
+    setLoading(false);
+  }, [selectedMonthKey, setSelectedMonthKey]);
+  useEffect(() => { refresh(); }, []); // eslint-disable-line
+
+  const active = useMemo(
+    () => snapshots.find(s => s.month_key === selectedMonthKey) || snapshots[0] || null,
+    [snapshots, selectedMonthKey]
+  );
+  const snap = active?.payload || null;
+
+  // Linha desta loja (tenta currentStoreName, fallback "AVEIRO")
+  const myStoreRow = useMemo(() => {
+    if (!snap) return null;
+    const target = (currentStoreName || 'AVEIRO').toUpperCase().replace(/^FNAC\s+/, '').trim();
+    return snap.stores.find(s => s.name.toUpperCase().includes(target))
+        || snap.stores.find(s => s.name.toUpperCase().includes('AVEIRO'))
+        || null;
+  }, [snap, currentStoreName]);
+
+  const handleFile = async (file) => {
+    setImporting(true); setImportError(null);
+    setImportProgress({ stage: 'parse', message: 'A ler RESUMO…' });
+    try {
+      const newSnap = await parsePenetrationExcel(file, (p) => setImportProgress(p));
+      if (!newSnap.monthKey) {
+        setImportError('Não detectei o mês no nome do ficheiro. Renomeia para algo como "TX_Penetração_Mai_26.xlsx".');
+        return;
+      }
+      setImportProgress({ stage: 'cloud-upload', message: 'A guardar na cloud…' });
+      const r = await cloudUploadPenetrationSnapshot({ storeId: currentStoreId, snap: newSnap, userId: currentUserId });
+      if (!r.ok) throw new Error(r.error || 'erro a guardar');
+      await refresh();
+      setSelectedMonthKey(newSnap.monthKey);
+    } catch (err) {
+      setImportError(err.message || String(err));
+    } finally {
+      setImporting(false); setImportProgress(null);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    if (!confirm('Apagar este snapshot mensal?')) return;
+    await cloudDeletePenetrationSnapshot(id);
+    refresh();
+  };
+
+  if (loading) return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>A carregar…</div>;
+
+  return (
+    <div className="fade-up">
+      <Header
+        title="Taxa de Penetração"
+        subtitle="Análise mensal da loja vs. média da companhia (sheet RESUMO do ficheiro TX_Penetração)"
+      />
+
+      {/* Upload + selector de mês */}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 20, padding: '12px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flexWrap: 'wrap' }}>
+        <label style={{ cursor: importing ? 'wait' : 'pointer', padding: '8px 14px', background: T.accent, color: '#fff', borderRadius: 6, fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <Upload size={12} /> {importing ? (importProgress?.message || 'A processar…') : 'Sobe ficheiro mensal'}
+          <input type="file" accept=".xlsx,.xls" disabled={importing} style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
+        </label>
+        {snapshots.length > 0 && (
+          <>
+            <span style={{ color: T.inkMute, fontSize: 11 }}>Mês:</span>
+            <select value={selectedMonthKey || ''} onChange={e => setSelectedMonthKey(e.target.value)} style={{ padding: '7px 10px', fontSize: 12, fontFamily: 'inherit', background: T.bg, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4 }}>
+              {snapshots.map(s => (
+                <option key={s.id} value={s.month_key}>{s.payload?.month || s.month_key}</option>
+              ))}
+            </select>
+            {active && (
+              <span style={{ fontSize: 10, color: T.inkMute }}>
+                Importado {new Date(active.imported_at).toLocaleDateString('pt-PT')}
+              </span>
+            )}
+            {active && (
+              <button onClick={() => handleDelete(active.id)} title="Apagar este mês" style={{ marginLeft: 'auto', padding: '5px 10px', background: 'transparent', color: T.red, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Trash2 size={10} /> Apagar
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
+      {importError && (
+        <div style={{ padding: 12, marginBottom: 16, background: `${T.red}15`, color: T.red, borderRadius: 6, fontSize: 12, border: `1px solid ${T.red}40` }}>
+          <AlertCircle size={12} style={{ display: 'inline', verticalAlign: 'text-bottom', marginRight: 6 }} />
+          {importError}
+        </div>
+      )}
+
+      {!snap ? (
+        <div style={{ padding: 60, textAlign: 'center', background: T.bgEl, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
+          <TrendingUp size={32} strokeWidth={1.25} style={{ color: T.inkMute, marginBottom: 12 }} />
+          <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 6 }}>Sem dados de penetração</div>
+          <div style={{ fontSize: 13, color: T.inkMute }}>
+            Sobe o ficheiro mensal <strong>TX_Penetração_&lt;Mês&gt;_&lt;Ano&gt;.xlsx</strong> para começares.
+          </div>
+        </div>
+      ) : !myStoreRow ? (
+        <div style={{ padding: 24, background: `${T.orange}10`, border: `1px solid ${T.orange}40`, borderRadius: 8, color: T.orange }}>
+          <AlertTriangle size={14} style={{ display: 'inline', verticalAlign: 'text-bottom', marginRight: 6 }} />
+          Não encontrei "{currentStoreName || 'AVEIRO'}" na lista de lojas do ficheiro. Lojas disponíveis: {snap.stores.map(s => s.name).join(', ')}.
+        </div>
+      ) : (
+        <PenetrationBreakdown snap={snap} myStoreRow={myStoreRow} />
+      )}
+    </div>
+  );
+}
+
+// Componente que renderiza a comparação detalhada por categoria
+function PenetrationBreakdown({ snap, myStoreRow }) {
+  const totalRow = snap.total;
+  // Ranking: posição do myStore por taxa total (descrescente)
+  const ranking = useMemo(() => {
+    const sorted = snap.stores.filter(s => s.total && s.total.taxa > 0).sort((a, b) => b.total.taxa - a.total.taxa);
+    const idx = sorted.findIndex(s => s.name === myStoreRow.name);
+    return { rank: idx + 1, total: sorted.length };
+  }, [snap, myStoreRow]);
+
+  const myTaxa = myStoreRow.total?.taxa || 0;
+  const avgTaxa = totalRow.total?.taxa || 0;
+  const delta = myTaxa - avgTaxa;
+  const better = delta >= 0;
+
+  return (
+    <div>
+      {/* Cards de destaque */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 24 }}>
+        <KpiCard
+          label={myStoreRow.name}
+          value={pctFmt(myTaxa)}
+          accent={better ? T.green : T.red}
+          sub={`${myStoreRow.total.seg} seguros / ${myStoreRow.total.equip} equip.`}
+        />
+        <KpiCard
+          label="Média Companhia"
+          value={pctFmt(avgTaxa)}
+          accent={T.inkSoft}
+          sub={`${totalRow.total.seg} seguros / ${totalRow.total.equip} equip.`}
+        />
+        <KpiCard
+          label="Diferença"
+          value={pctDelta(delta)}
+          accent={better ? T.green : T.red}
+          sub={better ? 'Acima da média' : 'Abaixo da média'}
+        />
+        <KpiCard
+          label="Ranking"
+          value={`${ranking.rank}º`}
+          accent={ranking.rank <= 5 ? T.green : ranking.rank <= 15 ? T.orange : T.red}
+          sub={`de ${ranking.total} lojas`}
+        />
+      </div>
+
+      {/* Tabela detalhada por categoria */}
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
+        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft }}>
+          Penetração por categoria — {snap.month}
+        </div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: T.bg, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Categoria</th>
+              <th style={{ padding: '10px 12px', textAlign: 'right' }}>{myStoreRow.name}</th>
+              <th style={{ padding: '10px 12px', textAlign: 'right', color: T.inkSoft }}>Companhia</th>
+              <th style={{ padding: '10px 12px', textAlign: 'right' }}>Δ</th>
+              <th style={{ padding: '10px 12px', textAlign: 'left', minWidth: 160 }}>Comparação visual</th>
+            </tr>
+          </thead>
+          <tbody>
+            {PENETRATION_CATEGORIES.map(cat => {
+              const mine = myStoreRow[cat.key];
+              const avg  = totalRow[cat.key];
+              if (!mine || !avg) return null;
+              const d = (mine.taxa || 0) - (avg.taxa || 0);
+              const myPct = Math.min(100, (mine.taxa || 0) * 100);
+              const avgPct = Math.min(100, (avg.taxa || 0) * 100);
+              const positive = d >= 0;
+              const emphasized = cat.key === 'total';
+              return (
+                <tr key={cat.key} style={{
+                  borderTop: `1px solid ${T.lineSoft}`,
+                  background: emphasized ? `${T.accent}08` : 'transparent',
+                  fontWeight: emphasized ? 600 : 400,
+                }}>
+                  <td style={{ padding: '10px 12px' }}>{cat.label}</td>
+                  <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Geist Mono' }}>
+                    <div>{pctFmt(mine.taxa)}</div>
+                    <div style={{ fontSize: 10, color: T.inkMute }}>{mine.seg}/{mine.equip}</div>
+                  </td>
+                  <td style={{ padding: '10px 12px', textAlign: 'right', color: T.inkSoft, fontFamily: 'Geist Mono' }}>
+                    <div>{pctFmt(avg.taxa)}</div>
+                    <div style={{ fontSize: 10, color: T.inkMute }}>{avg.seg}/{avg.equip}</div>
+                  </td>
+                  <td style={{ padding: '10px 12px', textAlign: 'right', color: positive ? T.green : T.red, fontFamily: 'Geist Mono', fontWeight: 600 }}>
+                    {pctDelta(d)}
+                  </td>
+                  <td style={{ padding: '10px 12px' }}>
+                    <div style={{ position: 'relative', height: 18, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                      {/* Barra companhia (fundo) */}
+                      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${avgPct}%`, background: `${T.inkMute}30` }} />
+                      {/* Barra minha loja (em cima) */}
+                      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${myPct}%`, background: positive ? T.green : T.red, opacity: 0.85 }} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* TP Addon + Tx entrega cartões */}
+      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+        <KpiCard
+          label="TP Addon"
+          value={pctFmt(myStoreRow.addonRate || 0)}
+          accent={(myStoreRow.addonRate || 0) >= (totalRow.addonRate || 0) ? T.green : T.red}
+          sub={`Companhia: ${pctFmt(totalRow.addonRate || 0)}`}
+        />
+        <KpiCard
+          label="Tx Entrega Cartões PP"
+          value={pctFmt(myStoreRow.deliveryPct || 0)}
+          accent={T.accent}
+          sub={`Companhia: ${pctFmt(totalRow.deliveryPct || 0)}`}
+        />
+      </div>
+
+      {/* Ranking top 10 */}
+      <div style={{ marginTop: 24, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft, marginBottom: 12 }}>
+          Top 10 lojas — Taxa Penetração Total
+        </div>
+        {(() => {
+          const sorted = snap.stores.filter(s => s.total && s.total.taxa > 0).sort((a, b) => b.total.taxa - a.total.taxa);
+          return sorted.slice(0, 10).map((s, i) => {
+            const isMe = s.name === myStoreRow.name;
+            return (
+              <div key={s.name} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px',
+                background: isMe ? `${T.accent}14` : 'transparent', borderRadius: 4,
+                fontWeight: isMe ? 600 : 400, marginBottom: 2,
+              }}>
+                <span style={{ width: 24, textAlign: 'right', color: T.inkMute, fontFamily: 'Geist Mono', fontSize: 11 }}>{i + 1}.</span>
+                <span style={{ flex: 1, fontSize: 12 }}>{s.name}{isMe && ' ← tu'}</span>
+                <span style={{ fontFamily: 'Geist Mono', fontSize: 12, color: isMe ? T.accent : T.ink }}>{pctFmt(s.total.taxa)}</span>
+              </div>
+            );
+          });
+        })()}
+      </div>
+    </div>
+  );
+}
+
+// Mini card de KPI reutilizado
+function KpiCard({ label, value, sub, accent }) {
+  return (
+    <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
+      <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 700, color: accent || T.ink, fontFamily: 'Geist Mono', lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// Card resumido para o Dashboard (admin only). Mostra delta vs companhia.
+function PenetrationDashboardCard({ currentStoreName, onOpen }) {
+  const [snap, setSnap] = useState(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    cloudFetchPenetrationSnapshots({ limit: 1 }).then(list => {
+      if (!alive) return;
+      setSnap(list[0]?.payload || null);
+      setLoading(false);
+    });
+    return () => { alive = false; };
+  }, []);
+  if (loading || !snap) return null;
+  const target = (currentStoreName || 'AVEIRO').toUpperCase().replace(/^FNAC\s+/, '').trim();
+  const myRow = snap.stores.find(s => s.name.toUpperCase().includes(target)) || snap.stores.find(s => s.name.toUpperCase().includes('AVEIRO'));
+  if (!myRow) return null;
+  const myTaxa = myRow.total?.taxa || 0;
+  const avgTaxa = snap.total.total?.taxa || 0;
+  const delta = myTaxa - avgTaxa;
+  const better = delta >= 0;
+  return (
+    <div onClick={onOpen} style={{
+      cursor: 'pointer', padding: 18, marginBottom: 24,
+      background: better ? `linear-gradient(135deg, ${T.green}14, ${T.green}05)` : `linear-gradient(135deg, ${T.red}14, ${T.red}05)`,
+      border: `1px solid ${better ? T.green : T.red}40`,
+      borderRadius: 12, transition: 'transform 0.15s, box-shadow 0.15s',
+    }}
+    onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 24px -8px rgba(0,0,0,0.15)'; }}
+    onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'none'; }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+        <TrendingUp size={18} color={better ? T.green : T.red} />
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkSoft }}>
+          Taxa Penetração · {snap.month}
+        </div>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color: T.inkMute }}>clica para detalhes →</span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 28, fontWeight: 700, fontFamily: 'Geist Mono', color: better ? T.green : T.red, lineHeight: 1 }}>
+            {pctFmt(myTaxa)}
+          </div>
+          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>{myRow.name}</div>
+        </div>
+        <div style={{ borderLeft: `1px solid ${T.line}`, paddingLeft: 16 }}>
+          <div style={{ fontSize: 18, fontWeight: 600, fontFamily: 'Geist Mono', color: T.inkSoft, lineHeight: 1 }}>
+            {pctFmt(avgTaxa)}
+          </div>
+          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>média companhia</div>
+        </div>
+        <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, fontFamily: 'Geist Mono', color: better ? T.green : T.red, lineHeight: 1 }}>
+            {pctDelta(delta)}
+          </div>
+          <div style={{ fontSize: 11, color: T.inkMute, marginTop: 4 }}>{better ? 'acima da média' : 'abaixo da média'}</div>
         </div>
       </div>
     </div>
