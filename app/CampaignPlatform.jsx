@@ -1040,8 +1040,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.7';
-const APP_BUILD_DATE = '2026-05-27T11:30'; // Europe/Lisbon
+const APP_VERSION = '3.21.8';
+const APP_BUILD_DATE = '2026-05-27T13:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1051,6 +1051,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.8', date: '2026-05-27', summary: 'Listagem: avisa quando um artigo já está em móveis de OUTRAS campanhas/periods. Novo helper buildCrossPeriodZoneIndex(periods, excludePeriodId) que indexa slots por EAN cruzando todos os periods (excepto o actual e os hidden). ProductListing recebe allPeriods+currentPeriodId, computa otherZones por produto e renderiza badges laranja tracejados ao lado das zonas verdes existentes — formato "PeriodName · ZoneName" com tooltip do floor. Mostra até 2 inline + "+N noutras" se houver mais. Previne destacar o mesmo artigo em campanhas que correm em paralelo sem aperceber.' },
   { version: '3.21.7', date: '2026-05-27', summary: 'Multi-loja + análise de vendas em cloud + UX. (A) Sidebar: selector de loja redesenhado — card com badge gradiente (código da loja), nome + cidade, dropdown nativo invisível por cima para admin. (B) Admin pode mudar departamento E loja de qualquer utilizador via novo botão "Editar" na lista de utilizadores; nova EditUserModal. Badge da loja (código) aparece em cada UserRow. NewUserModal ganha dropdown de loja; Edge function admin-user-mgmt aceita storeId. Novos helpers setUserDepartment/setUserStore/cloudFetchStores. (C) Análise de Vendas guardada em cloud por chunks mensais — nova migration sales_chunks + counter_sales_chunks (PK store_id+year_month, gzip+base64, admin-only RLS). Ao subir um novo ficheiro, só os meses presentes são substituídos via upsert; restantes meses mantêm-se. Helpers cloudUploadSalesChunks/cloudFetchSalesChunks. Snapshot reconstruído via snapFromCloudChunks ao logar noutro device. (D) Novo filtro de meses na SalesView — pill bar multi-select acima dos filtros existentes, deriva meses da data; "Todos" repõe. Indicador "X meses na cloud" + status de sincronização. (E) handleClear apaga local E cloud (com confirmação explícita).' },
   { version: '3.21.6', date: '2026-05-27', summary: 'Multi-loja: scoping correcto de layout/zonas/cartazes. (A) Nova migration store_zones.store_id (a anterior 20260525220000 esqueceu-se desta tabela). Backfill para Aveiro + index. (B) cloudFetchStoreLayout agora filtra zones por store_id+department; floors continuam só por store_id (partilhados entre PTS/PES). (C) cloudCreateZone aceita storeId e faz stamp; cloudSeedDefaultLayout propaga storeId. (D) MainApp defaultLayout effect e NovidadesView passam currentStoreId; useEffect deps actualizadas. (E) Cartazes (slot.cartaz) seguem campaign — periods já tem store_id+department, scoping automático. Resultado: ao criar loja "Porto", admin gere pisos partilhados Porto + zonas isoladas PTS-Porto/PES-Porto sem afectar Aveiro.' },
   { version: '3.21.5', date: '2026-05-26', summary: 'Fix TDZ multi-loja: currentStoreId estava declarado depois de filteredCampaigns e filteredPeriods, que o referenciavam → ReferenceError "Cannot access eA before initialization" em runtime após v3.21.2. Movida a declaração de stores/currentStoreId para imediatamente após excludedFamilies, antes dos useMemos que dependem.' },
@@ -11959,6 +11960,8 @@ function CampaignsView({
             campaigns={activeCampaigns.map(c => ({ ...c, rows: filterRowsByFamily(c.rows, c.headers, excludedFamilies) }))}
             primaryCampaignId={primaryCampaign?.id}
             floors={floors}
+            allPeriods={periods}
+            currentPeriodId={selectedPeriodId}
             stockRowsPO2={stockRowsPO2}
             stockRowsPO3={stockRowsPO3}
             stockMapPO2={stockMapPO2}
@@ -12731,6 +12734,34 @@ function buildZoneIndex(floors) {
         const entry = { floorId: f.id, zoneId: z.id, floorName: f.name, zoneName: z.name, color: f.color };
         const arr = index.get(key);
         if (arr) arr.push(entry); else index.set(key, [entry]);
+      }
+    }
+  }
+  return index;
+}
+
+// v3.21.8: zone index cruzado entre periods — diz, para cada EAN, em que
+// móveis de OUTROS periods o produto já está atribuído. Útil para evitar
+// duplicações: "este produto já está no Móvel X da Campanha Y".
+function buildCrossPeriodZoneIndex(periods, excludePeriodId) {
+  const index = new Map();
+  for (const p of (periods || [])) {
+    if (!p || p.id === excludePeriodId) continue;
+    if (p.hidden) continue; // ignora periods ocultos
+    const floors = Array.isArray(p.floors) ? p.floors : [];
+    for (const f of floors) {
+      for (const z of (f.zones || [])) {
+        for (const s of (z.slots || [])) {
+          const key = normalizeEAN(s.ref);
+          if (!key) continue;
+          const entry = {
+            periodId: p.id, periodName: p.name || '—',
+            floorName: f.name, zoneName: z.name,
+            color: f.color, slotName: s.name || '',
+          };
+          const arr = index.get(key);
+          if (arr) arr.push(entry); else index.set(key, [entry]);
+        }
       }
     }
   }
@@ -13671,7 +13702,7 @@ function ImportFromPastDialog({ allCampaigns, allPeriods, excludePeriodId, onClo
 // ─────────────────────────────────────────────────────────────────────────
 // ProductListing — enriched table cross-referencing campaign × stock × zones
 // ─────────────────────────────────────────────────────────────────────────
-function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, overrides, onSetOverride, onAddToZone, onSetPrimaryZone }) {
+function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [], currentPeriodId = null, stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, overrides, onSetOverride, onAddToZone, onSetPrimaryZone }) {
   const [search, setSearch] = useStoredState('listing.search', '');
   const [filterFamily, setFilterFamily] = useStoredState('listing.filterFamily', 'all');
   const [filterStar, setFilterStar] = useStoredState('listing.filterStar', false);
@@ -13698,6 +13729,11 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
   const stockIndexPO2 = useMemo(() => buildStockIndex(stockRowsPO2, stockMapPO2), [stockRowsPO2, stockMapPO2]);
   const stockIndexPO3 = useMemo(() => buildStockIndex(stockRowsPO3, stockMapPO3), [stockRowsPO3, stockMapPO3]);
   const zoneIndex = useMemo(() => buildZoneIndex(floors), [floors]);
+  // v3.21.8: zonas em OUTROS periods (mesmo EAN noutras campanhas)
+  const otherZoneIndex = useMemo(
+    () => buildCrossPeriodZoneIndex(allPeriods, currentPeriodId),
+    [allPeriods, currentPeriodId]
+  );
 
   // Build products from ALL active campaigns. Deduplicate by EAN — keep first occurrence.
   const products = useMemo(() => {
@@ -13715,6 +13751,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
         const stockPO2 = eanKey ? (stockIndexPO2.index.get(eanKey) ?? 0) : 0;
         const stockPO3 = eanKey ? (stockIndexPO3.index.get(eanKey) ?? 0) : 0;
         const zones = eanKey ? (zoneIndex.get(eanKey) ?? []) : [];
+        const otherZones = eanKey ? (otherZoneIndex.get(eanKey) ?? []) : [];
 
         const basePriceVal = parseNum(campCols.basePrice ? r[campCols.basePrice] : 0);
         const campPriceVal = parseNum(campCols.campaignPrice ? r[campCols.campaignPrice] : 0);
@@ -13741,6 +13778,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, stockRowsPO2, st
           stockPO3,
           stockTotal: stockPO2 + stockPO3,
           zones,
+          otherZones,
           assigned: zones.length > 0,
           sourceCampaignId: camp.id,
           sourceCampaignName: camp.name,
@@ -14385,6 +14423,26 @@ const ProductRow = React.memo(function ProductRow({ product, zebra, floors, isMu
             ))}
             {p.zones.length > 3 && (
               <span style={{ fontSize: 9, color: T.green, fontWeight: 600 }}>+{p.zones.length - 3}</span>
+            )}
+          </div>
+        )}
+        {/* v3.21.8: artigo já presente em moveis de OUTRAS campanhas/periods */}
+        {p.otherZones && p.otherZones.length > 0 && (
+          <div style={{ marginTop: 3, display: 'flex', flexWrap: 'wrap', gap: 4 }} title="Este artigo já está em móveis de outras campanhas/periods">
+            {p.otherZones.slice(0, 2).map((z, zi) => (
+              <span key={`o-${zi}`} title={`${z.periodName} · ${z.floorName} → ${z.zoneName}`} style={{
+                fontSize: 9, padding: '1px 6px', background: `${T.orange}14`,
+                color: T.orange, borderRadius: 3, fontWeight: 600,
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                border: `1px dashed ${T.orange}55`,
+              }}>
+                <AlertTriangle size={9} />{z.periodName.length > 14 ? z.periodName.slice(0, 13) + '…' : z.periodName} · {z.zoneName}
+              </span>
+            ))}
+            {p.otherZones.length > 2 && (
+              <span style={{ fontSize: 9, color: T.orange, fontWeight: 600 }} title={p.otherZones.slice(2).map(z => `${z.periodName} · ${z.zoneName}`).join('\n')}>
+                +{p.otherZones.length - 2} noutras
+              </span>
             )}
           </div>
         )}
