@@ -1225,8 +1225,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.12';
-const APP_BUILD_DATE = '2026-05-27T17:30'; // Europe/Lisbon
+const APP_VERSION = '3.21.13';
+const APP_BUILD_DATE = '2026-05-27T19:00'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1236,6 +1236,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.13', date: '2026-05-27', summary: 'Tx Penetração: redesign minimalista + insights automáticos. (A) Toolbar reformulada: chips pill em vez de card pesado para selector de meses; upload e apagar ficam à direita, mais discreto. (B) Hero block: 4 números grandes em serif (display font) com tipografia hierárquica em vez de cards — Aveiro / Companhia / Diferença / Ranking. Linhas finas a separar. (C) Nova secção "✨ Recomendações" — gera 2-6 sugestões accionáveis automaticamente: categorias mais fracas (com cálculo de "faltam X seguros para atingir média"), categorias fortes, addons abaixo, entrega cartões baixa, colaboradores abaixo de 70% da média, churn elevado por colaborador. Cards com borda colorida à esquerda (verde/laranja/azul). (D) Categoria por linhas inline (sem table pesada): 5 colunas em grid com barras finas (6px) de comparação. (E) TP Addon + Entrega: 2 stats inline sem cards. (F) Top 10 lojas: barras horizontais proporcionais ao máximo, badge "TU" pill na linha da própria loja. (G) Tabela colaboradores: header mais leve, bordas suaves. (H) Empty state mais elegante.' },
   { version: '3.21.12', date: '2026-05-27', summary: 'Tx Penetração movida para dentro de Planos de Proteção como sub-tab admin + Colaboradores Aveiro. (A) Sidebar item "Tx Penetração" removido — agora vive em Planos de Proteção → tab "Tx Penetração FNAC". (B) PPsView ganha tabs internos "Diarização" | "Tx Penetração FNAC". (C) Parser parsePenetrationExcel agora também lê sheet VENDEDOR_TOTAL filtrada por loja (default AVEIRO) → lista de colaboradores com NIF, carga horária, vendas, seguros, TP individual, addons, plano total, churn. (D) Nova tabela "Colaboradores · AVEIRO" dentro do breakdown ordenada por TP (cores verde/laranja/vermelho consoante taxa). (E) PenetrationView aceita prop embedded para reutilização sem duplicar Header. (F) Dashboard card admin clica → abre PPs no tab penetração directamente. (G) Re-upload do ficheiro do mês actualiza (upsert por month_key).' },
   { version: '3.21.11', date: '2026-05-27', summary: 'Nova vista admin-only "Tx Penetração". (A) Parser parsePenetrationExcel lê APENAS a sheet RESUMO do ficheiro TX_Penetração_<Mes>_<Ano>.xlsx (via sheets:["RESUMO"] no XLSX.read → poupa memória num ficheiro de 96MB). Extrai por loja: EQUIP/SEGUROS/TAXA por categoria (TV, Foto, Hardware, Telecom <399€/>399€, Gaming, Smartwatch, Restart, Mob.Eléctrica, Drones, Total) + TP Addon + Tx Entrega Cartões. Detecta mês do nome do ficheiro. (B) Migration penetration_snapshots: jsonb por (store_id, month_key), admin-only RLS, upsert substitui o mês ao re-importar. (C) Nova sidebar item "Tx Penetração" (TrendingUp icon) com adminOnly:true — só admin vê. (D) PenetrationView: upload + dropdown de mês + cards (loja/companhia/diferença/ranking) + tabela detalhada por categoria com barras de comparação (verde=acima, vermelho=abaixo) + top 10 lojas com destaque da própria. (E) PenetrationDashboardCard no Visão Geral (admin only, no topo) — resumo da última taxa importada com delta vs companhia; clica abre detalhes.' },
   { version: '3.21.10', date: '2026-05-27', summary: 'Fix HydrationGate preso: (A) "Continuar mesmo assim" passou a também ligar cloudDataLoaded=true (antes só ligava rowsHydrated → ficava preso se o fetch da cloud falhasse). (B) Botão skip aparece após 4s (antes 8s). (C) Novo auto-skip de segurança aos 30s — gate nunca mais fica preso indefinidamente, mesmo sem clique. Resultado: ao primeiro login ou refresh com cloud lenta/offline, a app desbloqueia sempre.' },
@@ -22725,31 +22726,43 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embe
         />
       )}
 
-      {/* Upload + selector de mês */}
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 20, padding: '12px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flexWrap: 'wrap' }}>
-        <label style={{ cursor: importing ? 'wait' : 'pointer', padding: '8px 14px', background: T.accent, color: '#fff', borderRadius: 6, fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <Upload size={12} /> {importing ? (importProgress?.message || 'A processar…') : 'Sobe ficheiro mensal'}
-          <input type="file" accept=".xlsx,.xls" disabled={importing} style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
-        </label>
+      {/* v3.21.13: Toolbar minimalista — chips inline em vez de card pesado */}
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 28, flexWrap: 'wrap' }}>
         {snapshots.length > 0 && (
           <>
-            <span style={{ color: T.inkMute, fontSize: 11 }}>Mês:</span>
-            <select value={selectedMonthKey || ''} onChange={e => setSelectedMonthKey(e.target.value)} style={{ padding: '7px 10px', fontSize: 12, fontFamily: 'inherit', background: T.bg, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4 }}>
-              {snapshots.map(s => (
-                <option key={s.id} value={s.month_key}>{s.payload?.month || s.month_key}</option>
-              ))}
-            </select>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              {snapshots.slice(0, 8).map(s => {
+                const on = s.month_key === selectedMonthKey;
+                return (
+                  <button key={s.id} onClick={() => setSelectedMonthKey(s.month_key)}
+                    style={{
+                      padding: '5px 12px', fontSize: 11, fontFamily: 'inherit',
+                      borderRadius: 999, fontWeight: 500,
+                      border: `1px solid ${on ? T.ink : T.line}`,
+                      background: on ? T.ink : 'transparent',
+                      color: on ? T.bg : T.inkSoft, cursor: 'pointer',
+                    }}>
+                    {s.payload?.month || s.month_key}
+                  </button>
+                );
+              })}
+            </div>
             {active && (
-              <span style={{ fontSize: 10, color: T.inkMute }}>
-                Importado {new Date(active.imported_at).toLocaleDateString('pt-PT')}
+              <span style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono' }}>
+                · {new Date(active.imported_at).toLocaleDateString('pt-PT')}
               </span>
             )}
-            {active && (
-              <button onClick={() => handleDelete(active.id)} title="Apagar este mês" style={{ marginLeft: 'auto', padding: '5px 10px', background: 'transparent', color: T.red, border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                <Trash2 size={10} /> Apagar
-              </button>
-            )}
           </>
+        )}
+        <div style={{ flex: 1 }} />
+        <label style={{ cursor: importing ? 'wait' : 'pointer', padding: '7px 14px', background: 'transparent', color: T.ink, borderRadius: 6, fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 6, border: `1px solid ${T.line}` }}>
+          <Upload size={12} /> {importing ? (importProgress?.message || 'A processar…') : (active ? 'Actualizar' : 'Sobe ficheiro')}
+          <input type="file" accept=".xlsx,.xls" disabled={importing} style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
+        </label>
+        {active && (
+          <button onClick={() => handleDelete(active.id)} title="Apagar este mês" style={{ padding: '7px 10px', background: 'transparent', color: T.inkMute, border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 11, cursor: 'pointer' }}>
+            <Trash2 size={11} />
+          </button>
         )}
       </div>
 
@@ -22761,11 +22774,13 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embe
       )}
 
       {!snap ? (
-        <div style={{ padding: 60, textAlign: 'center', background: T.bgEl, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
-          <TrendingUp size={32} strokeWidth={1.25} style={{ color: T.inkMute, marginBottom: 12 }} />
-          <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 6 }}>Sem dados de penetração</div>
-          <div style={{ fontSize: 13, color: T.inkMute }}>
-            Sobe o ficheiro mensal <strong>TX_Penetração_&lt;Mês&gt;_&lt;Ano&gt;.xlsx</strong> para começares.
+        <div style={{ padding: '80px 24px', textAlign: 'center' }}>
+          <TrendingUp size={28} strokeWidth={1.5} style={{ color: T.inkMute, marginBottom: 18, opacity: 0.5 }} />
+          <div className="display" style={{ fontSize: 22, fontWeight: 500, color: T.ink, marginBottom: 8, letterSpacing: '-0.02em' }}>
+            Sem dados ainda
+          </div>
+          <div style={{ fontSize: 13, color: T.inkMute, maxWidth: 380, margin: '0 auto', lineHeight: 1.6 }}>
+            Sobe o ficheiro mensal <span style={{ fontFamily: 'Geist Mono', color: T.inkSoft }}>TX_Penetração_&lt;Mês&gt;_&lt;Ano&gt;.xlsx</span> para começares a comparar Aveiro com a média da companhia.
           </div>
         </div>
       ) : !myStoreRow ? (
@@ -22795,10 +22810,155 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
   const delta = myTaxa - avgTaxa;
   const better = delta >= 0;
 
+  // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
+  // gera sugestões accionáveis. Computado uma vez por snap+row.
+  const insights = useMemo(() => {
+    const out = [];
+    // 1) Categoria com maior gap negativo (oportunidade)
+    const gaps = PENETRATION_CATEGORIES
+      .filter(c => c.key !== 'total' && myStoreRow[c.key] && totalRow[c.key])
+      .map(c => ({ key: c.key, label: c.label, my: myStoreRow[c.key].taxa, avg: totalRow[c.key].taxa, equip: myStoreRow[c.key].equip, seg: myStoreRow[c.key].seg }))
+      .filter(g => g.equip >= 5);
+    const losers = gaps.filter(g => (g.my - g.avg) < -0.03).sort((a, b) => (a.my - a.avg) - (b.my - b.avg)).slice(0, 2);
+    const winners = gaps.filter(g => (g.my - g.avg) > 0.03).sort((a, b) => (b.my - b.avg) - (a.my - a.avg)).slice(0, 2);
+    for (const g of losers) {
+      const targetSeg = Math.ceil(g.equip * g.avg) - g.seg;
+      out.push({
+        kind: 'warn',
+        title: `Recuperar ${g.label}`,
+        body: `${pctFmt(g.my)} vs ${pctFmt(g.avg)} da companhia. Faltam ${targetSeg > 0 ? targetSeg : '~'} seguros para atingires a média (${g.equip} equip. vendidos).`,
+      });
+    }
+    for (const g of winners) {
+      out.push({
+        kind: 'good',
+        title: `Bom em ${g.label}`,
+        body: `${pctFmt(g.my)} (${pctDelta(g.my - g.avg)} acima da média). Mantém o foco — partilha boas práticas com as outras categorias.`,
+      });
+    }
+    // 2) TP Addon
+    if ((myStoreRow.addonRate || 0) + 0.05 < (totalRow.addonRate || 0)) {
+      out.push({
+        kind: 'warn', title: 'Addons abaixo da média',
+        body: `TP Addon ${pctFmt(myStoreRow.addonRate || 0)} vs ${pctFmt(totalRow.addonRate || 0)} companhia. Foca em extras (DDR, Extra Segurança, Extra Cloud) no momento da venda.`,
+      });
+    }
+    // 3) Entrega cartões PP
+    if ((myStoreRow.deliveryPct || 0) < 0.5 && (myStoreRow.deliveryPct || 0) > 0) {
+      out.push({
+        kind: 'warn', title: 'Entrega de cartões PP baixa',
+        body: `Só ${pctFmt(myStoreRow.deliveryPct)} dos cartões físicos estão a ser entregues — risco de churn elevado. Reforça follow-up.`,
+      });
+    }
+    // 4) Vendedores fracos
+    if (Array.isArray(snap.sellers) && snap.sellers.length > 3) {
+      const weak = snap.sellers.filter(s => s.vendas >= 20 && s.taxa < avgTaxa * 0.7).slice(0, 3);
+      if (weak.length > 0) {
+        out.push({
+          kind: 'info', title: `${weak.length} colaborador${weak.length > 1 ? 'es' : ''} abaixo de 70% da média`,
+          body: weak.map(s => `${s.name} (${pctFmt(s.taxa)})`).join(' · ') + '. Considera mentoria 1-a-1.',
+        });
+      }
+      const churn = snap.sellers.filter(s => s.churnPct > 0.15).slice(0, 3);
+      if (churn.length > 0) {
+        out.push({
+          kind: 'warn', title: `Churn elevado em ${churn.length} colaborador${churn.length > 1 ? 'es' : ''}`,
+          body: churn.map(s => `${s.name} (${pctFmt(s.churnPct)})`).join(' · ') + '. Validar qualidade da venda.',
+        });
+      }
+    }
+    return out.slice(0, 6);
+  }, [snap, myStoreRow, totalRow, avgTaxa]);
+
   return (
     <div>
-      {/* Cards de destaque */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 24 }}>
+      {/* v3.21.13: Hero block — números grandes, minimalista, sem cards pesados */}
+      <div style={{
+        marginBottom: 36,
+        padding: '24px 0',
+        borderTop: `1px solid ${T.line}`,
+        borderBottom: `1px solid ${T.line}`,
+      }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 32, alignItems: 'end' }}>
+          <div>
+            <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 8 }}>
+              {myStoreRow.name}
+            </div>
+            <div className="display" style={{ fontSize: 56, fontWeight: 500, color: better ? T.green : T.red, lineHeight: 0.95, letterSpacing: '-0.03em' }}>
+              {pctFmt(myTaxa)}
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, fontFamily: 'Geist Mono' }}>
+              {myStoreRow.total.seg} / {myStoreRow.total.equip} equip.
+            </div>
+          </div>
+          <div>
+            <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 8 }}>
+              Companhia
+            </div>
+            <div className="display" style={{ fontSize: 36, fontWeight: 500, color: T.inkSoft, lineHeight: 0.95, letterSpacing: '-0.02em' }}>
+              {pctFmt(avgTaxa)}
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6, fontFamily: 'Geist Mono' }}>
+              {totalRow.total.seg} / {totalRow.total.equip}
+            </div>
+          </div>
+          <div>
+            <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 8 }}>
+              Diferença
+            </div>
+            <div className="display" style={{ fontSize: 36, fontWeight: 500, color: better ? T.green : T.red, lineHeight: 0.95, letterSpacing: '-0.02em' }}>
+              {pctDelta(delta)}
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6 }}>
+              {better ? '↑ acima da média' : '↓ abaixo da média'}
+            </div>
+          </div>
+          <div>
+            <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 8 }}>
+              Ranking
+            </div>
+            <div className="display" style={{ fontSize: 36, fontWeight: 500, color: T.ink, lineHeight: 0.95, letterSpacing: '-0.02em' }}>
+              {ranking.rank}<span style={{ fontSize: 16, color: T.inkMute }}>º</span>
+            </div>
+            <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6 }}>
+              de {ranking.total} lojas
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* v3.21.13: Insights automáticos — sugestões accionáveis */}
+      {insights.length > 0 && (
+        <div style={{ marginBottom: 36 }}>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14 }}>
+            ✨ Recomendações
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+            {insights.map((ins, i) => {
+              const c = ins.kind === 'good' ? T.green : ins.kind === 'warn' ? T.orange : T.accent;
+              return (
+                <div key={i} style={{
+                  padding: '14px 16px',
+                  background: T.bgEl,
+                  border: `1px solid ${T.line}`,
+                  borderLeft: `3px solid ${c}`,
+                  borderRadius: 8,
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: T.ink, marginBottom: 6 }}>
+                    {ins.title}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>
+                    {ins.body}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Cards extra removidos — substituídos pelo hero acima */}
+      <div style={{ display: 'none' }}>
         <PenKpiCard
           label={myStoreRow.name}
           value={pctFmt(myTaxa)}
@@ -22825,101 +22985,106 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
         />
       </div>
 
-      {/* Tabela detalhada por categoria */}
-      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
-        <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft }}>
-          Penetração por categoria — {snap.month}
+      {/* v3.21.13: Categoria — linhas limpas (sem table), bar comparison */}
+      <div style={{ marginBottom: 36 }}>
+        <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>Por categoria</span>
+          <span style={{ flex: 1, height: 1, background: T.line }} />
+          <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>{snap.month}</span>
         </div>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead>
-            <tr style={{ background: T.bg, fontSize: 11, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              <th style={{ padding: '10px 12px', textAlign: 'left' }}>Categoria</th>
-              <th style={{ padding: '10px 12px', textAlign: 'right' }}>{myStoreRow.name}</th>
-              <th style={{ padding: '10px 12px', textAlign: 'right', color: T.inkSoft }}>Companhia</th>
-              <th style={{ padding: '10px 12px', textAlign: 'right' }}>Δ</th>
-              <th style={{ padding: '10px 12px', textAlign: 'left', minWidth: 160 }}>Comparação visual</th>
-            </tr>
-          </thead>
-          <tbody>
-            {PENETRATION_CATEGORIES.map(cat => {
-              const mine = myStoreRow[cat.key];
-              const avg  = totalRow[cat.key];
-              if (!mine || !avg) return null;
-              const d = (mine.taxa || 0) - (avg.taxa || 0);
-              const myPct = Math.min(100, (mine.taxa || 0) * 100);
-              const avgPct = Math.min(100, (avg.taxa || 0) * 100);
-              const positive = d >= 0;
-              const emphasized = cat.key === 'total';
-              return (
-                <tr key={cat.key} style={{
-                  borderTop: `1px solid ${T.lineSoft}`,
-                  background: emphasized ? `${T.accent}08` : 'transparent',
-                  fontWeight: emphasized ? 600 : 400,
-                }}>
-                  <td style={{ padding: '10px 12px' }}>{cat.label}</td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'Geist Mono' }}>
-                    <div>{pctFmt(mine.taxa)}</div>
-                    <div style={{ fontSize: 10, color: T.inkMute }}>{mine.seg}/{mine.equip}</div>
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', color: T.inkSoft, fontFamily: 'Geist Mono' }}>
-                    <div>{pctFmt(avg.taxa)}</div>
-                    <div style={{ fontSize: 10, color: T.inkMute }}>{avg.seg}/{avg.equip}</div>
-                  </td>
-                  <td style={{ padding: '10px 12px', textAlign: 'right', color: positive ? T.green : T.red, fontFamily: 'Geist Mono', fontWeight: 600 }}>
-                    {pctDelta(d)}
-                  </td>
-                  <td style={{ padding: '10px 12px' }}>
-                    <div style={{ position: 'relative', height: 18, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
-                      {/* Barra companhia (fundo) */}
-                      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${avgPct}%`, background: `${T.inkMute}30` }} />
-                      {/* Barra minha loja (em cima) */}
-                      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${myPct}%`, background: positive ? T.green : T.red, opacity: 0.85 }} />
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {PENETRATION_CATEGORIES.map(cat => {
+            const mine = myStoreRow[cat.key];
+            const avg  = totalRow[cat.key];
+            if (!mine || !avg) return null;
+            const d = (mine.taxa || 0) - (avg.taxa || 0);
+            const myPct = Math.min(100, (mine.taxa || 0) * 100);
+            const avgPct = Math.min(100, (avg.taxa || 0) * 100);
+            const positive = d >= 0;
+            const emphasized = cat.key === 'total';
+            const barColor = positive ? T.green : T.red;
+            return (
+              <div key={cat.key} style={{
+                display: 'grid',
+                gridTemplateColumns: '160px 80px 80px 60px 1fr',
+                gap: 16, alignItems: 'center',
+                padding: emphasized ? '14px 12px' : '10px 12px',
+                background: emphasized ? T.bgEl : 'transparent',
+                borderRadius: emphasized ? 8 : 0,
+                marginTop: emphasized ? 8 : 0,
+                fontWeight: emphasized ? 600 : 400,
+                fontSize: emphasized ? 14 : 13,
+                borderTop: !emphasized ? `1px solid ${T.lineSoft}` : 'none',
+              }}>
+                <div style={{ color: T.ink }}>{cat.label}</div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono' }}>
+                  <span style={{ color: T.ink }}>{pctFmt(mine.taxa)}</span>
+                  <span style={{ fontSize: 10, color: T.inkMute, marginLeft: 4 }}>· {mine.seg}/{mine.equip}</span>
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 12 }}>
+                  {pctFmt(avg.taxa)}
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, fontSize: 12, color: positive ? T.green : T.red }}>
+                  {pctDelta(d)}
+                </div>
+                <div style={{ position: 'relative', height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${avgPct}%`, background: `${T.inkMute}40` }} />
+                  <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${myPct}%`, background: barColor, opacity: 0.9 }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
-      {/* TP Addon + Tx entrega cartões */}
-      <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-        <PenKpiCard
-          label="TP Addon"
-          value={pctFmt(myStoreRow.addonRate || 0)}
-          accent={(myStoreRow.addonRate || 0) >= (totalRow.addonRate || 0) ? T.green : T.red}
-          sub={`Companhia: ${pctFmt(totalRow.addonRate || 0)}`}
-        />
-        <PenKpiCard
-          label="Tx Entrega Cartões PP"
-          value={pctFmt(myStoreRow.deliveryPct || 0)}
-          accent={T.accent}
-          sub={`Companhia: ${pctFmt(totalRow.deliveryPct || 0)}`}
-        />
-      </div>
-
-      {/* v3.21.12: Colaboradores da loja (filtrado por sellerStoreFilter, default AVEIRO) */}
-      {Array.isArray(snap.sellers) && snap.sellers.length > 0 && (
-        <div style={{ marginTop: 24, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
-          <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>Colaboradores · {snap.sellerStoreFilter || 'AVEIRO'} ({snap.sellers.length})</span>
-            <span style={{ fontSize: 10, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: T.inkMute }}>Ordenado por TP (taxa penetração do vendedor)</span>
+      {/* v3.21.13: Addons + Entrega — inline minimalista (2 stats sem cards) */}
+      <div style={{ marginBottom: 36, display: 'flex', gap: 48, paddingTop: 20, borderTop: `1px solid ${T.line}`, flexWrap: 'wrap' }}>
+        <div>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>TP Addon</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+            <span className="display" style={{ fontSize: 28, fontWeight: 500, color: (myStoreRow.addonRate || 0) >= (totalRow.addonRate || 0) ? T.green : T.red, letterSpacing: '-0.02em', lineHeight: 1 }}>
+              {pctFmt(myStoreRow.addonRate || 0)}
+            </span>
+            <span style={{ fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono' }}>
+              vs {pctFmt(totalRow.addonRate || 0)}
+            </span>
           </div>
-          <div style={{ overflowX: 'auto' }}>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Entrega Cartões PP</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+            <span className="display" style={{ fontSize: 28, fontWeight: 500, color: T.ink, letterSpacing: '-0.02em', lineHeight: 1 }}>
+              {pctFmt(myStoreRow.deliveryPct || 0)}
+            </span>
+            <span style={{ fontSize: 11, color: T.inkMute, fontFamily: 'Geist Mono' }}>
+              vs {pctFmt(totalRow.deliveryPct || 0)}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* v3.21.13: Colaboradores — header inline minimalista */}
+      {Array.isArray(snap.sellers) && snap.sellers.length > 0 && (
+        <div style={{ marginBottom: 36 }}>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>Colaboradores · {snap.sellerStoreFilter || 'AVEIRO'} ({snap.sellers.length})</span>
+            <span style={{ flex: 1, height: 1, background: T.line }} />
+            <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>ordenado por TP</span>
+          </div>
+          <div style={{ overflowX: 'auto', border: `1px solid ${T.lineSoft}`, borderRadius: 8 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
               <thead>
-                <tr style={{ background: T.bg, fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>#</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>Vendedor</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>NIF</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>Carga</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Vendas</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Seguros</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>TP</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Addons</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Plano Tot.</th>
-                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Churn 6m</th>
+                <tr style={{ background: 'transparent', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>#</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Vendedor</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>NIF</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Carga</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Vendas</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Seguros</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>TP</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Addons</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Plano Tot.</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Churn 6m</th>
                 </tr>
               </thead>
               <tbody>
@@ -22950,24 +23115,36 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
         </div>
       )}
 
-      {/* Ranking top 10 */}
-      <div style={{ marginTop: 24, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft, marginBottom: 12 }}>
-          Top 10 lojas — Taxa Penetração Total
+      {/* v3.21.13: Top 10 lojas — versão minimalista com barras */}
+      <div style={{ marginBottom: 24 }}>
+        <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>Top 10 lojas (companhia)</span>
+          <span style={{ flex: 1, height: 1, background: T.line }} />
+          <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>taxa penetração total</span>
         </div>
         {(() => {
           const sorted = snap.stores.filter(s => s.total && s.total.taxa > 0).sort((a, b) => b.total.taxa - a.total.taxa);
+          const maxTaxa = sorted[0]?.total.taxa || 1;
           return sorted.slice(0, 10).map((s, i) => {
             const isMe = s.name === myStoreRow.name;
+            const w = Math.max(2, (s.total.taxa / maxTaxa) * 100);
             return (
               <div key={s.name} style={{
-                display: 'flex', alignItems: 'center', gap: 10, padding: '6px 8px',
-                background: isMe ? `${T.accent}14` : 'transparent', borderRadius: 4,
-                fontWeight: isMe ? 600 : 400, marginBottom: 2,
+                display: 'grid', gridTemplateColumns: '28px 1fr 60px', gap: 12,
+                alignItems: 'center', padding: '8px 0',
+                borderTop: i > 0 ? `1px solid ${T.lineSoft}` : 'none',
               }}>
-                <span style={{ width: 24, textAlign: 'right', color: T.inkMute, fontFamily: 'Geist Mono', fontSize: 11 }}>{i + 1}.</span>
-                <span style={{ flex: 1, fontSize: 12 }}>{s.name}{isMe && ' ← tu'}</span>
-                <span style={{ fontFamily: 'Geist Mono', fontSize: 12, color: isMe ? T.accent : T.ink }}>{pctFmt(s.total.taxa)}</span>
+                <span style={{ textAlign: 'right', color: T.inkMute, fontFamily: 'Geist Mono', fontSize: 11 }}>{i + 1}</span>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: isMe ? 600 : 400, color: isMe ? T.accent : T.ink, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {s.name}
+                    {isMe && <span style={{ fontSize: 9, padding: '1px 6px', background: T.accent, color: '#fff', borderRadius: 999, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'Geist Mono' }}>TU</span>}
+                  </div>
+                  <div style={{ height: 4, background: T.lineSoft, borderRadius: 2, overflow: 'hidden' }}>
+                    <div style={{ width: `${w}%`, height: '100%', background: isMe ? T.accent : T.inkMute, opacity: isMe ? 1 : 0.5 }} />
+                  </div>
+                </div>
+                <span style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 12, color: isMe ? T.accent : T.ink, fontWeight: isMe ? 600 : 400 }}>{pctFmt(s.total.taxa)}</span>
               </div>
             );
           });
