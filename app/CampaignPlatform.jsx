@@ -429,16 +429,17 @@ function _ddrFromFilename(name) {
   };
 }
 
-function parsePenetrationExcel(file, onProgress) {
+function parsePenetrationExcel(file, onProgress, opts = {}) {
+  const sellerStoreFilter = (opts.sellerStoreFilter || 'AVEIRO').toUpperCase();
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         onProgress?.({ stage: 'parse', message: 'A ler ficheiro…' });
-        // Truque chave: sheets:['RESUMO'] reduz dramaticamente a memória
-        // — só carrega esta sheet. Ficheiro original tem 25 sheets, ~96MB.
+        // Truque chave: sheets:['RESUMO','VENDEDOR_TOTAL'] reduz dramaticamente
+        // a memória — só carrega estas duas sheets. Ficheiro tem 25 sheets, ~96MB.
         const wb = XLSX.read(new Uint8Array(e.target.result), {
-          type: 'array', sheets: ['RESUMO'], cellDates: false,
+          type: 'array', sheets: ['RESUMO', 'VENDEDOR_TOTAL'], cellDates: false,
         });
         const sh = wb.Sheets['RESUMO'];
         if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
@@ -484,6 +485,52 @@ function parsePenetrationExcel(file, onProgress) {
           }
           total.addonRate = 0;
         }
+        // v3.21.12: parse VENDEDOR_TOTAL → lista de vendedores filtrada por loja
+        onProgress?.({ stage: 'parse', message: 'A ler colaboradores…' });
+        const sellers = [];
+        const shV = wb.Sheets['VENDEDOR_TOTAL'];
+        if (shV) {
+          const aoaV = XLSX.utils.sheet_to_json(shV, { header: 1, blankrows: false, defval: null });
+          // Data começa por volta de R6. Filtrar por Loja (col 9) == sellerStoreFilter
+          for (let r = 6; r < aoaV.length; r++) {
+            const row = aoaV[r];
+            if (!row) continue;
+            const loja = String(row[9] || '').toUpperCase().trim();
+            if (loja !== sellerStoreFilter) continue;
+            const name = String(row[7] || '').trim();
+            if (!name) continue;
+            sellers.push({
+              name,
+              nif: String(row[8] || '').trim(),
+              carga: String(row[10] || '').trim(),
+              dept: String(row[12] || '').trim(),
+              taxaLoja: Number(row[19]) || 0,
+              taxaAddons: Number(row[15]) || 0,
+              telecomU: Number(row[16]) || 0,  // <399€
+              telecomO: Number(row[17]) || 0,  // >399€
+              vendas: Number(row[49]) || 0,    // total mercadoria
+              seguros: Number(row[50]) || 0,
+              taxa: Number(row[51]) || 0,      // TP do vendedor
+              ddr: Number(row[52]) || 0,
+              extraSeg: Number(row[53]) || 0,
+              extraCloud: Number(row[54]) || 0,
+              planoTotal: Number(row[55]) || 0,
+              // Quebra por categoria (vendas/seguros)
+              tv:        { v: Number(row[21]) || 0, s: Number(row[22]) || 0 },
+              foto:      { v: Number(row[24]) || 0, s: Number(row[25]) || 0 },
+              drone:     { v: Number(row[27]) || 0, s: Number(row[28]) || 0 },
+              hardware:  { v: Number(row[30]) || 0, s: Number(row[31]) || 0 },
+              restart:   { v: Number(row[33]) || 0, s: Number(row[34]) || 0 },
+              telecom:   { v: Number(row[37]) || 0, s: Number(row[38]) || 0 },
+              smartwatch:{ v: Number(row[40]) || 0, s: Number(row[41]) || 0 },
+              mob:       { v: Number(row[43]) || 0, s: Number(row[44]) || 0 },
+              gaming:    { v: Number(row[46]) || 0, s: Number(row[47]) || 0 },
+              churnPct:  Number(row[80]) || 0,
+            });
+          }
+          // Ordena por TP desc
+          sellers.sort((a, b) => b.taxa - a.taxa);
+        }
         const dd = _ddrFromFilename(file.name);
         resolve({
           month: dd.month || 'Mês não detectado',
@@ -491,6 +538,8 @@ function parsePenetrationExcel(file, onProgress) {
           importedAt: new Date().toISOString(),
           filename: file.name,
           stores, total,
+          sellers,
+          sellerStoreFilter,
         });
       } catch (err) { reject(err); }
     };
@@ -1176,8 +1225,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.11';
-const APP_BUILD_DATE = '2026-05-27T16:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.12';
+const APP_BUILD_DATE = '2026-05-27T17:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1187,6 +1236,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.12', date: '2026-05-27', summary: 'Tx Penetração movida para dentro de Planos de Proteção como sub-tab admin + Colaboradores Aveiro. (A) Sidebar item "Tx Penetração" removido — agora vive em Planos de Proteção → tab "Tx Penetração FNAC". (B) PPsView ganha tabs internos "Diarização" | "Tx Penetração FNAC". (C) Parser parsePenetrationExcel agora também lê sheet VENDEDOR_TOTAL filtrada por loja (default AVEIRO) → lista de colaboradores com NIF, carga horária, vendas, seguros, TP individual, addons, plano total, churn. (D) Nova tabela "Colaboradores · AVEIRO" dentro do breakdown ordenada por TP (cores verde/laranja/vermelho consoante taxa). (E) PenetrationView aceita prop embedded para reutilização sem duplicar Header. (F) Dashboard card admin clica → abre PPs no tab penetração directamente. (G) Re-upload do ficheiro do mês actualiza (upsert por month_key).' },
   { version: '3.21.11', date: '2026-05-27', summary: 'Nova vista admin-only "Tx Penetração". (A) Parser parsePenetrationExcel lê APENAS a sheet RESUMO do ficheiro TX_Penetração_<Mes>_<Ano>.xlsx (via sheets:["RESUMO"] no XLSX.read → poupa memória num ficheiro de 96MB). Extrai por loja: EQUIP/SEGUROS/TAXA por categoria (TV, Foto, Hardware, Telecom <399€/>399€, Gaming, Smartwatch, Restart, Mob.Eléctrica, Drones, Total) + TP Addon + Tx Entrega Cartões. Detecta mês do nome do ficheiro. (B) Migration penetration_snapshots: jsonb por (store_id, month_key), admin-only RLS, upsert substitui o mês ao re-importar. (C) Nova sidebar item "Tx Penetração" (TrendingUp icon) com adminOnly:true — só admin vê. (D) PenetrationView: upload + dropdown de mês + cards (loja/companhia/diferença/ranking) + tabela detalhada por categoria com barras de comparação (verde=acima, vermelho=abaixo) + top 10 lojas com destaque da própria. (E) PenetrationDashboardCard no Visão Geral (admin only, no topo) — resumo da última taxa importada com delta vs companhia; clica abre detalhes.' },
   { version: '3.21.10', date: '2026-05-27', summary: 'Fix HydrationGate preso: (A) "Continuar mesmo assim" passou a também ligar cloudDataLoaded=true (antes só ligava rowsHydrated → ficava preso se o fetch da cloud falhasse). (B) Botão skip aparece após 4s (antes 8s). (C) Novo auto-skip de segurança aos 30s — gate nunca mais fica preso indefinidamente, mesmo sem clique. Resultado: ao primeiro login ou refresh com cloud lenta/offline, a app desbloqueia sempre.' },
   { version: '3.21.9', date: '2026-05-27', summary: 'Fix: botão "Administração" no sidebar ficava escondido atrás do widget de Sessão quando havia muitos items na nav. Aside passou a flex column; nav ganha flex:1 + overflowY:auto (scroll interno quando preciso); widget de Sessão deixou de ser position:absolute e passou a flex item normal no fim — sempre visível, nunca sobrepõe.' },
@@ -5640,13 +5690,6 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {/* v3.20.12: 'sales' no sidebar (admin-only) + também acessível dentro de Admin */}
-          {view === 'penetration' && isAdmin && (
-            <PenetrationView
-              currentStoreId={currentStoreId}
-              currentStoreName={stores.find(s => s.id === currentStoreId)?.name}
-              currentUserId={user?.id}
-            />
-          )}
           {view === 'sales' && isAdmin && <SalesView stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} stockMapPO2={stockMapPO2} stockMapPO3={stockMapPO3} currentStoreId={currentStoreId} currentStoreName={stores.find(s => s.id === currentStoreId)?.name} currentUserId={user?.id} />}
           {view === 'sales' && !isAdmin && (
             <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
@@ -5677,7 +5720,13 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'images' && <FlyerEditor campaigns={filteredCampaigns} />}
           {view === 'pdfs' && <PdfEditor />}
           {view === 'notes' && <NotesView notes={notes} setNotes={setNotesWithTimestamp} />}
-          {view === 'pps' && isAdmin && <PPsView currentUserId={user?.id} />}
+          {view === 'pps' && isAdmin && (
+            <PPsView
+              currentUserId={user?.id}
+              currentStoreId={currentStoreId}
+              currentStoreName={stores.find(s => s.id === currentStoreId)?.name}
+            />
+          )}
           {view === 'pps' && !isAdmin && (
             <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>
               <Lock size={32} style={{ opacity: 0.5, marginBottom: 12 }} />
@@ -5950,8 +5999,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'dashboard',  label: 'Visão Geral',         icon: LayoutDashboard },
     // v3.20.12: 'sales' volta ao sidebar — admin-only via canSeeMenuItem (roles=[] visible=false)
     { id: 'sales',      label: 'Análise de Vendas',   icon: BarChart3, hideFor: ['PES'] },
-    // v3.21.11: Taxa de Penetração — admin-only (gating extra abaixo)
-    { id: 'penetration', label: 'Tx Penetração',       icon: TrendingUp, hideFor: ['PES'], adminOnly: true },
+    // v3.21.12: "Tx Penetração" foi movida para dentro de Planos de Proteção (PPs) como sub-tab admin
     { id: 'campaigns',  label: 'Campanhas',           icon: Layers, dot: notifCount > 0 ? notifCount : null },
     { id: 'calendar',   label: 'Calendário',          icon: Calendar },
     { id: 'changes',    label: 'Alterações',          icon: GitCompareArrows },
@@ -6612,11 +6660,11 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
     <div className="fade-up">
       <Header eyebrow="Início" title="Visão geral" subtitle="Carrega ficheiros, analisa vendas, distribui produtos pelas zonas da loja e gera os materiais finais." />
 
-      {/* v3.21.11: Card admin — Taxa Penetração resumida (clica para detalhes) */}
+      {/* v3.21.12: Card admin — Taxa Penetração resumida (clica → PPs → tab Tx Penetração) */}
       {isAdmin && (
         <PenetrationDashboardCard
           currentStoreName={currentStoreName}
-          onOpen={() => setView('penetration')}
+          onOpen={() => { storeSet('pps.tab', 'penetration'); setView('pps'); }}
         />
       )}
 
@@ -20079,7 +20127,9 @@ const navBtnStyle = {
 // Diarização de vendas de PPs por colaborador. Calcula taxa de conversão
 // (PPs vendidos / equipamentos vendidos).
 // ─────────────────────────────────────────────────────────────────────────
-function PPsView({ currentUserId }) {
+function PPsView({ currentUserId, currentStoreId, currentStoreName }) {
+  // v3.21.12: tabs internos — Diarização | Tx Penetração FNAC
+  const [tab, setTab] = useStoredState('pps.tab', 'diary');
   const today = new Date().toISOString().slice(0, 10);
   const monthAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
 
@@ -20179,21 +20229,52 @@ function PPsView({ currentUserId }) {
     <div style={{ padding: '24px 32px', maxWidth: 1200, margin: '0 auto' }}>
       <Header
         eyebrow={<><Shield size={11} style={{ display: 'inline', verticalAlign: 'middle', marginRight: 4 }} />Planos de Proteção</>}
-        title="Diarização por colaborador"
-        subtitle="Regista quantos equipamentos cada colaborador vendeu e em quantos foi feito PP. A taxa de conversão é calculada automaticamente."
-        action={
-          <button
-            onClick={() => setEditing({ sale_date: today, collaborator_id: '', equipment_count: 0, pp_count: 0, value: '', category: '', notes: '' })}
-            style={{
-              padding: '8px 14px', background: T.ink, color: T.bg,
-              border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
-              display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
-            }}
-          >
-            <Plus size={12} /> Adicionar entrada
-          </button>
-        }
+        title={tab === 'penetration' ? 'Taxa de Penetração FNAC' : 'Diarização por colaborador'}
+        subtitle={tab === 'penetration'
+          ? 'Análise mensal da loja vs. média da companhia e lista de colaboradores (sheet RESUMO + VENDEDOR_TOTAL do ficheiro TX_Penetração).'
+          : 'Regista quantos equipamentos cada colaborador vendeu e em quantos foi feito PP. A taxa de conversão é calculada automaticamente.'}
       />
+
+      {/* v3.21.12: tabs internas */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 20, borderBottom: `1px solid ${T.line}` }}>
+        {[
+          { id: 'diary', label: 'Diarização' },
+          { id: 'penetration', label: 'Tx Penetração FNAC' },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: '10px 18px', fontSize: 13, fontFamily: 'inherit',
+            background: 'transparent', border: 'none',
+            borderBottom: tab === t.id ? `2px solid ${T.accent}` : '2px solid transparent',
+            color: tab === t.id ? T.accent : T.inkSoft,
+            fontWeight: tab === t.id ? 600 : 500, cursor: 'pointer',
+            marginBottom: -1,
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab === 'penetration' && (
+        <PenetrationView
+          currentStoreId={currentStoreId}
+          currentStoreName={currentStoreName}
+          currentUserId={currentUserId}
+          embedded={true}
+        />
+      )}
+
+      {tab === 'diary' && (<>
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+        <button
+          onClick={() => setEditing({ sale_date: today, collaborator_id: '', equipment_count: 0, pp_count: 0, value: '', category: '', notes: '' })}
+          style={{
+            padding: '8px 14px', background: T.ink, color: T.bg,
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+          }}
+        >
+          <Plus size={12} /> Adicionar entrada
+        </button>
+      </div>
 
       {/* Filtros */}
       <div style={{ display: 'flex', gap: 12, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -20288,6 +20369,8 @@ function PPsView({ currentUserId }) {
           onSave={handleSave}
         />
       )}
+
+      </>)}
     </div>
   );
 }
@@ -22572,7 +22655,7 @@ function pctDelta(v) {
   return `${sign}${n.toFixed(1)}pp`;
 }
 
-function PenetrationView({ currentStoreId, currentStoreName, currentUserId }) {
+function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embedded = false }) {
   const [snapshots, setSnapshots] = useState([]); // todos os meses na cloud
   const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
@@ -22634,11 +22717,13 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId }) {
   if (loading) return <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>A carregar…</div>;
 
   return (
-    <div className="fade-up">
-      <Header
-        title="Taxa de Penetração"
-        subtitle="Análise mensal da loja vs. média da companhia (sheet RESUMO do ficheiro TX_Penetração)"
-      />
+    <div className={embedded ? '' : 'fade-up'}>
+      {!embedded && (
+        <Header
+          title="Taxa de Penetração"
+          subtitle="Análise mensal da loja vs. média da companhia (sheet RESUMO do ficheiro TX_Penetração)"
+        />
+      )}
 
       {/* Upload + selector de mês */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 20, padding: '12px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, flexWrap: 'wrap' }}>
@@ -22813,6 +22898,57 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
           sub={`Companhia: ${pctFmt(totalRow.deliveryPct || 0)}`}
         />
       </div>
+
+      {/* v3.21.12: Colaboradores da loja (filtrado por sellerStoreFilter, default AVEIRO) */}
+      {Array.isArray(snap.sellers) && snap.sellers.length > 0 && (
+        <div style={{ marginTop: 24, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', color: T.inkSoft, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>Colaboradores · {snap.sellerStoreFilter || 'AVEIRO'} ({snap.sellers.length})</span>
+            <span style={{ fontSize: 10, fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: T.inkMute }}>Ordenado por TP (taxa penetração do vendedor)</span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: T.bg, fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>#</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>Vendedor</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>NIF</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'left' }}>Carga</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Vendas</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Seguros</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>TP</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Addons</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Plano Tot.</th>
+                  <th style={{ padding: '8px 10px', textAlign: 'right' }}>Churn 6m</th>
+                </tr>
+              </thead>
+              <tbody>
+                {snap.sellers.map((s, i) => {
+                  const tpColor = s.taxa >= 0.4 ? T.green : s.taxa >= 0.25 ? T.orange : T.red;
+                  return (
+                    <tr key={`${s.nif}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                      <td style={{ padding: '8px 10px', color: T.inkMute, fontFamily: 'Geist Mono' }}>{i + 1}</td>
+                      <td style={{ padding: '8px 10px', fontWeight: 500 }}>{s.name}</td>
+                      <td style={{ padding: '8px 10px', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>{s.nif}</td>
+                      <td style={{ padding: '8px 10px', color: T.inkSoft, fontSize: 11 }}>{s.carga.replace('H00 Semanais', 'h') || '—'}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.vendas}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.seguros}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: tpColor }}>
+                        {pctFmt(s.taxa)}
+                      </td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft }}>{pctFmt(s.taxaAddons)}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.planoTotal}</td>
+                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.churnPct > 0.1 ? T.red : T.inkSoft, fontSize: 11 }}>
+                        {pctFmt(s.churnPct)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Ranking top 10 */}
       <div style={{ marginTop: 24, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16 }}>
