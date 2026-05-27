@@ -22799,25 +22799,25 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
     <div>
       {/* Cards de destaque */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 24 }}>
-        <KpiCard
+        <PenKpiCard
           label={myStoreRow.name}
           value={pctFmt(myTaxa)}
           accent={better ? T.green : T.red}
           sub={`${myStoreRow.total.seg} seguros / ${myStoreRow.total.equip} equip.`}
         />
-        <KpiCard
+        <PenKpiCard
           label="Média Companhia"
           value={pctFmt(avgTaxa)}
           accent={T.inkSoft}
           sub={`${totalRow.total.seg} seguros / ${totalRow.total.equip} equip.`}
         />
-        <KpiCard
+        <PenKpiCard
           label="Diferença"
           value={pctDelta(delta)}
           accent={better ? T.green : T.red}
           sub={better ? 'Acima da média' : 'Abaixo da média'}
         />
-        <KpiCard
+        <PenKpiCard
           label="Ranking"
           value={`${ranking.rank}º`}
           accent={ranking.rank <= 5 ? T.green : ranking.rank <= 15 ? T.orange : T.red}
@@ -22885,13 +22885,13 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
 
       {/* TP Addon + Tx entrega cartões */}
       <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
-        <KpiCard
+        <PenKpiCard
           label="TP Addon"
           value={pctFmt(myStoreRow.addonRate || 0)}
           accent={(myStoreRow.addonRate || 0) >= (totalRow.addonRate || 0) ? T.green : T.red}
           sub={`Companhia: ${pctFmt(totalRow.addonRate || 0)}`}
         />
-        <KpiCard
+        <PenKpiCard
           label="Tx Entrega Cartões PP"
           value={pctFmt(myStoreRow.deliveryPct || 0)}
           accent={T.accent}
@@ -22978,7 +22978,7 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
 }
 
 // Mini card de KPI reutilizado
-function KpiCard({ label, value, sub, accent }) {
+function PenKpiCard({ label, value, sub, accent }) {
   return (
     <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
       <div className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>{label}</div>
