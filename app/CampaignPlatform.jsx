@@ -1291,19 +1291,7 @@ async function setUserStore(userId, storeId) {
   return { ok: !error, error: error?.message };
 }
 
-// v3.21.7: lista todas as lojas (para selectors no admin)
-async function cloudFetchStores() {
-  if (!supabase) return [];
-  const { data, error } = await supabase
-    .from('stores')
-    .select('*')
-    .order('name', { ascending: true });
-  if (error) {
-    console.warn('cloudFetchStores failed:', error.message);
-    return [];
-  }
-  return data || [];
-}
+// v3.21.7: cloudFetchStores já existe abaixo (~L2084) — reutilizado por AdminUsersTab
 
 // ─── Realtime presence ─────────────────────────────────────────────────
 // Hook: tracks who is currently viewing a given resource (e.g. a period or
