@@ -1247,8 +1247,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.14';
-const APP_BUILD_DATE = '2026-05-27T20:30'; // Europe/Lisbon
+const APP_VERSION = '3.21.15';
+// v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
+// formatado sempre em Europe/Lisbon independentemente do timezone do browser.
+const APP_BUILD_DATE = '2026-05-27T21:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1258,6 +1260,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.15', date: '2026-05-27', summary: 'Versão mostra sempre hora de Portugal. APP_BUILD_DATE passa a string ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT). VersionFooter e StatCard formatam com timeZone:"Europe/Lisbon" → utilizadores em qualquer timezone vêem hora PT. Etiqueta "PT" no footer para deixar claro.' },
   { version: '3.21.14', date: '2026-05-27', summary: 'Tx Penetração: target + diarização + N-1 + carga horária. (A) Parser estendido para ler sheet BUDGET LOJA → target total mensal, realizado, % atingimento e diferença por loja. (B) Nova secção "🎯 Objetivo da loja": target / realizado / faltam / por dia, calculando automaticamente dias úteis restantes do mês (Mon-Sab). (C) Tabela "Por categoria" agora tem 7 colunas: TP+unidades, Companhia, N-1 (mês anterior se disponível na BD), Faltam (equip×média - actual), Por dia, Barra. (D) Comparação N-1 automática quando há 2+ meses carregados — usa o snapshot imediatamente anterior. (E) Colaboradores ganham 2 colunas novas: "Por 40h" (seguros normalizados a 40h semanais para comparação justa) e "/ dia" (quota diária do colaborador proporcional às horas vs target da loja). Helpers _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga.' },
   { version: '3.21.13', date: '2026-05-27', summary: 'Tx Penetração: redesign minimalista + insights automáticos. (A) Toolbar reformulada: chips pill em vez de card pesado para selector de meses; upload e apagar ficam à direita, mais discreto. (B) Hero block: 4 números grandes em serif (display font) com tipografia hierárquica em vez de cards — Aveiro / Companhia / Diferença / Ranking. Linhas finas a separar. (C) Nova secção "✨ Recomendações" — gera 2-6 sugestões accionáveis automaticamente: categorias mais fracas (com cálculo de "faltam X seguros para atingir média"), categorias fortes, addons abaixo, entrega cartões baixa, colaboradores abaixo de 70% da média, churn elevado por colaborador. Cards com borda colorida à esquerda (verde/laranja/azul). (D) Categoria por linhas inline (sem table pesada): 5 colunas em grid com barras finas (6px) de comparação. (E) TP Addon + Entrega: 2 stats inline sem cards. (F) Top 10 lojas: barras horizontais proporcionais ao máximo, badge "TU" pill na linha da própria loja. (G) Tabela colaboradores: header mais leve, bordas suaves. (H) Empty state mais elegante.' },
   { version: '3.21.12', date: '2026-05-27', summary: 'Tx Penetração movida para dentro de Planos de Proteção como sub-tab admin + Colaboradores Aveiro. (A) Sidebar item "Tx Penetração" removido — agora vive em Planos de Proteção → tab "Tx Penetração FNAC". (B) PPsView ganha tabs internos "Diarização" | "Tx Penetração FNAC". (C) Parser parsePenetrationExcel agora também lê sheet VENDEDOR_TOTAL filtrada por loja (default AVEIRO) → lista de colaboradores com NIF, carga horária, vendas, seguros, TP individual, addons, plano total, churn. (D) Nova tabela "Colaboradores · AVEIRO" dentro do breakdown ordenada por TP (cores verde/laranja/vermelho consoante taxa). (E) PenetrationView aceita prop embedded para reutilização sem duplicar Header. (F) Dashboard card admin clica → abre PPs no tab penetração directamente. (G) Re-upload do ficheiro do mês actualiza (upsert por month_key).' },
@@ -6317,8 +6320,9 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
 function VersionFooter() {
   const [showChangelog, setShowChangelog] = useState(false);
   const buildDt = new Date(APP_BUILD_DATE);
-  const buildDate = buildDt.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: '2-digit' });
-  const buildTime = buildDt.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit' });
+  // v3.21.15: força Europe/Lisbon → user em qualquer timezone vê hora PT
+  const buildDate = buildDt.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: 'Europe/Lisbon' });
+  const buildTime = buildDt.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Lisbon' });
 
   return (
     <>
@@ -6337,7 +6341,7 @@ function VersionFooter() {
         onMouseEnter={e => e.currentTarget.style.color = T.inkSoft}
         onMouseLeave={e => e.currentTarget.style.color = T.inkMute}
       >
-        v{APP_VERSION} · {buildDate} {buildTime}
+        v{APP_VERSION} · {buildDate} {buildTime} <span style={{ opacity: 0.6 }}>PT</span>
       </button>
       {showChangelog && <ChangelogDialog onClose={() => setShowChangelog(false)} />}
     </>
@@ -23807,7 +23811,12 @@ function AdminSystemTab() {
           <StatCard
             label="App version"
             value={`v${APP_VERSION}`}
-            sub={APP_BUILD_DATE}
+            sub={(() => {
+              const d = new Date(APP_BUILD_DATE);
+              const date = d.toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Lisbon' });
+              const time = d.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Lisbon' });
+              return `${date} ${time} PT`;
+            })()}
           />
         </div>
       </div>
