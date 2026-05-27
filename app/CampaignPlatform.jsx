@@ -439,7 +439,7 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
         // Truque chave: sheets:['RESUMO','VENDEDOR_TOTAL'] reduz dramaticamente
         // a memória — só carrega estas duas sheets. Ficheiro tem 25 sheets, ~96MB.
         const wb = XLSX.read(new Uint8Array(e.target.result), {
-          type: 'array', sheets: ['RESUMO', 'VENDEDOR_TOTAL'], cellDates: false,
+          type: 'array', sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA'], cellDates: false,
         });
         const sh = wb.Sheets['RESUMO'];
         if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
@@ -531,6 +531,27 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           // Ordena por TP desc
           sellers.sort((a, b) => b.taxa - a.taxa);
         }
+        // v3.21.14: parse BUDGET LOJA → target total de seguros por loja
+        onProgress?.({ stage: 'parse', message: 'A ler budget…' });
+        const budgets = {};
+        const shB = wb.Sheets['BUDGET LOJA'];
+        if (shB) {
+          const aoaB = XLSX.utils.sheet_to_json(shB, { header: 1, blankrows: false, defval: null });
+          // R0..R2 são headers; data começa em R3
+          // Col 0 = Loja, 1 = TARGET, 2 = TARGET À DATA, 3 = REAL, 4 = %, 7 = Diferença
+          for (let r = 3; r < aoaB.length; r++) {
+            const row = aoaB[r];
+            if (!row || !row[0]) continue;
+            const lojaName = String(row[0]).toUpperCase().trim();
+            budgets[lojaName] = {
+              target:    Number(row[1]) || 0,
+              targetYtd: Number(row[2]) || 0,
+              real:      Number(row[3]) || 0,
+              pctAchieved: Number(row[4]) || 0,
+              diff:      Number(row[7]) || 0, // negativo = faltam
+            };
+          }
+        }
         const dd = _ddrFromFilename(file.name);
         resolve({
           month: dd.month || 'Mês não detectado',
@@ -540,6 +561,7 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           stores, total,
           sellers,
           sellerStoreFilter,
+          budgets,
         });
       } catch (err) { reject(err); }
     };
@@ -1225,8 +1247,8 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.13';
-const APP_BUILD_DATE = '2026-05-27T19:00'; // Europe/Lisbon
+const APP_VERSION = '3.21.14';
+const APP_BUILD_DATE = '2026-05-27T20:30'; // Europe/Lisbon
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1236,6 +1258,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.14', date: '2026-05-27', summary: 'Tx Penetração: target + diarização + N-1 + carga horária. (A) Parser estendido para ler sheet BUDGET LOJA → target total mensal, realizado, % atingimento e diferença por loja. (B) Nova secção "🎯 Objetivo da loja": target / realizado / faltam / por dia, calculando automaticamente dias úteis restantes do mês (Mon-Sab). (C) Tabela "Por categoria" agora tem 7 colunas: TP+unidades, Companhia, N-1 (mês anterior se disponível na BD), Faltam (equip×média - actual), Por dia, Barra. (D) Comparação N-1 automática quando há 2+ meses carregados — usa o snapshot imediatamente anterior. (E) Colaboradores ganham 2 colunas novas: "Por 40h" (seguros normalizados a 40h semanais para comparação justa) e "/ dia" (quota diária do colaborador proporcional às horas vs target da loja). Helpers _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga.' },
   { version: '3.21.13', date: '2026-05-27', summary: 'Tx Penetração: redesign minimalista + insights automáticos. (A) Toolbar reformulada: chips pill em vez de card pesado para selector de meses; upload e apagar ficam à direita, mais discreto. (B) Hero block: 4 números grandes em serif (display font) com tipografia hierárquica em vez de cards — Aveiro / Companhia / Diferença / Ranking. Linhas finas a separar. (C) Nova secção "✨ Recomendações" — gera 2-6 sugestões accionáveis automaticamente: categorias mais fracas (com cálculo de "faltam X seguros para atingir média"), categorias fortes, addons abaixo, entrega cartões baixa, colaboradores abaixo de 70% da média, churn elevado por colaborador. Cards com borda colorida à esquerda (verde/laranja/azul). (D) Categoria por linhas inline (sem table pesada): 5 colunas em grid com barras finas (6px) de comparação. (E) TP Addon + Entrega: 2 stats inline sem cards. (F) Top 10 lojas: barras horizontais proporcionais ao máximo, badge "TU" pill na linha da própria loja. (G) Tabela colaboradores: header mais leve, bordas suaves. (H) Empty state mais elegante.' },
   { version: '3.21.12', date: '2026-05-27', summary: 'Tx Penetração movida para dentro de Planos de Proteção como sub-tab admin + Colaboradores Aveiro. (A) Sidebar item "Tx Penetração" removido — agora vive em Planos de Proteção → tab "Tx Penetração FNAC". (B) PPsView ganha tabs internos "Diarização" | "Tx Penetração FNAC". (C) Parser parsePenetrationExcel agora também lê sheet VENDEDOR_TOTAL filtrada por loja (default AVEIRO) → lista de colaboradores com NIF, carga horária, vendas, seguros, TP individual, addons, plano total, churn. (D) Nova tabela "Colaboradores · AVEIRO" dentro do breakdown ordenada por TP (cores verde/laranja/vermelho consoante taxa). (E) PenetrationView aceita prop embedded para reutilização sem duplicar Header. (F) Dashboard card admin clica → abre PPs no tab penetração directamente. (G) Re-upload do ficheiro do mês actualiza (upsert por month_key).' },
   { version: '3.21.11', date: '2026-05-27', summary: 'Nova vista admin-only "Tx Penetração". (A) Parser parsePenetrationExcel lê APENAS a sheet RESUMO do ficheiro TX_Penetração_<Mes>_<Ano>.xlsx (via sheets:["RESUMO"] no XLSX.read → poupa memória num ficheiro de 96MB). Extrai por loja: EQUIP/SEGUROS/TAXA por categoria (TV, Foto, Hardware, Telecom <399€/>399€, Gaming, Smartwatch, Restart, Mob.Eléctrica, Drones, Total) + TP Addon + Tx Entrega Cartões. Detecta mês do nome do ficheiro. (B) Migration penetration_snapshots: jsonb por (store_id, month_key), admin-only RLS, upsert substitui o mês ao re-importar. (C) Nova sidebar item "Tx Penetração" (TrendingUp icon) com adminOnly:true — só admin vê. (D) PenetrationView: upload + dropdown de mês + cards (loja/companhia/diferença/ranking) + tabela detalhada por categoria com barras de comparação (verde=acima, vermelho=abaixo) + top 10 lojas com destaque da própria. (E) PenetrationDashboardCard no Visão Geral (admin only, no topo) — resumo da última taxa importada com delta vs companhia; clica abre detalhes.' },
@@ -22678,6 +22701,13 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embe
     [snapshots, selectedMonthKey]
   );
   const snap = active?.payload || null;
+  // v3.21.14: snapshot anterior (N-1) — mês imediatamente anterior ao seleccionado
+  const prevSnap = useMemo(() => {
+    if (!active) return null;
+    const idx = snapshots.findIndex(s => s.month_key === active.month_key);
+    if (idx < 0 || idx >= snapshots.length - 1) return null;
+    return snapshots[idx + 1].payload || null; // snapshots vem ordenado desc
+  }, [active, snapshots]);
 
   // Linha desta loja (tenta currentStoreName, fallback "AVEIRO")
   const myStoreRow = useMemo(() => {
@@ -22789,14 +22819,46 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embe
           Não encontrei "{currentStoreName || 'AVEIRO'}" na lista de lojas do ficheiro. Lojas disponíveis: {snap.stores.map(s => s.name).join(', ')}.
         </div>
       ) : (
-        <PenetrationBreakdown snap={snap} myStoreRow={myStoreRow} />
+        <PenetrationBreakdown snap={snap} myStoreRow={myStoreRow} prevSnap={prevSnap} />
       )}
     </div>
   );
 }
 
 // Componente que renderiza a comparação detalhada por categoria
-function PenetrationBreakdown({ snap, myStoreRow }) {
+// v3.21.14: helpers para diarização
+function _workingDaysInMonth(year, month1, fromDay = 1) {
+  // Mon-Sat = working day. Sun excluded. Aproximação razoável FNAC.
+  const daysInMonth = new Date(year, month1, 0).getDate();
+  let count = 0;
+  for (let d = fromDay; d <= daysInMonth; d++) {
+    const dow = new Date(year, month1 - 1, d).getDay();
+    if (dow !== 0) count++; // 0 = domingo
+  }
+  return count;
+}
+function _daysRemainingInMonth(monthKey) {
+  if (!monthKey) return { days: 22, total: 26 };
+  const [y, m] = monthKey.split('-').map(Number);
+  const today = new Date();
+  const monthEnd = new Date(y, m, 0);
+  const monthStart = new Date(y, m - 1, 1);
+  const total = _workingDaysInMonth(y, m, 1);
+  // Se hoje já passou o mês, retorna 0 remaining
+  if (today > monthEnd) return { days: 0, total, elapsed: total };
+  // Se ainda não chegou, retorna total (mês ainda nem começou)
+  if (today < monthStart) return { days: total, total, elapsed: 0 };
+  // Mês actual — conta dias úteis do hoje até final
+  const remaining = _workingDaysInMonth(y, m, today.getDate());
+  return { days: remaining, total, elapsed: total - remaining };
+}
+function _hoursFromCarga(carga) {
+  // "40H00 Semanais" → 40; "35H00 Semanais" → 35; etc.
+  const m = String(carga || '').match(/(\d+)/);
+  return m ? Number(m[1]) : 40;
+}
+
+function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
   const totalRow = snap.total;
   // Ranking: posição do myStore por taxa total (descrescente)
   const ranking = useMemo(() => {
@@ -22809,6 +22871,16 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
   const avgTaxa = totalRow.total?.taxa || 0;
   const delta = myTaxa - avgTaxa;
   const better = delta >= 0;
+
+  // v3.21.14: Budget da loja + diarização
+  const budget = snap.budgets?.[myStoreRow.name.toUpperCase()] || null;
+  const workdays = useMemo(() => _daysRemainingInMonth(snap.monthKey), [snap.monthKey]);
+
+  // Linha equivalente no snapshot anterior (mesmo nome de loja)
+  const prevMyStoreRow = useMemo(() => {
+    if (!prevSnap) return null;
+    return prevSnap.stores.find(s => s.name === myStoreRow.name) || null;
+  }, [prevSnap, myStoreRow]);
 
   // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
   // gera sugestões accionáveis. Computado uma vez por snap+row.
@@ -22927,6 +22999,57 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
         </div>
       </div>
 
+      {/* v3.21.14: Diarização — target da loja, faltam, por dia */}
+      {budget && (
+        <div style={{ marginBottom: 36, padding: '20px 24px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12 }}>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>🎯 Objetivo da loja — {snap.month}</span>
+            <span style={{ flex: 1, height: 1, background: T.line }} />
+            <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+              {workdays.days > 0 ? `${workdays.days} dias úteis restantes` : `${workdays.total} dias úteis totais`}
+            </span>
+          </div>
+          {(() => {
+            const target = Math.round(budget.target);
+            const real = Math.round(budget.real);
+            const missing = Math.max(0, target - real);
+            const dailyToHit = workdays.days > 0 ? Math.ceil(missing / workdays.days) : 0;
+            const pctOf = target > 0 ? real / target : 0;
+            const pctColor = pctOf >= 1 ? T.green : pctOf >= 0.75 ? T.orange : T.red;
+            return (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 28, alignItems: 'end' }}>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Target Total</div>
+                  <div style={{ fontSize: 28, fontWeight: 600, color: T.ink, fontFamily: 'Geist Mono', lineHeight: 1 }}>{target}</div>
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>unidades de seguro</div>
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Realizado</div>
+                  <div style={{ fontSize: 28, fontWeight: 600, color: pctColor, fontFamily: 'Geist Mono', lineHeight: 1 }}>{real}</div>
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>{pctFmt(pctOf)} do target</div>
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Faltam</div>
+                  <div style={{ fontSize: 28, fontWeight: 600, color: missing > 0 ? T.orange : T.green, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                    {missing > 0 ? missing : '✓'}
+                  </div>
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>{missing > 0 ? 'unidades em falta' : 'objetivo atingido'}</div>
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Por dia</div>
+                  <div style={{ fontSize: 28, fontWeight: 600, color: dailyToHit > 0 ? T.accent : T.inkMute, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                    {dailyToHit > 0 ? dailyToHit : '—'}
+                  </div>
+                  <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>
+                    {dailyToHit > 0 ? `seguros / dia (${workdays.days}d)` : (missing > 0 ? 'sem dias úteis' : 'mantém ritmo')}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* v3.21.13: Insights automáticos — sugestões accionáveis */}
       {insights.length > 0 && (
         <div style={{ marginBottom: 36 }}>
@@ -22985,12 +23108,31 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
         />
       </div>
 
-      {/* v3.21.13: Categoria — linhas limpas (sem table), bar comparison */}
+      {/* v3.21.14: Categoria — TP, unidades, N-1, faltam, por dia */}
       <div style={{ marginBottom: 36 }}>
         <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
           <span>Por categoria</span>
           <span style={{ flex: 1, height: 1, background: T.line }} />
-          <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>{snap.month}</span>
+          <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+            {prevSnap ? `vs ${prevSnap.month} (N-1)` : 'sem N-1 disponível'} · {snap.month}
+          </span>
+        </div>
+        {/* Header da grid */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: '150px 90px 80px 70px 70px 70px 1fr',
+          gap: 14, alignItems: 'center',
+          padding: '8px 12px',
+          fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', letterSpacing: '0.08em', textTransform: 'uppercase',
+          borderBottom: `1px solid ${T.line}`,
+        }}>
+          <div>Categoria</div>
+          <div style={{ textAlign: 'right' }}>TP · uni</div>
+          <div style={{ textAlign: 'right' }}>Companhia</div>
+          <div style={{ textAlign: 'right' }}>N-1</div>
+          <div style={{ textAlign: 'right' }}>Faltam</div>
+          <div style={{ textAlign: 'right' }}>Por dia</div>
+          <div>Comparação</div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {PENETRATION_CATEGORIES.map(cat => {
@@ -23003,29 +23145,50 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
             const positive = d >= 0;
             const emphasized = cat.key === 'total';
             const barColor = positive ? T.green : T.red;
+            // N-1 (mês anterior, se snapshot prévio existir)
+            const prev = prevMyStoreRow?.[cat.key] || null;
+            const dN1 = prev ? (mine.taxa - prev.taxa) : null;
+            // Target da categoria = equip * companyTaxa → faltam para chegar à média
+            const targetSeg = Math.ceil((mine.equip || 0) * (avg.taxa || 0));
+            const missingCat = Math.max(0, targetSeg - (mine.seg || 0));
+            const daily = workdays.days > 0 && missingCat > 0 ? Math.ceil(missingCat / workdays.days) : 0;
+
             return (
               <div key={cat.key} style={{
                 display: 'grid',
-                gridTemplateColumns: '160px 80px 80px 60px 1fr',
-                gap: 16, alignItems: 'center',
+                gridTemplateColumns: '150px 90px 80px 70px 70px 70px 1fr',
+                gap: 14, alignItems: 'center',
                 padding: emphasized ? '14px 12px' : '10px 12px',
                 background: emphasized ? T.bgEl : 'transparent',
                 borderRadius: emphasized ? 8 : 0,
                 marginTop: emphasized ? 8 : 0,
                 fontWeight: emphasized ? 600 : 400,
-                fontSize: emphasized ? 14 : 13,
+                fontSize: emphasized ? 13 : 12,
                 borderTop: !emphasized ? `1px solid ${T.lineSoft}` : 'none',
               }}>
                 <div style={{ color: T.ink }}>{cat.label}</div>
                 <div style={{ textAlign: 'right', fontFamily: 'Geist Mono' }}>
-                  <span style={{ color: T.ink }}>{pctFmt(mine.taxa)}</span>
-                  <span style={{ fontSize: 10, color: T.inkMute, marginLeft: 4 }}>· {mine.seg}/{mine.equip}</span>
+                  <div style={{ color: T.ink }}>{pctFmt(mine.taxa)}</div>
+                  <div style={{ fontSize: 9, color: T.inkMute }}>{mine.seg}/{mine.equip}</div>
                 </div>
-                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 12 }}>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>
                   {pctFmt(avg.taxa)}
                 </div>
-                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, fontSize: 12, color: positive ? T.green : T.red }}>
-                  {pctDelta(d)}
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11 }}>
+                  {prev ? (
+                    <>
+                      <div style={{ color: T.inkSoft }}>{pctFmt(prev.taxa)}</div>
+                      <div style={{ fontSize: 9, color: dN1 >= 0 ? T.green : T.red, fontWeight: 600 }}>
+                        {pctDelta(dN1)}
+                      </div>
+                    </>
+                  ) : <span style={{ color: T.lineSoft }}>—</span>}
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11, color: missingCat > 0 ? T.orange : T.green, fontWeight: missingCat > 0 ? 600 : 400 }}>
+                  {missingCat > 0 ? missingCat : '✓'}
+                </div>
+                <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11, color: daily > 0 ? T.accent : T.inkMute, fontWeight: daily > 0 ? 600 : 400 }}>
+                  {daily > 0 ? `${daily}/d` : '—'}
                 </div>
                 <div style={{ position: 'relative', height: 6, background: T.lineSoft, borderRadius: 3, overflow: 'hidden' }}>
                   <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: `${avgPct}%`, background: `${T.inkMute}40` }} />
@@ -23077,38 +23240,60 @@ function PenetrationBreakdown({ snap, myStoreRow }) {
                 <tr style={{ background: 'transparent', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
                   <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>#</th>
                   <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Vendedor</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>NIF</th>
                   <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Carga</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Vendas</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Seguros</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>TP</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }} title="Seguros normalizados a 40h semanais — para comparação justa entre cargas horárias diferentes">Por 40h</th>
+                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }} title="Seguros por dia útil restante (consoante target da loja)">/ dia</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Addons</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Plano Tot.</th>
                   <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Churn 6m</th>
                 </tr>
               </thead>
               <tbody>
-                {snap.sellers.map((s, i) => {
-                  const tpColor = s.taxa >= 0.4 ? T.green : s.taxa >= 0.25 ? T.orange : T.red;
-                  return (
-                    <tr key={`${s.nif}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
-                      <td style={{ padding: '8px 10px', color: T.inkMute, fontFamily: 'Geist Mono' }}>{i + 1}</td>
-                      <td style={{ padding: '8px 10px', fontWeight: 500 }}>{s.name}</td>
-                      <td style={{ padding: '8px 10px', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>{s.nif}</td>
-                      <td style={{ padding: '8px 10px', color: T.inkSoft, fontSize: 11 }}>{s.carga.replace('H00 Semanais', 'h') || '—'}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.vendas}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.seguros}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: tpColor }}>
-                        {pctFmt(s.taxa)}
-                      </td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft }}>{pctFmt(s.taxaAddons)}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.planoTotal}</td>
-                      <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.churnPct > 0.1 ? T.red : T.inkSoft, fontSize: 11 }}>
-                        {pctFmt(s.churnPct)}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {(() => {
+                  // v3.21.14: total de seguros + horas para calcular share necessário
+                  const totalHours = snap.sellers.reduce((acc, s) => acc + _hoursFromCarga(s.carga), 0);
+                  return snap.sellers.map((s, i) => {
+                    const tpColor = s.taxa >= 0.4 ? T.green : s.taxa >= 0.25 ? T.orange : T.red;
+                    const hours = _hoursFromCarga(s.carga);
+                    // Seguros normalizados a 40h
+                    const per40h = hours > 0 ? (s.seguros / hours) * 40 : 0;
+                    // Quota diária: share do target da loja proporcional às horas
+                    let dailyQuota = 0;
+                    if (budget && workdays.days > 0 && totalHours > 0) {
+                      const shareTarget = (Math.max(0, budget.target - budget.real)) * (hours / totalHours);
+                      dailyQuota = Math.ceil(shareTarget / workdays.days);
+                    }
+                    return (
+                      <tr key={`${s.nif}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                        <td style={{ padding: '8px 10px', color: T.inkMute, fontFamily: 'Geist Mono' }}>{i + 1}</td>
+                        <td style={{ padding: '8px 10px', fontWeight: 500 }}>
+                          <div>{s.name}</div>
+                          <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono' }}>{s.nif}</div>
+                        </td>
+                        <td style={{ padding: '8px 10px', color: T.inkSoft, fontSize: 11 }}>{hours}h</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.vendas}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.seguros}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: tpColor }}>
+                          {pctFmt(s.taxa)}
+                        </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }} title={`Normalizado a 40h: ${per40h.toFixed(1)} seguros equivalentes`}>
+                          {per40h.toFixed(1)}
+                        </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: dailyQuota > 0 ? T.accent : T.inkMute, fontSize: 11, fontWeight: dailyQuota > 0 ? 600 : 400 }}>
+                          {dailyQuota > 0 ? dailyQuota : '—'}
+                        </td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft }}>{pctFmt(s.taxaAddons)}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.planoTotal}</td>
+                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.churnPct > 0.1 ? T.red : T.inkSoft, fontSize: 11 }}>
+                          {pctFmt(s.churnPct)}
+                        </td>
+                      </tr>
+                    );
+                  });
+                })()}
               </tbody>
             </table>
           </div>
