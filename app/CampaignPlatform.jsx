@@ -1741,10 +1741,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.24';
+const APP_VERSION = '3.21.25';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T08:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T09:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1754,6 +1754,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.25', date: '2026-05-28', summary: 'Envio real de emails via Resend. (A) Nova migration email_queue (cria tabela com status pending/sent/error/skipped + attempts + provider_id + error_message + RLS admin-all + insert-authed). (B) Nova Edge Function send-emails (Deno) — consome fila e envia via Resend API. Auth dual: admin via JWT user OU cron via SUPABASE_SERVICE_ROLE_KEY. Retry com attempts até 3, depois marca error. Tags Resend por categoria. (C) Botão "📤 Enviar pendentes agora" no Admin → Emails — invoca a function, processa até 50 por execução, mostra toast com sent/failed. Log de actividade. (D) AdminEmailsTab ganha filtro "Erro" + EmailRow mostra error_message no tooltip + provider_id Resend visível em sent + indicador retry para attempts<3. (E) README detalhado em supabase/functions/send-emails/README.md com setup Resend (DNS SPF/DKIM), secrets, cron diário 9h.' },
   { version: '3.21.24', date: '2026-05-28', summary: 'Análise de Vendas da Campanha (admin). Novo botão "📊 Análise de Vendas" no header do period em CampaignsView abre full-screen report com: 4 KPIs (unidades/revenue/margem/conversão), gráfico de linha diária com hover interativo (linha total da loja em fundo), top 10 produtos com toggle units/revenue/margem, donut por família + por móvel (clicáveis para filtrar), heatmap hora×dia da semana, tabela detalhada expansível com sort em qualquer coluna + filtros (vendidos/sem venda) e timeline mini por artigo, insights automáticos (top 3, móvel mais produtivo, hora pico, família forte, destaques sem venda). Export PDF multi-página (html2canvas + jsPDF) + Copiar Email HTML rico (clipboard text/html + text/plain fallback) + Enviar via email_queue. Filtros: período de vendas custom (default = period), modo destaque (todos/state/star). Reutiliza buildZoneIndex, normalizeEAN, idbGetActiveSalesSnapshot, queueEmail, padrões SVG existentes.' },
   { version: '3.21.23', date: '2026-05-28', summary: 'Tx Penetração: daily REAL por loja (BD N) + chart com selector + hover. (A) PROBLEMA: sheet RESUMO DIA é company-wide agregado (37,698 equip/mês ≈ TOTAL companhia, não Aveiro). (B) FONTE NOVA: parser passa a ler BD N (42k rows transações) e BD N-1 (45k) — classifica cada row por TIPO (col 19) em equip/seg/addon, agrupa por loja + data + categoria. Helper _catFromTipo + _dayFromSerial. (C) snap.dailyByStore[\'AVEIRO\'] = [{day, total:{equip,seg,addon,taxa,equipN1,segN1,taxaN1}, tv:{...}, foto:{...}, ...}] em formato compatível com a UI existente. (D) DailyHeatmap troca fonte para dailyByStore[storeKey] — valores agora são REALMENTE de Aveiro (~30-60 equip/dia em vez de ~1300). (E) DailyTrendChart: novo selector dropdown com todas as lojas + opção "Companhia (todas as lojas)". (F) Hover interactivo: mouseMove sobre SVG mostra linha vertical + highlight do ponto + tooltip flutuante com Dia, Equip, Seguros, Addons, TP, N-1. Vai do anti-pattern <title> simples para overlay React rico.' },
   { version: '3.21.22', date: '2026-05-28', summary: 'TP diária comparada com N-1 e companhia. (A) Diário: card de detalhe ganha 4 colunas TP — Aveiro (big 44px) · N-1 (28px com Δ vs Aveiro) · Companhia (28px com Δ). Equipamentos e Seguros movidos para linha separada abaixo. (B) Gráfico tendência (Visão Geral): adicionada linha tracejada de TP N-1 (cinza, ano anterior) + linha horizontal tracejada de TP Companhia média mensal (accent), referência constante. Legenda expandida com as 5 séries. Tooltips dos pontos mostram as 3 taxas. Nota: a "média companhia diária" usa o TP mensal total do RESUMO como referência — RESUMO DIA só tem dados da loja seleccionada, não há daily companhia disponível no ficheiro.' },
@@ -30185,6 +30186,8 @@ function AdminEmailsTab({ currentUserId }) {
   const [emails, setEmails] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('pending');
+  // v3.21.25: envio real via Resend Edge Function
+  const [sending, setSending] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -30193,6 +30196,8 @@ function AdminEmailsTab({ currentUserId }) {
   }, [filter]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const pendingCount = useMemo(() => emails.filter(e => e.status === 'pending').length, [emails]);
 
   const handleMarkSent = async (id) => {
     await markEmailSent(id);
@@ -30203,26 +30208,90 @@ function AdminEmailsTab({ currentUserId }) {
     refresh();
   };
 
+  // v3.21.25: chamar edge function send-emails para envio real
+  const handleSendAllPending = async () => {
+    if (sending) return;
+    // Verifica primeiro quantos estão pending na BD (não só no filtro)
+    const allPending = await fetchEmailQueue({ status: 'pending', limit: 200 });
+    if (allPending.length === 0) {
+      try { showToast('Não há emails pendentes', { kind: 'info' }); } catch {}
+      return;
+    }
+    if (!confirm(`Enviar todos os ${allPending.length} emails pendentes via Resend?\n\nVai aplicar até 50 por execução. Repete a operação se houver mais.`)) return;
+    setSending(true);
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const accessToken = sess?.session?.access_token;
+      if (!accessToken) throw new Error('Sem sessão activa');
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/send-emails`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`,
+          'apikey': SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ limit: 50 }),
+      });
+      let data = null;
+      try { data = await res.json(); } catch {}
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      const msg = `Enviados: ${data.sent || 0} · Falhados: ${data.failed || 0}${data.total > (data.sent + data.failed) ? ` · Sem dados: ${data.total - data.sent - data.failed}` : ''}`;
+      try { showToast(msg, { kind: data.failed > 0 ? 'warn' : 'success' }); } catch {}
+      // Log activity
+      await logActivity({
+        userId: currentUserId, userEmail: null,
+        action: 'send', resourceType: 'email_queue',
+        metadata: { sent: data.sent, failed: data.failed, total: data.total },
+      });
+      refresh();
+    } catch (err) {
+      try { showToast(`Erro: ${err.message || err}`, { kind: 'error' }); } catch {}
+    } finally {
+      setSending(false);
+    }
+  };
+
   return (
     <div>
       <div style={{ marginBottom: 16, padding: '12px 14px', background: T.accentSoft, borderRadius: 6, fontSize: 12, color: T.ink, lineHeight: 1.5 }}>
-        <strong>Fila de emails.</strong> Os emails são gerados automaticamente quando uma campanha está a 2 dias do fim e tem cartazes registados (configurável). Atualmente esta fila é manual — para enviar realmente, podes copiar o conteúdo abaixo para um cliente de email, ou no futuro ligar à integração Resend/SendGrid (Edge Function).
+        <strong>Fila de emails.</strong> Gerados automaticamente para fim de campanha + manualmente a partir de análises de vendas. Botão <strong>"Enviar pendentes agora"</strong> dispara a Edge Function <code style={{ fontFamily: 'Geist Mono', background: T.bg, padding: '1px 4px', borderRadius: 3 }}>send-emails</code> que envia via Resend. Cron diário às 9h faz o mesmo automaticamente. Vê <code>supabase/functions/send-emails/README.md</code> para setup inicial.
       </div>
 
-      <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content', marginBottom: 14 }}>
-        {[
-          { id: 'pending', l: 'Pendentes' },
-          { id: 'sent', l: 'Enviados' },
-          { id: 'skipped', l: 'Ignorados' },
-          { id: 'all', l: 'Todos' },
-        ].map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)} style={{
-            padding: '5px 11px', fontSize: 11, borderRadius: 4, border: 'none',
-            background: filter === f.id ? T.ink : 'transparent',
-            color: filter === f.id ? T.bg : T.inkSoft, cursor: 'pointer',
-            fontFamily: 'inherit',
-          }}>{f.l}</button>
-        ))}
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 4, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, width: 'fit-content' }}>
+          {[
+            { id: 'pending', l: 'Pendentes' },
+            { id: 'sent', l: 'Enviados' },
+            { id: 'error', l: 'Erro' },
+            { id: 'skipped', l: 'Ignorados' },
+            { id: 'all', l: 'Todos' },
+          ].map(f => (
+            <button key={f.id} onClick={() => setFilter(f.id)} style={{
+              padding: '5px 11px', fontSize: 11, borderRadius: 4, border: 'none',
+              background: filter === f.id ? T.ink : 'transparent',
+              color: filter === f.id ? T.bg : T.inkSoft, cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}>{f.l}</button>
+          ))}
+        </div>
+
+        <button
+          onClick={handleSendAllPending}
+          disabled={sending}
+          title="Chama a Edge Function send-emails (Resend)"
+          style={{
+            padding: '7px 14px',
+            background: sending ? T.lineSoft : T.accent,
+            color: sending ? T.inkMute : '#fff',
+            border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600,
+            cursor: sending ? 'wait' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+            marginLeft: 'auto',
+          }}
+        >
+          <Mail size={12} />
+          {sending ? 'A enviar…' : '📤 Enviar pendentes agora'}
+        </button>
       </div>
 
       {loading ? (
@@ -30245,22 +30314,46 @@ function AdminEmailsTab({ currentUserId }) {
 function EmailRow({ email, isLast, onMarkSent, onSkip }) {
   const [expanded, setExpanded] = useState(false);
   const ts = new Date(email.created_at);
+  // v3.21.25: visual para status error
+  const iconColor =
+    email.status === 'pending' ? T.accent :
+    email.status === 'error'   ? T.red :
+    T.inkMute;
+  const rowBg =
+    email.status === 'pending' ? '#FFF8F0' :
+    email.status === 'error'   ? `${T.red}08` :
+    'transparent';
 
   return (
     <div style={{
       borderBottom: isLast ? 'none' : `1px solid ${T.lineSoft}`,
-      background: email.status === 'pending' ? '#FFF8F0' : 'transparent',
+      background: rowBg,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px' }}>
-        <Mail size={14} style={{ color: email.status === 'pending' ? T.accent : T.inkMute, flexShrink: 0 }} />
+        <Mail size={14} style={{ color: iconColor, flexShrink: 0 }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 12, fontWeight: 500, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {email.subject}
           </div>
           <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2 }}>
             para <strong>{email.to_email}</strong> · {ts.toLocaleString('pt-PT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
-            {email.status === 'sent' && <span style={{ color: T.green, marginLeft: 6 }}>✓ enviado</span>}
+            {email.status === 'sent' && (
+              <span style={{ color: T.green, marginLeft: 6 }}>
+                ✓ enviado{email.sent_at ? ` ${new Date(email.sent_at).toLocaleString('pt-PT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}` : ''}
+                {email.provider_id && <span style={{ marginLeft: 4, fontFamily: 'Geist Mono', color: T.inkMute }}>· {String(email.provider_id).slice(0, 8)}</span>}
+              </span>
+            )}
             {email.status === 'skipped' && <span style={{ color: T.inkMute, marginLeft: 6 }}>ignorado</span>}
+            {email.status === 'error' && (
+              <span style={{ color: T.red, marginLeft: 6 }} title={email.error_message || 'falha no envio'}>
+                ⚠ erro ({email.attempts}/3 tentativas){email.error_message ? ` · ${String(email.error_message).slice(0, 40)}` : ''}
+              </span>
+            )}
+            {email.attempts > 0 && email.status === 'pending' && (
+              <span style={{ color: T.orange, marginLeft: 6 }} title={email.error_message}>
+                ↻ retry ({email.attempts}/3)
+              </span>
+            )}
           </div>
         </div>
         <button onClick={() => setExpanded(!expanded)} style={adminActionBtn()}>
