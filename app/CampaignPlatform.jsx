@@ -788,6 +788,10 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
         onProgress?.({ stage: 'parse', message: 'A analisar transações…' });
         const uninsured = [];
         const familySummary = {};
+        // v3.21.21: declarar uninsuredBySeller no scope correcto (fora do if)
+        // para evitar ReferenceError quando a sheet BD TT SEGUROS não existe
+        // ou o user faz upload de um ficheiro sem essa sheet.
+        const uninsuredBySeller = {};
         const shTT = wb.Sheets['BD TT SEGUROS'];
         if (shTT) {
           const aoaTT = XLSX.utils.sheet_to_json(shTT, { header: 1, blankrows: false, defval: null });
@@ -819,8 +823,6 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           }
           // Identificar uninsured: tickets onde #seguros < #equips
           const uninsuredMap = new Map();
-          // v3.21.19: agregado por vendedor — quais artigos cada um vendeu sem cobertura
-          const uninsuredBySeller = {};
           for (const [ticketId, t] of ticketMap) {
             if (t.equips.length === 0) continue;
             if (t.segs.length >= t.equips.length) continue;
@@ -1606,10 +1608,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.20';
+const APP_VERSION = '3.21.21';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T02:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T03:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1619,6 +1621,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.21', date: '2026-05-28', summary: 'Fix: ReferenceError "uninsuredBySeller is not defined" no upload. A variável estava declarada dentro do if (shTT) mas usada no resolve() externamente. Movida para fora junto de uninsured/familySummary.' },
   { version: '3.21.20', date: '2026-05-28', summary: 'Tx Penetração: FIX TP diária + gráfico tendência. (A) BUG CRÍTICO no parser: ordem das colunas em RESUMO DIA estava errada após Smartwatch (faltava Restart, e MOB/DRONE/GAMING/TOTAL estavam swapados). O que aparecia como "TOTAL" era na verdade MOB ELETRICA. Mapping corrigido: TV(7), Foto(13), HW(19), Telecom(25), Smartwatch(31), Restart(37), Gaming(43), Drone(49), Mob(55), TOTAL(61). (B) Card de detalhe do dia no Diário redesenhado: TP Loja em fonte serif 48px com label explícito, 4 colunas (Dia · TP Loja · Equipamentos · Seguros+addons) com N-1 inline. (C) Novo gráfico DailyTrendChart na Visão Geral: SVG com barras duplas por dia (equip cinza, seguros accent) + linha TP laranja sobreposta, escala dupla (unidades à esquerda, % à direita), legenda + estatísticas agregadas. Inspirado no padrão do SalesView.' },
   { version: '3.21.19', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem seguro por colaborador. (A) Parser estendido — durante o loop de tickets uncovered, popular snap.uninsuredBySeller[NOME] = { totalQty, byFamily, items:[{ean,desc,family,qty,tickets,lastDate}] }. Consolida por EAN, ordena por qty desc, max 50 items por vendedor. (B) SellerExpand (tab Equipa PTS, click numa linha) ganha nova secção 🚨 "Equipamentos vendidos sem seguro" com header (total + pills por família) e tabela (Família/Descrição/EAN/Qty/Talões). Toggle "ver todos / top 15". (C) Novo insight em Recomendações: "Top 3 PTS com mais equipamentos sem cobertura" — útil para coaching 1-a-1 focado.' },
   { version: '3.21.18', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem cobertura. (A) Parser estendido com BD TT SEGUROS (~20k linhas transacções) filtrado por loja. Heurística: em cada talão, conta equipamentos vs apólices vendidas (SEG/PP/Cartão Plano Proteção); excedentes contam como "sem cobertura". (B) Família inferida via regex no des_art (TELM→Telecom, OLED→TV, WATCH→Smartwatch, DRONE→Drone, etc.) com fallback para cod_fam (9730=Telecom). (C) Nova secção UninsuredBlock no tab Categorias: cards por família ordenados por contagem (click expande tabela com top 30 artigos: EAN, descrição, quant, talões, top vendedor). (D) Insight automático: "X equipamentos <família> sem cobertura" quando o top família tem ≥10 unidades.' },
