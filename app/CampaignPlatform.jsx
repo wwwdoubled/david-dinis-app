@@ -591,16 +591,20 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           //   Drone: 37/38/39 | 40/41/42  (verificar com Excel layout)
           //   Continua até col ~72
           // Para simplificar: extrair pares (N, N-1) por categoria conhecida.
+          // v3.21.20: FIX — ordem real das colunas em RESUMO DIA é
+          // TV · FOTO · HARDWARE · TELECOM · SMARTWATCH · RESTART · GAMING · DRONE · MOB · TOTAL
+          // (anteriormente: MOB/DRONE/GAMING/TOTAL estavam swapados e RESTART faltava)
           const catCols = [
             { key: 'tv',         n: 7,  n1: 10 },
             { key: 'foto',       n: 13, n1: 16 },
             { key: 'hardware',   n: 19, n1: 22 },
             { key: 'telecom',    n: 25, n1: 28 },
             { key: 'smartwatch', n: 31, n1: 34 },
-            { key: 'mob',        n: 37, n1: 40 },
-            { key: 'drone',      n: 43, n1: 46 },
-            { key: 'gaming',     n: 49, n1: 52 },
-            { key: 'total',      n: 55, n1: 58 },
+            { key: 'restart',    n: 37, n1: 40 },
+            { key: 'gaming',     n: 43, n1: 46 },
+            { key: 'drone',      n: 49, n1: 52 },
+            { key: 'mob',        n: 55, n1: 58 },
+            { key: 'total',      n: 61, n1: 64 },
           ];
           for (let r = 7; r < aoaDay.length; r++) {
             const row = aoaDay[r];
@@ -1602,10 +1606,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.19';
+const APP_VERSION = '3.21.20';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T01:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T02:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1615,6 +1619,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.20', date: '2026-05-28', summary: 'Tx Penetração: FIX TP diária + gráfico tendência. (A) BUG CRÍTICO no parser: ordem das colunas em RESUMO DIA estava errada após Smartwatch (faltava Restart, e MOB/DRONE/GAMING/TOTAL estavam swapados). O que aparecia como "TOTAL" era na verdade MOB ELETRICA. Mapping corrigido: TV(7), Foto(13), HW(19), Telecom(25), Smartwatch(31), Restart(37), Gaming(43), Drone(49), Mob(55), TOTAL(61). (B) Card de detalhe do dia no Diário redesenhado: TP Loja em fonte serif 48px com label explícito, 4 colunas (Dia · TP Loja · Equipamentos · Seguros+addons) com N-1 inline. (C) Novo gráfico DailyTrendChart na Visão Geral: SVG com barras duplas por dia (equip cinza, seguros accent) + linha TP laranja sobreposta, escala dupla (unidades à esquerda, % à direita), legenda + estatísticas agregadas. Inspirado no padrão do SalesView.' },
   { version: '3.21.19', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem seguro por colaborador. (A) Parser estendido — durante o loop de tickets uncovered, popular snap.uninsuredBySeller[NOME] = { totalQty, byFamily, items:[{ean,desc,family,qty,tickets,lastDate}] }. Consolida por EAN, ordena por qty desc, max 50 items por vendedor. (B) SellerExpand (tab Equipa PTS, click numa linha) ganha nova secção 🚨 "Equipamentos vendidos sem seguro" com header (total + pills por família) e tabela (Família/Descrição/EAN/Qty/Talões). Toggle "ver todos / top 15". (C) Novo insight em Recomendações: "Top 3 PTS com mais equipamentos sem cobertura" — útil para coaching 1-a-1 focado.' },
   { version: '3.21.18', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem cobertura. (A) Parser estendido com BD TT SEGUROS (~20k linhas transacções) filtrado por loja. Heurística: em cada talão, conta equipamentos vs apólices vendidas (SEG/PP/Cartão Plano Proteção); excedentes contam como "sem cobertura". (B) Família inferida via regex no des_art (TELM→Telecom, OLED→TV, WATCH→Smartwatch, DRONE→Drone, etc.) com fallback para cod_fam (9730=Telecom). (C) Nova secção UninsuredBlock no tab Categorias: cards por família ordenados por contagem (click expande tabela com top 30 artigos: EAN, descrição, quant, talões, top vendedor). (D) Insight automático: "X equipamentos <família> sem cobertura" quando o top família tem ≥10 unidades.' },
   { version: '3.21.17', date: '2026-05-27', summary: 'Tx Penetração diário — selector de dia + foco. (A) Default auto-pick: se o snapshot é do mês actual escolhe ONTEM; senão último dia com dados. (B) Pill bar de dias no topo (cor consoante TP) — click para seleccionar. (C) Card de detalhe grande do dia escolhido: TP total em fonte serif, contagem seg/equip, Δ vs N-1 — e 8 sub-cards por categoria (TV/Foto/HW/Telecom/Smartwatch/Mob/Drone/Gaming) com TP+seg/equip+Δ vs N-1, cores conforme nível. (D) Heatmap mensal abaixo continua disponível; linha do dia seleccionado fica destacada (borda+bg accent) e click numa linha muda o dia seleccionado.' },
@@ -23648,6 +23653,11 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         </div>
       )}
 
+      {/* v3.21.20: Gráfico de tendência diária — TP + equip + seguros */}
+      {Array.isArray(snap.daily) && snap.daily.filter(d => d.hasData).length > 0 && (
+        <DailyTrendChart snap={snap} />
+      )}
+
       </>)}{/* fim overview */}
 
       {sub === 'daily' && (
@@ -23896,6 +23906,150 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
   );
 }
 
+// v3.21.20: Gráfico de tendência diária — TP linha + equip/seguros barras
+function DailyTrendChart({ snap }) {
+  const days = useMemo(() => (snap.daily || []).filter(d => d.hasData), [snap.daily]);
+  if (days.length === 0) return null;
+
+  // Dimensões SVG
+  const W = 880, H = 280;
+  const PAD_L = 50, PAD_R = 50, PAD_T = 20, PAD_B = 32;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+
+  // Escalas
+  const maxEquip = Math.max(...days.map(d => d.total?.equip || 0));
+  const maxScale = Math.ceil(maxEquip * 1.1 / 10) * 10 || 10;
+  const stepX = days.length > 1 ? chartW / (days.length - 1) : chartW / 2;
+  const barW = Math.max(4, stepX * 0.6);
+
+  // Stats
+  const totalEquip = days.reduce((a, d) => a + (d.total?.equip || 0), 0);
+  const totalSeg   = days.reduce((a, d) => a + (d.total?.seg || 0), 0);
+  const avgTP      = totalEquip > 0 ? totalSeg / totalEquip : 0;
+
+  const yScale = (v) => PAD_T + chartH - (v / maxScale) * chartH;
+  const xScale = (i) => PAD_L + i * stepX;
+
+  // Linha TP (escala 0-100%)
+  const tpY = (taxa) => PAD_T + chartH - (taxa * chartH); // 0..1 → chartH
+
+  const linePath = days.map((d, i) => {
+    const x = xScale(i);
+    const y = tpY(d.total?.taxa || 0);
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(' ');
+
+  // Grid lines (5 horizontais)
+  const gridSteps = [0, 0.25, 0.5, 0.75, 1];
+
+  return (
+    <div style={{ marginBottom: 36 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>📈 Tendência diária — {days.length} dias</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+          {totalEquip} equip · {totalSeg} seg · TP médio {pctFmt(avgTP)}
+        </span>
+      </div>
+
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12, padding: '16px 12px 12px', overflowX: 'auto' }}>
+        {/* Legenda */}
+        <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 10, color: T.inkSoft, paddingLeft: PAD_L }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ display: 'inline-block', width: 10, height: 10, background: T.inkMute, opacity: 0.35, borderRadius: 2 }} /> Equipamentos
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ display: 'inline-block', width: 10, height: 10, background: T.accent, borderRadius: 2 }} /> Seguros + addons
+          </span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ display: 'inline-block', width: 14, height: 2, background: T.orange, borderRadius: 1 }} /> TP %
+          </span>
+        </div>
+
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: Math.max(W, days.length * 30), height: H, overflow: 'visible' }}>
+          {/* Grid lines (TP %, escala direita) */}
+          {gridSteps.map(g => {
+            const y = tpY(g);
+            return (
+              <g key={g}>
+                <line x1={PAD_L} y1={y} x2={W - PAD_R} y2={y} stroke={T.lineSoft} strokeWidth={1} strokeDasharray={g === 0 ? '0' : '3 3'} />
+                <text x={W - PAD_R + 6} y={y + 3} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">{(g * 100).toFixed(0)}%</text>
+              </g>
+            );
+          })}
+          {/* Y-axis esquerda: escala de unidades (4 níveis) */}
+          {[0, 0.25, 0.5, 0.75, 1].map(g => {
+            const v = Math.round(g * maxScale);
+            const y = yScale(v);
+            return (
+              <text key={`u-${g}`} x={PAD_L - 6} y={y + 3} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono" textAnchor="end">{v}</text>
+            );
+          })}
+
+          {/* Barras: equip (cinza) + seguros (accent) por dia */}
+          {days.map((d, i) => {
+            const x = xScale(i);
+            const eq = d.total?.equip || 0;
+            const sg = d.total?.seg || 0;
+            const eqY = yScale(eq);
+            const sgY = yScale(sg);
+            const halfBar = barW / 2;
+            return (
+              <g key={d.day}>
+                {/* Equip bar (cinza) */}
+                <rect
+                  x={x - halfBar} y={eqY} width={halfBar - 1}
+                  height={PAD_T + chartH - eqY}
+                  fill={T.inkMute} opacity={0.35} rx={1}
+                >
+                  <title>Dia {d.day}: {eq} equipamentos</title>
+                </rect>
+                {/* Seguros bar (accent) */}
+                <rect
+                  x={x + 1} y={sgY} width={halfBar - 1}
+                  height={PAD_T + chartH - sgY}
+                  fill={T.accent} rx={1}
+                >
+                  <title>Dia {d.day}: {sg} seguros + addons</title>
+                </rect>
+              </g>
+            );
+          })}
+
+          {/* Linha TP */}
+          <path d={linePath} stroke={T.orange} strokeWidth={2} fill="none" strokeLinejoin="round" strokeLinecap="round" />
+          {/* Pontos TP */}
+          {days.map((d, i) => {
+            const x = xScale(i);
+            const y = tpY(d.total?.taxa || 0);
+            return (
+              <circle key={`p-${d.day}`} cx={x} cy={y} r={3} fill={T.orange} stroke={T.bg} strokeWidth={1.5}>
+                <title>Dia {d.day}: TP {pctFmt(d.total?.taxa || 0)}</title>
+              </circle>
+            );
+          })}
+
+          {/* X-axis: labels dos dias (a cada N para não sobrepor) */}
+          {days.map((d, i) => {
+            // Mostra label cada N dias consoante densidade
+            const step = days.length > 25 ? 3 : days.length > 15 ? 2 : 1;
+            if (i % step !== 0 && i !== days.length - 1) return null;
+            const x = xScale(i);
+            return (
+              <text key={`x-${d.day}`} x={x} y={H - 14} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono" textAnchor="middle">
+                {String(d.day).padStart(2, '0')}
+              </text>
+            );
+          })}
+          <text x={PAD_L} y={H - 2} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">unidades</text>
+          <text x={W - PAD_R + 6} y={H - 2} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">TP %</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 // v3.21.16: Heatmap diário N vs N-1 por categoria
 function DailyHeatmap({ snap, myStoreRow }) {
   const [hideEmpty, setHideEmpty] = useStoredState('penetration.daily.hideEmpty', true);
@@ -23903,15 +24057,17 @@ function DailyHeatmap({ snap, myStoreRow }) {
     if (!Array.isArray(snap.daily)) return [];
     return hideEmpty ? snap.daily.filter(d => d.hasData) : snap.daily;
   }, [snap.daily, hideEmpty]);
+  // v3.21.20: ordem corrigida — Restart está entre Smartwatch e Gaming na sheet RESUMO DIA
   const cats = [
     { key: 'tv',         label: 'TV' },
     { key: 'foto',       label: 'Foto' },
     { key: 'hardware',   label: 'HW' },
     { key: 'telecom',    label: 'Telecom' },
     { key: 'smartwatch', label: 'Smartwt.' },
-    { key: 'mob',        label: 'Mob.El' },
-    { key: 'drone',      label: 'Drone' },
+    { key: 'restart',    label: 'Restart' },
     { key: 'gaming',     label: 'Gaming' },
+    { key: 'drone',      label: 'Drone' },
+    { key: 'mob',        label: 'Mob.El' },
     { key: 'total',      label: 'TOTAL' },
   ];
 
@@ -24009,27 +24165,55 @@ function DailyHeatmap({ snap, myStoreRow }) {
           {/* Detalhe do dia seleccionado */}
           {selectedDayData && (
             <div style={{ padding: '20px 24px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 18, flexWrap: 'wrap' }}>
+              {/* v3.21.20: TP LOJA destaque grande no topo */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                gap: 24, marginBottom: 24, paddingBottom: 20,
+                borderBottom: `1px solid ${T.lineSoft}`, alignItems: 'baseline',
+              }}>
                 <div>
-                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>
                     Dia {selectedDayData.day} · {snap.month}
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
-                    <span className="display" style={{ fontSize: 36, fontWeight: 500, color: _tpColor(selectedDayData.total?.taxa || 0), lineHeight: 1, letterSpacing: '-0.02em' }}>
-                      {pctFmt(selectedDayData.total?.taxa || 0)}
-                    </span>
-                    <span style={{ fontSize: 12, color: T.inkSoft, fontFamily: 'Geist Mono' }}>
-                      {selectedDayData.total?.seg || 0} / {selectedDayData.total?.equip || 0}
-                    </span>
-                    {selectedDayData.total?.equipN1 > 0 && (() => {
-                      const d = (selectedDayData.total?.taxa || 0) - (selectedDayData.total?.taxaN1 || 0);
-                      return (
-                        <span style={{ fontSize: 12, fontWeight: 600, color: d >= 0 ? T.green : T.red, fontFamily: 'Geist Mono' }}>
-                          {pctDelta(d)} vs N-1 ({pctFmt(selectedDayData.total?.taxaN1)})
-                        </span>
-                      );
-                    })()}
+                  <div className="display" style={{ fontSize: 12, color: T.inkSoft, marginBottom: 2 }}>
+                    Taxa Penetração Loja
                   </div>
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>TP Loja</div>
+                  <div className="display" style={{ fontSize: 48, fontWeight: 500, color: _tpColor(selectedDayData.total?.taxa || 0), lineHeight: 1, letterSpacing: '-0.03em' }}>
+                    {pctFmt(selectedDayData.total?.taxa || 0)}
+                  </div>
+                  {selectedDayData.total?.equipN1 > 0 && (() => {
+                    const d = (selectedDayData.total?.taxa || 0) - (selectedDayData.total?.taxaN1 || 0);
+                    return (
+                      <div style={{ fontSize: 11, fontWeight: 600, color: d >= 0 ? T.green : T.red, fontFamily: 'Geist Mono', marginTop: 6 }}>
+                        {pctDelta(d)} vs N-1 ({pctFmt(selectedDayData.total?.taxaN1)})
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>Equipamentos vendidos</div>
+                  <div className="display" style={{ fontSize: 32, fontWeight: 500, color: T.ink, lineHeight: 1, letterSpacing: '-0.02em', fontFamily: 'Geist Mono' }}>
+                    {selectedDayData.total?.equip || 0}
+                  </div>
+                  {selectedDayData.total?.equipN1 > 0 && (
+                    <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6 }}>
+                      N-1: {selectedDayData.total.equipN1}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 6 }}>Seguros + addons</div>
+                  <div className="display" style={{ fontSize: 32, fontWeight: 500, color: T.accent, lineHeight: 1, letterSpacing: '-0.02em', fontFamily: 'Geist Mono' }}>
+                    {selectedDayData.total?.seg || 0}
+                  </div>
+                  {selectedDayData.total?.segN1 > 0 && (
+                    <div style={{ fontSize: 10, color: T.inkMute, marginTop: 6 }}>
+                      N-1: {selectedDayData.total.segN1}
+                    </div>
+                  )}
                 </div>
               </div>
 
