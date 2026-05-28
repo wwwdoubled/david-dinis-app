@@ -13,3 +13,8 @@ project_id = "xcwljcidrudorkbqdcjq"
 # devolve 401 antes de chegar ao código.
 [functions.admin-user-mgmt]
 verify_jwt = false
+
+# send-emails: idem — verifica JWT do admin (ou service_role do cron)
+# internamente. Sem verify_jwt=false o preflight CORS OPTIONS dá 401.
+[functions.send-emails]
+verify_jwt = false
