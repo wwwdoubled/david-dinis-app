@@ -1741,10 +1741,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.23';
+const APP_VERSION = '3.21.24';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T04:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T08:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1754,6 +1754,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.24', date: '2026-05-28', summary: 'Análise de Vendas da Campanha (admin). Novo botão "📊 Análise de Vendas" no header do period em CampaignsView abre full-screen report com: 4 KPIs (unidades/revenue/margem/conversão), gráfico de linha diária com hover interativo (linha total da loja em fundo), top 10 produtos com toggle units/revenue/margem, donut por família + por móvel (clicáveis para filtrar), heatmap hora×dia da semana, tabela detalhada expansível com sort em qualquer coluna + filtros (vendidos/sem venda) e timeline mini por artigo, insights automáticos (top 3, móvel mais produtivo, hora pico, família forte, destaques sem venda). Export PDF multi-página (html2canvas + jsPDF) + Copiar Email HTML rico (clipboard text/html + text/plain fallback) + Enviar via email_queue. Filtros: período de vendas custom (default = period), modo destaque (todos/state/star). Reutiliza buildZoneIndex, normalizeEAN, idbGetActiveSalesSnapshot, queueEmail, padrões SVG existentes.' },
   { version: '3.21.23', date: '2026-05-28', summary: 'Tx Penetração: daily REAL por loja (BD N) + chart com selector + hover. (A) PROBLEMA: sheet RESUMO DIA é company-wide agregado (37,698 equip/mês ≈ TOTAL companhia, não Aveiro). (B) FONTE NOVA: parser passa a ler BD N (42k rows transações) e BD N-1 (45k) — classifica cada row por TIPO (col 19) em equip/seg/addon, agrupa por loja + data + categoria. Helper _catFromTipo + _dayFromSerial. (C) snap.dailyByStore[\'AVEIRO\'] = [{day, total:{equip,seg,addon,taxa,equipN1,segN1,taxaN1}, tv:{...}, foto:{...}, ...}] em formato compatível com a UI existente. (D) DailyHeatmap troca fonte para dailyByStore[storeKey] — valores agora são REALMENTE de Aveiro (~30-60 equip/dia em vez de ~1300). (E) DailyTrendChart: novo selector dropdown com todas as lojas + opção "Companhia (todas as lojas)". (F) Hover interactivo: mouseMove sobre SVG mostra linha vertical + highlight do ponto + tooltip flutuante com Dia, Equip, Seguros, Addons, TP, N-1. Vai do anti-pattern <title> simples para overlay React rico.' },
   { version: '3.21.22', date: '2026-05-28', summary: 'TP diária comparada com N-1 e companhia. (A) Diário: card de detalhe ganha 4 colunas TP — Aveiro (big 44px) · N-1 (28px com Δ vs Aveiro) · Companhia (28px com Δ). Equipamentos e Seguros movidos para linha separada abaixo. (B) Gráfico tendência (Visão Geral): adicionada linha tracejada de TP N-1 (cinza, ano anterior) + linha horizontal tracejada de TP Companhia média mensal (accent), referência constante. Legenda expandida com as 5 séries. Tooltips dos pontos mostram as 3 taxas. Nota: a "média companhia diária" usa o TP mensal total do RESUMO como referência — RESUMO DIA só tem dados da loja seleccionada, não há daily companhia disponível no ficheiro.' },
   { version: '3.21.21', date: '2026-05-28', summary: 'Fix: ReferenceError "uninsuredBySeller is not defined" no upload. A variável estava declarada dentro do if (shTT) mas usada no resolve() externamente. Movida para fora junto de uninsured/familySummary.' },
@@ -11353,6 +11354,8 @@ function CampaignsView({
   const presencePeers = usePresence(selectedPeriodId ? `period:${selectedPeriodId}` : null, user);
   // Templates manager modal
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  // v3.21.24: relatório de vendas da campanha (admin-only)
+  const [showSalesReport, setShowSalesReport] = useState(false);
 
   // Selected period object (null when not in any period)
   const selectedPeriod = useMemo(
@@ -12333,6 +12336,16 @@ function CampaignsView({
         }}>
           <Layers size={11} /> Templates
         </button>
+        {/* v3.21.24: Análise de Vendas da Campanha — admin-only */}
+        {isAdmin && (
+          <button onClick={() => setShowSalesReport(true)} title="Cruza artigos destacados com vendas reais" style={{
+            padding: '6px 10px', background: T.accent, color: '#fff',
+            border: 'none', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+          }}>
+            <BarChart3 size={11} /> Análise de Vendas
+          </button>
+        )}
         <PresenceIndicator peers={presencePeers} currentUserId={user?.id} />
         {scopedCampaigns.length === 0 && periods.length > 1 && (
           <button onClick={() => setShowImportFromPast(true)} title="Importar zonas/produtos de campanhas anteriores" style={{
@@ -12804,6 +12817,16 @@ function CampaignsView({
             }
             setPeriodDialog(null);
           }}
+        />
+      )}
+
+      {/* v3.21.24: Relatório de Vendas da Campanha */}
+      {showSalesReport && selectedPeriod && isAdmin && (
+        <CampaignSalesReport
+          period={selectedPeriod}
+          campaigns={scopedCampaigns}
+          user={user}
+          onClose={() => setShowSalesReport(false)}
         />
       )}
 
@@ -13810,6 +13833,916 @@ function formatDate(v) {
     return `${m[1].padStart(2, '0')}/${m[2].padStart(2, '0')}/${yr}`;
   }
   return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v3.21.24: CampaignSalesReport — full-screen analytics cruzando artigos em
+// destaque (todos os slots com EAN preenchido nos floors do period) com as
+// vendas reais do snapshot da Análise de Vendas. Inclui:
+//   - 4 KPIs (unidades, revenue, margem, conversão)
+//   - Gráfico diário (linha) com hover
+//   - Top 10 produtos (barras horizontais clicáveis)
+//   - Donuts: por família 1 e por móvel
+//   - Heatmap hora × dia da semana
+//   - Tabela detalhada expansível com sort + filtros
+//   - Insights automáticos
+//   - Export PDF (html2canvas + jsPDF) + Email HTML (clipboard rico ou queue)
+// ─────────────────────────────────────────────────────────────────────────
+
+function _slugify(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+function _htmlEscape(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function _toPlainText(html) {
+  return String(html || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+function _fmtEur2(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
+}
+
+function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose }) {
+  const reportRef = useRef(null);
+  const [snap, setSnap] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [salesFrom, setSalesFrom] = useState(period.startDate || '');
+  const [salesTo, setSalesTo]     = useState(period.endDate || '');
+  const [destaqueMode, setDestaqueMode] = useState('all'); // all | destaque | star
+  const [topMode, setTopMode] = useState('units'); // units | revenue | margin
+  const [tableSort, setTableSort] = useState({ key: 'revenue', dir: 'desc' });
+  const [tableFilter, setTableFilter] = useState({ sold: 'all', fam: null, floor: null });
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [hoverDay, setHoverDay] = useState(null);
+  const [emailDest, setEmailDest] = useState(user?.email || '');
+
+  // Carrega snapshot (IDB primeiro, cloud em fallback)
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try {
+        const local = await idbGetActiveSalesSnapshot();
+        if (alive && local && Array.isArray(local.rows)) {
+          setSnap(local);
+          setLoading(false);
+          return;
+        }
+      } catch {}
+      setLoading(false);
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // 1. Índice de destaques (EAN → {ean, name, slots[]})
+  const destaqueIndex = useMemo(() => {
+    const idx = new Map();
+    for (const f of (period.floors || [])) {
+      for (const z of (f.zones || [])) {
+        for (const s of (z.slots || [])) {
+          const key = normalizeEAN(s.ref);
+          if (!key) continue;
+          if (destaqueMode === 'destaque' && s.state !== 'destaque') continue;
+          if (destaqueMode === 'star' && !s.star && !f.star) continue;
+          if (!idx.has(key)) {
+            idx.set(key, { ean: s.ref, name: s.name || '', slots: [], floors: new Set() });
+          }
+          const it = idx.get(key);
+          it.slots.push({
+            floorName: f.name, zoneName: z.name, cartaz: s.cartaz || '',
+            state: s.state || '', star: !!s.star,
+          });
+          it.floors.add(f.name);
+        }
+      }
+    }
+    return idx;
+  }, [period.floors, destaqueMode]);
+
+  // 2. Sales rows: destaques + outros, dentro do período
+  const inRange = (d) => d && d >= salesFrom && d <= salesTo;
+  const destaqueRows = useMemo(() => {
+    if (!snap) return [];
+    return snap.rows.filter(r => inRange(r.date) && destaqueIndex.has(normalizeEAN(r.ean)));
+  }, [snap, salesFrom, salesTo, destaqueIndex]);
+  const allRowsInPeriod = useMemo(() => {
+    if (!snap) return [];
+    return snap.rows.filter(r => inRange(r.date));
+  }, [snap, salesFrom, salesTo]);
+
+  // 3. Agregações
+  const kpis = useMemo(() => {
+    let qty = 0, revenue = 0, margemSum = 0, costSum = 0;
+    const eans = new Set();
+    const trx = new Set();
+    for (const r of destaqueRows) {
+      qty += r.qty;
+      revenue += r.revenue;
+      margemSum += r.margem * r.qty;
+      costSum += r.pmp * r.qty;
+      if (r.ean) eans.add(normalizeEAN(r.ean));
+      if (r.transactionId != null) trx.add(`${r.pos}-${r.transactionId}-${r.date}`);
+    }
+    const margemPct = revenue > 0 ? ((revenue - costSum) / revenue) * 100 : 0;
+    const conversao = destaqueIndex.size > 0 ? (eans.size / destaqueIndex.size) * 100 : 0;
+    return {
+      qty, revenue, margem: revenue - costSum, margemPct,
+      conversao, eansVendidos: eans.size, totalDestaques: destaqueIndex.size,
+      transactions: trx.size,
+    };
+  }, [destaqueRows, destaqueIndex]);
+
+  const byDay = useMemo(() => {
+    const m = new Map();
+    for (const r of destaqueRows) {
+      if (!r.date) continue;
+      if (!m.has(r.date)) m.set(r.date, { date: r.date, qty: 0, revenue: 0 });
+      const e = m.get(r.date);
+      e.qty += r.qty; e.revenue += r.revenue;
+    }
+    // Cross com TOTAL (outros)
+    const total = new Map();
+    for (const r of allRowsInPeriod) {
+      if (!r.date) continue;
+      if (!total.has(r.date)) total.set(r.date, 0);
+      total.set(r.date, total.get(r.date) + r.qty);
+    }
+    for (const [date, t] of total) {
+      if (!m.has(date)) m.set(date, { date, qty: 0, revenue: 0 });
+      m.get(date).totalQty = t;
+    }
+    return Array.from(m.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [destaqueRows, allRowsInPeriod]);
+
+  const byEan = useMemo(() => {
+    const m = new Map();
+    for (const r of destaqueRows) {
+      const k = normalizeEAN(r.ean);
+      if (!k) continue;
+      if (!m.has(k)) m.set(k, {
+        ean: r.ean, eanKey: k, name: r.name, fam1: r.fam1 || '',
+        qty: 0, revenue: 0, margemSum: 0, costSum: 0,
+        days: new Set(),
+      });
+      const e = m.get(k);
+      e.qty += r.qty; e.revenue += r.revenue;
+      e.margemSum += r.margem * r.qty; e.costSum += r.pmp * r.qty;
+      if (r.date) e.days.add(r.date);
+    }
+    // Enriquecer com info do destaque
+    const out = [];
+    for (const [k, agg] of m) {
+      const dest = destaqueIndex.get(k);
+      const margemPct = agg.revenue > 0 ? ((agg.revenue - agg.costSum) / agg.revenue) * 100 : 0;
+      out.push({
+        ...agg,
+        margem: agg.revenue - agg.costSum,
+        margemPct,
+        daysSold: agg.days.size,
+        slots: dest?.slots || [],
+        floors: dest ? Array.from(dest.floors) : [],
+      });
+    }
+    // Adicionar destaques NÃO vendidos
+    for (const [k, dest] of destaqueIndex) {
+      if (m.has(k)) continue;
+      out.push({
+        ean: dest.ean, eanKey: k, name: dest.name, fam1: '',
+        qty: 0, revenue: 0, margem: 0, margemPct: 0, costSum: 0, margemSum: 0,
+        daysSold: 0, slots: dest.slots, floors: Array.from(dest.floors),
+      });
+    }
+    return out;
+  }, [destaqueRows, destaqueIndex]);
+
+  const byFam = useMemo(() => {
+    const m = new Map();
+    for (const e of byEan) {
+      const k = e.fam1 || '— Sem família —';
+      if (!m.has(k)) m.set(k, { fam: k, qty: 0, revenue: 0, eans: 0 });
+      const v = m.get(k);
+      v.qty += e.qty; v.revenue += e.revenue;
+      if (e.qty > 0) v.eans += 1;
+    }
+    return Array.from(m.values()).sort((a, b) => b.revenue - a.revenue);
+  }, [byEan]);
+
+  const byFloor = useMemo(() => {
+    const m = new Map();
+    for (const e of byEan) {
+      for (const fl of (e.floors || [])) {
+        if (!m.has(fl)) m.set(fl, { floor: fl, qty: 0, revenue: 0, eans: 0 });
+        const v = m.get(fl);
+        v.qty += e.qty / Math.max(1, e.floors.length);
+        v.revenue += e.revenue / Math.max(1, e.floors.length);
+        v.eans += 1 / Math.max(1, e.floors.length);
+      }
+    }
+    return Array.from(m.values()).sort((a, b) => b.revenue - a.revenue);
+  }, [byEan]);
+
+  const byHourDow = useMemo(() => {
+    // 7 × 24 grid
+    const grid = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+    for (const r of destaqueRows) {
+      if (r.dow != null && r.hour != null) grid[r.dow][r.hour] += r.qty;
+    }
+    return grid;
+  }, [destaqueRows]);
+
+  // 4. Sort + filter da tabela
+  const tableRows = useMemo(() => {
+    let rows = byEan;
+    if (tableFilter.sold === 'sold')   rows = rows.filter(r => r.qty > 0);
+    if (tableFilter.sold === 'unsold') rows = rows.filter(r => r.qty === 0);
+    if (tableFilter.fam)   rows = rows.filter(r => r.fam1 === tableFilter.fam);
+    if (tableFilter.floor) rows = rows.filter(r => r.floors.includes(tableFilter.floor));
+    rows = [...rows].sort((a, b) => {
+      const av = a[tableSort.key] ?? 0, bv = b[tableSort.key] ?? 0;
+      const cmp = typeof av === 'string' ? av.localeCompare(bv) : (av - bv);
+      return tableSort.dir === 'asc' ? cmp : -cmp;
+    });
+    return rows;
+  }, [byEan, tableFilter, tableSort]);
+
+  // 5. Insights
+  const insights = useMemo(() => {
+    const out = [];
+    const unsold = byEan.filter(r => r.qty === 0).length;
+    if (unsold > 0) {
+      out.push({ kind: 'warn', title: `${unsold} ${unsold === 1 ? 'destaque' : 'destaques'} sem qualquer venda`, body: `Considera revisão de stock, preço ou posicionamento.` });
+    }
+    const sold = byEan.filter(r => r.qty > 0).sort((a, b) => b.revenue - a.revenue);
+    if (sold.length >= 3) {
+      out.push({
+        kind: 'good', title: 'Top 3 destaques por revenue',
+        body: sold.slice(0, 3).map((r, i) => `${i + 1}. ${r.name?.slice(0, 30) || r.ean} (${_fmtEur2(r.revenue)})`).join(' · '),
+      });
+    }
+    if (byFloor[0]) {
+      const top = byFloor[0];
+      const totRev = byFloor.reduce((a, f) => a + f.revenue, 0);
+      const share = totRev > 0 ? (top.revenue / totRev) * 100 : 0;
+      out.push({ kind: 'info', title: `Móvel mais produtivo: ${top.floor}`, body: `Gerou ${_fmtEur2(top.revenue)} (${share.toFixed(1)}% do total).` });
+    }
+    // Hora pico
+    let maxQty = 0, maxHour = -1;
+    for (let h = 0; h < 24; h++) {
+      let total = 0;
+      for (let d = 0; d < 7; d++) total += byHourDow[d][h];
+      if (total > maxQty) { maxQty = total; maxHour = h; }
+    }
+    if (maxHour >= 0 && maxQty > 0) {
+      out.push({ kind: 'info', title: `Hora pico das vendas: ${String(maxHour).padStart(2, '0')}h`, body: `${maxQty} unidades vendidas nesta hora ao longo do período.` });
+    }
+    // Família com mais vendas
+    if (byFam[0]) {
+      out.push({ kind: 'info', title: `Família mais forte: ${byFam[0].fam}`, body: `${byFam[0].eans} artigos vendidos · ${_fmtEur2(byFam[0].revenue)}` });
+    }
+    return out;
+  }, [byEan, byFloor, byFam, byHourDow]);
+
+  // 6. Export PDF
+  const exportPDF = async () => {
+    if (!reportRef.current) return;
+    setExporting(true);
+    try {
+      const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+        import('jspdf'), import('html2canvas'),
+      ]);
+      const target = reportRef.current;
+      const canvas = await html2canvas(target, { scale: 2, backgroundColor: '#ffffff', useCORS: true, windowWidth: 1180 });
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageW = 210, pageH = 297;
+      const imgH = canvas.height * pageW / canvas.width;
+      let heightLeft = imgH, position = 0;
+      const imgData = canvas.toDataURL('image/png');
+      pdf.addImage(imgData, 'PNG', 0, position, pageW, imgH);
+      heightLeft -= pageH;
+      while (heightLeft > 0) {
+        position -= pageH;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, pageW, imgH);
+        heightLeft -= pageH;
+      }
+      pdf.save(`vendas-${_slugify(period.name)}-${salesFrom}-${salesTo}.pdf`);
+    } catch (err) {
+      try { showToast(`Erro PDF: ${err.message || err}`, { kind: 'error' }); } catch {}
+    } finally { setExporting(false); }
+  };
+
+  // 7. Build email HTML
+  const buildEmailHtml = () => {
+    const rowsTop = byEan.filter(r => r.qty > 0).sort((a, b) => b.revenue - a.revenue).slice(0, 20);
+    const insightsRows = insights.map(ins => {
+      const c = ins.kind === 'good' ? '#15803d' : ins.kind === 'warn' ? '#c2410c' : '#1e40af';
+      return `<tr><td style="padding:8px 12px;border-left:3px solid ${c};background:#fafafa;"><div style="font-weight:600;color:#222;font-size:13px;">${_htmlEscape(ins.title)}</div><div style="font-size:12px;color:#555;margin-top:3px;">${_htmlEscape(ins.body)}</div></td></tr>`;
+    }).join('');
+    const kpiCard = (label, value, sub) => `<td style="padding:14px;background:#f7f7f7;border-radius:8px;width:25%;vertical-align:top;"><div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">${_htmlEscape(label)}</div><div style="font-size:22px;font-weight:600;color:#222;">${_htmlEscape(value)}</div>${sub ? `<div style="font-size:11px;color:#666;margin-top:3px;">${_htmlEscape(sub)}</div>` : ''}</td>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${_htmlEscape(period.name)}</title></head>
+<body style="margin:0;padding:0;background:#f0f0f0;font-family:Helvetica,Arial,sans-serif;color:#222;">
+<div style="max-width:800px;margin:0 auto;padding:24px;background:#fff;">
+  <div style="padding-bottom:18px;border-bottom:1px solid #ddd;margin-bottom:18px;">
+    <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:4px;">Análise de Vendas da Campanha</div>
+    <h1 style="margin:0;font-size:22px;color:#222;">${_htmlEscape(period.name)}</h1>
+    <p style="margin:6px 0 0;color:#666;font-size:13px;">${_htmlEscape(salesFrom)} → ${_htmlEscape(salesTo)} · ${kpis.totalDestaques} artigos destacados</p>
+  </div>
+  <table cellspacing="8" style="width:100%;border-collapse:separate;margin-bottom:20px;">
+    <tr>
+      ${kpiCard('Unidades vendidas', String(kpis.qty), `${kpis.transactions} talões`)}
+      ${kpiCard('Revenue', _fmtEur2(kpis.revenue), '')}
+      ${kpiCard('Margem', _fmtEur2(kpis.margem), `${kpis.margemPct.toFixed(1)}%`)}
+      ${kpiCard('Conversão', kpis.conversao.toFixed(1) + '%', `${kpis.eansVendidos}/${kpis.totalDestaques}`)}
+    </tr>
+  </table>
+  <h2 style="font-size:16px;color:#222;margin:24px 0 10px;">Top 20 produtos vendidos</h2>
+  <table cellpadding="8" style="width:100%;border-collapse:collapse;font-size:12px;">
+    <thead><tr style="background:#222;color:#fff;text-align:left;">
+      <th style="padding:8px;">#</th><th>EAN</th><th>Descrição</th><th>Móvel</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Revenue</th><th style="text-align:right;">Margem%</th>
+    </tr></thead><tbody>
+      ${rowsTop.map((r, i) => `<tr style="border-bottom:1px solid #eee;">
+        <td style="padding:6px 8px;color:#888;">${i + 1}</td>
+        <td style="padding:6px 8px;font-family:monospace;color:#666;">${_htmlEscape(r.ean)}</td>
+        <td style="padding:6px 8px;">${_htmlEscape((r.name || '').slice(0, 50))}</td>
+        <td style="padding:6px 8px;color:#666;">${_htmlEscape((r.floors || []).join(', '))}</td>
+        <td style="padding:6px 8px;text-align:right;font-weight:600;">${r.qty}</td>
+        <td style="padding:6px 8px;text-align:right;">${_fmtEur2(r.revenue)}</td>
+        <td style="padding:6px 8px;text-align:right;color:${r.margemPct >= 5 ? '#15803d' : r.margemPct >= 0 ? '#c2410c' : '#c2261c'};">${r.margemPct.toFixed(1)}%</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  <h2 style="font-size:16px;color:#222;margin:24px 0 10px;">Por família</h2>
+  <table cellpadding="8" style="width:100%;border-collapse:collapse;font-size:12px;">
+    <thead><tr style="background:#f0f0f0;text-align:left;"><th>Família</th><th style="text-align:right;">Artigos</th><th style="text-align:right;">Qty</th><th style="text-align:right;">Revenue</th></tr></thead>
+    <tbody>${byFam.map(f => `<tr style="border-bottom:1px solid #eee;"><td style="padding:6px 8px;">${_htmlEscape(f.fam)}</td><td style="padding:6px 8px;text-align:right;">${f.eans}</td><td style="padding:6px 8px;text-align:right;">${f.qty}</td><td style="padding:6px 8px;text-align:right;">${_fmtEur2(f.revenue)}</td></tr>`).join('')}</tbody>
+  </table>
+  ${insightsRows ? `<h2 style="font-size:16px;color:#222;margin:24px 0 10px;">Recomendações</h2><table cellspacing="6" style="width:100%;">${insightsRows}</table>` : ''}
+  <p style="margin-top:24px;padding-top:14px;border-top:1px solid #ddd;font-size:11px;color:#888;text-align:center;">Gerado por David Dinis · Gestão de Campanhas FNAC</p>
+</div></body></html>`;
+  };
+
+  const handleCopyEmail = async () => {
+    try {
+      const html = buildEmailHtml();
+      if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+        const item = new ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([_toPlainText(html)], { type: 'text/plain' }),
+        });
+        await navigator.clipboard.write([item]);
+      } else {
+        await navigator.clipboard.writeText(html);
+      }
+      try { showToast('HTML copiado — cola no Outlook/Gmail', { kind: 'success' }); } catch {}
+    } catch (err) {
+      try { showToast(`Erro: ${err.message || err}`, { kind: 'error' }); } catch {}
+    }
+  };
+
+  const handleSendQueue = async () => {
+    if (!emailDest || !emailDest.includes('@')) {
+      try { showToast('Indica um email válido', { kind: 'warn' }); } catch {}
+      return;
+    }
+    try {
+      const html = buildEmailHtml();
+      const subject = `📊 Análise vendas — ${period.name} (${salesFrom} → ${salesTo})`;
+      const destinations = emailDest.split(',').map(s => s.trim()).filter(Boolean);
+      for (const to of destinations) {
+        await queueEmail({
+          toEmail: to, subject, bodyHtml: html, bodyText: _toPlainText(html),
+          category: 'campaign_sales_report', periodId: period.id,
+        });
+      }
+      try { showToast(`${destinations.length} email(s) na fila`, { kind: 'success' }); } catch {}
+    } catch (err) {
+      try { showToast(`Erro: ${err.message || err}`, { kind: 'error' }); } catch {}
+    }
+  };
+
+  // ── Render ──
+  return (
+    <div role="dialog" aria-modal="true" style={{
+      position: 'fixed', inset: 0, background: T.bg, zIndex: 9500,
+      overflowY: 'auto', display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{ maxWidth: 1180, margin: '0 auto', padding: '32px 24px 80px', width: '100%' }}>
+        {/* Header com botões */}
+        <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+          <button onClick={onClose} style={{
+            padding: '8px 14px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, fontSize: 12, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <ArrowLeft size={12} /> Voltar ao period
+          </button>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+              Análise de Vendas da Campanha
+            </div>
+            <h1 className="display" style={{ margin: '4px 0 0', fontSize: 24, fontWeight: 500, fontStyle: 'italic', color: T.ink }}>
+              {period.name}
+            </h1>
+          </div>
+          <button onClick={exportPDF} disabled={exporting} style={{
+            padding: '8px 14px', background: T.accent, color: '#fff', border: 'none',
+            borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: exporting ? 'wait' : 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <FileDown size={12} /> {exporting ? 'A gerar…' : 'PDF'}
+          </button>
+          <button onClick={handleCopyEmail} style={{
+            padding: '8px 14px', background: T.ink, color: T.bg, border: 'none',
+            borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <Copy size={12} /> Copiar email
+          </button>
+          <button onClick={onClose} title="Fechar" style={{
+            padding: '8px', background: 'transparent', color: T.inkSoft,
+            border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+          }}>
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Filtros */}
+        <div className="no-print" style={{ display: 'flex', alignItems: 'flex-end', gap: 12, marginBottom: 24, padding: '14px 16px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, flexWrap: 'wrap' }}>
+          <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>De</span>
+            <input type="date" value={salesFrom} onChange={e => setSalesFrom(e.target.value)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, fontFamily: 'inherit' }} />
+          </label>
+          <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Até</span>
+            <input type="date" value={salesTo} onChange={e => setSalesTo(e.target.value)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, fontFamily: 'inherit' }} />
+          </label>
+          <label style={{ fontSize: 11, color: T.inkSoft, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ textTransform: 'uppercase', letterSpacing: '0.08em' }}>Destaque</span>
+            <select value={destaqueMode} onChange={e => setDestaqueMode(e.target.value)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, fontFamily: 'inherit' }}>
+              <option value="all">Todos atribuídos</option>
+              <option value="destaque">Só state=destaque</option>
+              <option value="star">Só destaques portáteis</option>
+            </select>
+          </label>
+          <div style={{ flex: 1 }} />
+          <input type="email" value={emailDest} onChange={e => setEmailDest(e.target.value)} placeholder="email@destino" style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, fontFamily: 'inherit', width: 200 }} />
+          <button onClick={handleSendQueue} style={{ padding: '7px 12px', background: 'transparent', color: T.accent, border: `1px solid ${T.accent}`, borderRadius: 6, fontSize: 11, fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <Mail size={11} /> Enviar via queue
+          </button>
+        </div>
+
+        {/* Conteúdo do relatório (capturado para PDF) */}
+        <div ref={reportRef} style={{ background: T.bg, padding: 4 }}>
+          {/* Cabeçalho do relatório */}
+          <div style={{ marginBottom: 18, paddingBottom: 14, borderBottom: `1px solid ${T.line}` }}>
+            <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.12em', textTransform: 'uppercase' }}>
+              Relatório · {salesFrom} → {salesTo} · {destaqueIndex.size} artigos destacados
+            </div>
+            <div className="display" style={{ fontSize: 20, fontStyle: 'italic', marginTop: 4 }}>
+              {period.name}
+            </div>
+          </div>
+
+          {loading ? (
+            <div style={{ padding: 60, textAlign: 'center', color: T.inkMute }}>A carregar snapshot de vendas…</div>
+          ) : !snap ? (
+            <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, background: `${T.orange}10`, border: `1px solid ${T.orange}40`, borderRadius: 8 }}>
+              <AlertCircle size={20} style={{ color: T.orange, marginBottom: 8 }} />
+              <div style={{ fontSize: 14, fontWeight: 500, color: T.ink, marginBottom: 6 }}>Sem snapshot de Análise de Vendas</div>
+              <div style={{ fontSize: 12 }}>Sobe primeiro o ficheiro Excel na vista "Análise de Vendas" e volta cá.</div>
+            </div>
+          ) : destaqueIndex.size === 0 ? (
+            <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, background: T.bgEl, borderRadius: 8 }}>
+              Esta campanha ainda não tem artigos atribuídos a móveis.
+            </div>
+          ) : (
+            <>
+              {/* KPIs */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 24 }}>
+                <_RKpi label="Unidades vendidas" value={kpis.qty} sub={`${kpis.transactions} talões`} />
+                <_RKpi label="Revenue" value={_fmtEur2(kpis.revenue)} accent={T.ink} />
+                <_RKpi label="Margem" value={_fmtEur2(kpis.margem)} sub={`${kpis.margemPct.toFixed(1)}%`} accent={kpis.margem >= 0 ? T.green : T.red} />
+                <_RKpi label="Conversão" value={`${kpis.conversao.toFixed(1)}%`} sub={`${kpis.eansVendidos}/${kpis.totalDestaques}`} accent={T.accent} />
+              </div>
+
+              {/* Gráfico diário (linha) */}
+              {byDay.length > 0 && (
+                <_RDailyChart data={byDay} hoverDay={hoverDay} setHoverDay={setHoverDay} />
+              )}
+
+              {/* Top 10 produtos */}
+              <_RTopProducts data={byEan} mode={topMode} setMode={setTopMode} />
+
+              {/* Donuts família + móvel */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, marginBottom: 24 }}>
+                <_RDonut title="Por família" data={byFam} valueKey="revenue" labelKey="fam" onClick={(f) => setTableFilter(p => ({ ...p, fam: p.fam === f ? null : f }))} active={tableFilter.fam} />
+                <_RDonut title="Por móvel" data={byFloor} valueKey="revenue" labelKey="floor" onClick={(f) => setTableFilter(p => ({ ...p, floor: p.floor === f ? null : f }))} active={tableFilter.floor} />
+              </div>
+
+              {/* Heatmap hora × dow */}
+              {destaqueRows.length > 0 && <_RHeatmap grid={byHourDow} />}
+
+              {/* Tabela detalhada */}
+              <_RTable
+                rows={tableRows} totalDestaques={destaqueIndex.size}
+                sort={tableSort} setSort={setTableSort}
+                filter={tableFilter} setFilter={setTableFilter}
+                expanded={expandedRow} setExpanded={setExpandedRow}
+                allRowsForExpand={destaqueRows}
+              />
+
+              {/* Insights */}
+              {insights.length > 0 && (
+                <div style={{ marginTop: 32 }}>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 12 }}>
+                    ✨ Recomendações
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+                    {insights.map((ins, i) => {
+                      const c = ins.kind === 'good' ? T.green : ins.kind === 'warn' ? T.orange : T.accent;
+                      return (
+                        <div key={i} style={{ padding: '12px 14px', background: T.bgEl, border: `1px solid ${T.line}`, borderLeft: `3px solid ${c}`, borderRadius: 8 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: T.ink, marginBottom: 4 }}>{ins.title}</div>
+                          <div style={{ fontSize: 11, color: T.inkSoft, lineHeight: 1.5 }}>{ins.body}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Mini KPI card para o relatório
+function _RKpi({ label, value, sub, accent }) {
+  return (
+    <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 700, color: accent || T.ink, fontFamily: 'Geist Mono', lineHeight: 1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: T.inkMute, marginTop: 6 }}>{sub}</div>}
+    </div>
+  );
+}
+
+// Gráfico de linha — vendas diárias
+function _RDailyChart({ data, hoverDay, setHoverDay }) {
+  const W = 880, H = 220;
+  const PAD_L = 48, PAD_R = 24, PAD_T = 16, PAD_B = 32;
+  const chartW = W - PAD_L - PAD_R, chartH = H - PAD_T - PAD_B;
+  const maxQty = Math.max(...data.map(d => Math.max(d.qty, d.totalQty || 0))) || 1;
+  const stepX = data.length > 1 ? chartW / (data.length - 1) : chartW / 2;
+  const xS = i => PAD_L + i * stepX;
+  const yS = v => PAD_T + chartH - (v / maxQty) * chartH;
+
+  const pathDest = data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${xS(i).toFixed(1)} ${yS(d.qty).toFixed(1)}`).join(' ');
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10 }}>
+        📈 Vendas diárias dos destaques
+      </div>
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 12, position: 'relative' }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: H, overflow: 'visible' }}
+          onMouseMove={e => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const svgX = (e.clientX - rect.left) / rect.width * W;
+            if (svgX < PAD_L || svgX > W - PAD_R) { setHoverDay(null); return; }
+            const i = Math.max(0, Math.min(data.length - 1, Math.round((svgX - PAD_L) / stepX)));
+            setHoverDay({ i, mouseX: e.clientX - rect.left, mouseY: e.clientY - rect.top });
+          }}
+          onMouseLeave={() => setHoverDay(null)}
+        >
+          {/* Grid horizontal */}
+          {[0, 0.25, 0.5, 0.75, 1].map(g => (
+            <g key={g}>
+              <line x1={PAD_L} y1={PAD_T + chartH * (1 - g)} x2={W - PAD_R} y2={PAD_T + chartH * (1 - g)} stroke={T.lineSoft} strokeWidth={1} strokeDasharray={g === 0 ? '0' : '3 3'} />
+              <text x={PAD_L - 6} y={PAD_T + chartH * (1 - g) + 3} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono" textAnchor="end">{Math.round(g * maxQty)}</text>
+            </g>
+          ))}
+          {/* Linha total da loja (fundo) */}
+          {data.some(d => d.totalQty) && (
+            <path d={data.map((d, i) => `${i === 0 ? 'M' : 'L'} ${xS(i).toFixed(1)} ${yS(d.totalQty || 0).toFixed(1)}`).join(' ')}
+              stroke={T.inkMute} strokeWidth={1.5} fill="none" strokeDasharray="4 4" opacity={0.5} />
+          )}
+          {/* Linha destaques */}
+          <path d={pathDest} stroke={T.accent} strokeWidth={2.5} fill="none" strokeLinejoin="round" strokeLinecap="round" />
+          {data.map((d, i) => (
+            <circle key={d.date} cx={xS(i)} cy={yS(d.qty)} r={3} fill={T.accent} stroke={T.bg} strokeWidth={1.5} />
+          ))}
+          {/* X labels */}
+          {data.map((d, i) => {
+            const step = data.length > 25 ? 3 : data.length > 14 ? 2 : 1;
+            if (i % step !== 0 && i !== data.length - 1) return null;
+            return <text key={d.date} x={xS(i)} y={H - 12} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono" textAnchor="middle">{d.date.slice(5)}</text>;
+          })}
+          {/* Hover */}
+          {hoverDay && data[hoverDay.i] && (
+            <g pointerEvents="none">
+              <line x1={xS(hoverDay.i)} y1={PAD_T} x2={xS(hoverDay.i)} y2={PAD_T + chartH} stroke={T.ink} strokeWidth={1} strokeDasharray="3 3" opacity={0.4} />
+              <circle cx={xS(hoverDay.i)} cy={yS(data[hoverDay.i].qty)} r={6} fill="none" stroke={T.accent} strokeWidth={2} />
+            </g>
+          )}
+        </svg>
+        {hoverDay && data[hoverDay.i] && (
+          <div style={{
+            position: 'absolute', left: Math.min(hoverDay.mouseX - 90, 600), top: Math.max(8, hoverDay.mouseY - 90),
+            background: T.bg, border: `1px solid ${T.line}`, borderRadius: 6, padding: '8px 10px',
+            boxShadow: '0 6px 18px rgba(0,0,0,0.1)', pointerEvents: 'none', minWidth: 160, zIndex: 10,
+          }}>
+            <div className="mono" style={{ fontSize: 10, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>{data[hoverDay.i].date}</div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: T.accent, fontFamily: 'Geist Mono' }}>
+              {data[hoverDay.i].qty} <span style={{ fontSize: 10, color: T.inkMute, fontWeight: 400 }}>destaques</span>
+            </div>
+            {data[hoverDay.i].totalQty != null && (
+              <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 3 }}>
+                Loja total: <strong style={{ fontFamily: 'Geist Mono' }}>{data[hoverDay.i].totalQty}</strong>
+                <span style={{ marginLeft: 6, color: T.inkMute }}>
+                  ({data[hoverDay.i].totalQty > 0 ? ((data[hoverDay.i].qty / data[hoverDay.i].totalQty) * 100).toFixed(1) : 0}%)
+                </span>
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 3 }}>
+              Revenue: <strong style={{ fontFamily: 'Geist Mono' }}>{_fmtEur2(data[hoverDay.i].revenue)}</strong>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Top 10 produtos (bar horizontal)
+function _RTopProducts({ data, mode, setMode }) {
+  const sorted = useMemo(() => {
+    const key = mode === 'units' ? 'qty' : mode === 'revenue' ? 'revenue' : 'margem';
+    return [...data].filter(r => r.qty > 0).sort((a, b) => b[key] - a[key]).slice(0, 10);
+  }, [data, mode]);
+  const maxV = sorted[0]?.[mode === 'units' ? 'qty' : mode === 'revenue' ? 'revenue' : 'margem'] || 1;
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span>🏆 Top 10 produtos</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <div style={{ display: 'flex', gap: 4, padding: 2, background: T.bgEl, borderRadius: 4 }}>
+          {[{ id: 'units', l: 'Unid.' }, { id: 'revenue', l: 'Revenue' }, { id: 'margin', l: 'Margem' }].map(o => (
+            <button key={o.id} onClick={() => setMode(o.id)} style={{
+              padding: '3px 10px', fontSize: 10, borderRadius: 3, border: 'none',
+              background: mode === o.id ? T.ink : 'transparent',
+              color: mode === o.id ? T.bg : T.inkSoft, cursor: 'pointer', fontFamily: 'inherit',
+              textTransform: 'none', letterSpacing: 0,
+            }}>{o.l}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: '12px 16px' }}>
+        {sorted.length === 0 ? (
+          <div style={{ padding: 24, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem vendas no período.</div>
+        ) : sorted.map((r, i) => {
+          const v = mode === 'units' ? r.qty : mode === 'revenue' ? r.revenue : r.margem;
+          const w = (v / maxV) * 100;
+          const fmt = mode === 'units' ? String(r.qty) : _fmtEur2(v);
+          return (
+            <div key={r.ean} style={{ display: 'grid', gridTemplateColumns: '24px 1fr 90px', gap: 12, alignItems: 'center', padding: '7px 0', borderTop: i > 0 ? `1px solid ${T.lineSoft}` : 'none' }}>
+              <span style={{ textAlign: 'right', color: T.inkMute, fontSize: 10, fontFamily: 'Geist Mono' }}>{i + 1}</span>
+              <div>
+                <div style={{ fontSize: 12, color: T.ink, marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.name}>{r.name || r.ean}</div>
+                <div style={{ height: 4, background: T.lineSoft, borderRadius: 2, overflow: 'hidden' }}>
+                  <div style={{ width: `${w}%`, height: '100%', background: T.accent, opacity: 0.85 }} />
+                </div>
+              </div>
+              <span style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 12, color: T.ink, fontWeight: 600 }}>{fmt}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Donut chart simples
+function _RDonut({ title, data, valueKey, labelKey, onClick, active }) {
+  const top = useMemo(() => data.slice(0, 6), [data]);
+  const restTotal = useMemo(() => data.slice(6).reduce((a, x) => a + (x[valueKey] || 0), 0), [data, valueKey]);
+  const total = data.reduce((a, x) => a + (x[valueKey] || 0), 0);
+  if (total <= 0) return (
+    <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16, minHeight: 220 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10 }}>{title}</div>
+      <div style={{ color: T.inkMute, fontSize: 12, padding: 30, textAlign: 'center' }}>Sem dados</div>
+    </div>
+  );
+  const size = 140, r = 50, cx = size / 2, cy = size / 2, sw = 24;
+  let acc = 0;
+  const segments = [];
+  const palette = [T.accent, T.green, T.orange, T.purple || '#8b5cf6', T.red, '#06b6d4'];
+  const all = [...top, ...(restTotal > 0 ? [{ [labelKey]: 'Outros', [valueKey]: restTotal }] : [])];
+  for (let i = 0; i < all.length; i++) {
+    const x = all[i];
+    const frac = (x[valueKey] || 0) / total;
+    if (frac <= 0) continue;
+    const startA = acc * 2 * Math.PI - Math.PI / 2;
+    const endA = (acc + frac) * 2 * Math.PI - Math.PI / 2;
+    const x1 = cx + r * Math.cos(startA), y1 = cy + r * Math.sin(startA);
+    const x2 = cx + r * Math.cos(endA),   y2 = cy + r * Math.sin(endA);
+    const large = frac > 0.5 ? 1 : 0;
+    segments.push({
+      d: `M ${cx} ${cy} L ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} Z`,
+      color: palette[i % palette.length], label: x[labelKey], value: x[valueKey],
+    });
+    acc += frac;
+  }
+  return (
+    <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 16 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10 }}>{title}</div>
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center' }}>
+        <svg viewBox={`0 0 ${size} ${size}`} style={{ width: 140, height: 140, flexShrink: 0 }}>
+          {segments.map((s, i) => (
+            <path key={i} d={s.d} fill={s.color} opacity={active && active !== s.label ? 0.25 : 1} style={{ cursor: onClick ? 'pointer' : 'default' }}
+              onClick={() => onClick && onClick(s.label)}>
+              <title>{s.label}: {_fmtEur2(s.value)}</title>
+            </path>
+          ))}
+          <circle cx={cx} cy={cy} r={r - sw} fill={T.bgEl} />
+          <text x={cx} y={cy - 4} textAnchor="middle" fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">Total</text>
+          <text x={cx} y={cy + 8} textAnchor="middle" fontSize={11} fontWeight={600} fill={T.ink} fontFamily="Geist Mono">{total >= 1000 ? `${(total / 1000).toFixed(1)}k` : total.toFixed(0)}</text>
+        </svg>
+        <div style={{ flex: 1, fontSize: 11 }}>
+          {segments.map((s, i) => (
+            <div key={i} onClick={() => onClick && onClick(s.label)} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0', cursor: onClick ? 'pointer' : 'default',
+              opacity: active && active !== s.label ? 0.4 : 1,
+            }}>
+              <span style={{ width: 10, height: 10, background: s.color, borderRadius: 2, flexShrink: 0 }} />
+              <span style={{ flex: 1, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.label}>{s.label}</span>
+              <span style={{ fontFamily: 'Geist Mono', color: T.inkSoft }}>{((s.value / total) * 100).toFixed(0)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Heatmap hora × dow
+function _RHeatmap({ grid }) {
+  const dowLabels = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  const max = Math.max(...grid.flat()) || 1;
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10 }}>
+        🔥 Heatmap hora × dia da semana
+      </div>
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, padding: 12, overflowX: 'auto' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '40px repeat(24, 1fr)', gap: 2, fontSize: 9, minWidth: 600 }}>
+          <div />
+          {Array.from({ length: 24 }, (_, h) => (
+            <div key={h} style={{ textAlign: 'center', color: T.inkMute, fontFamily: 'Geist Mono', padding: '2px 0' }}>{String(h).padStart(2, '0')}</div>
+          ))}
+          {dowLabels.map((dow, d) => (
+            <React.Fragment key={d}>
+              <div style={{ textAlign: 'right', color: T.inkMute, fontFamily: 'Geist Mono', paddingRight: 6, alignSelf: 'center' }}>{dow}</div>
+              {Array.from({ length: 24 }, (_, h) => {
+                const v = grid[d][h];
+                const alpha = max > 0 ? v / max : 0;
+                return (
+                  <div key={h} title={`${dow} ${String(h).padStart(2, '0')}h: ${v} unidades`} style={{
+                    height: 22, background: v > 0 ? `rgba(91, 155, 213, ${0.15 + alpha * 0.85})` : T.lineSoft,
+                    borderRadius: 2, cursor: 'help',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 9, color: alpha > 0.5 ? '#fff' : T.inkSoft, fontFamily: 'Geist Mono',
+                  }}>
+                    {v > 0 ? v : ''}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Tabela detalhada expansível
+function _RTable({ rows, totalDestaques, sort, setSort, filter, setFilter, expanded, setExpanded, allRowsForExpand }) {
+  const Th = ({ k, children, align = 'left' }) => (
+    <th onClick={() => setSort(p => ({ key: k, dir: p.key === k && p.dir === 'desc' ? 'asc' : 'desc' }))}
+      style={{ padding: '10px 8px', textAlign: align, fontWeight: 500, cursor: 'pointer', color: sort.key === k ? T.ink : T.inkMute, fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+      {children} {sort.key === k && (sort.dir === 'desc' ? '↓' : '↑')}
+    </th>
+  );
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <span>📋 Tabela detalhada · {rows.length} de {totalDestaques}</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <select value={filter.sold} onChange={e => setFilter(p => ({ ...p, sold: e.target.value }))} style={{ padding: '4px 8px', fontSize: 10, fontFamily: 'inherit', border: `1px solid ${T.line}`, borderRadius: 4, background: T.bgEl, color: T.ink, letterSpacing: 0, textTransform: 'none' }}>
+          <option value="all">Todos</option>
+          <option value="sold">Só vendidos</option>
+          <option value="unsold">Só sem venda</option>
+        </select>
+        {(filter.fam || filter.floor) && (
+          <button onClick={() => setFilter({ sold: 'all', fam: null, floor: null })} style={{ padding: '3px 8px', fontSize: 10, background: 'transparent', color: T.red, border: `1px solid ${T.red}40`, borderRadius: 999, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: 0, textTransform: 'none' }}>
+            Limpar filtros
+          </button>
+        )}
+      </div>
+      <div style={{ overflowX: 'auto', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${T.line}` }}>
+              <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 10, color: T.inkMute }}></th>
+              <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 }}>Artigo</th>
+              <th style={{ padding: '10px 8px', textAlign: 'left', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 }}>Móvel</th>
+              <Th k="qty" align="right">Qty</Th>
+              <Th k="revenue" align="right">Revenue</Th>
+              <Th k="margem" align="right">Margem</Th>
+              <Th k="margemPct" align="right">Margem %</Th>
+              <Th k="daysSold" align="right">Dias</Th>
+              <th style={{ padding: '10px 8px', textAlign: 'center', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 500 }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => {
+              const isExp = expanded === r.eanKey;
+              const status = r.qty === 0 ? { label: 'Sem venda', color: T.red, bg: `${T.red}10` }
+                : r.qty < 3 ? { label: 'Fraca', color: T.orange, bg: `${T.orange}10` }
+                : { label: 'OK', color: T.green, bg: `${T.green}10` };
+              return (
+                <React.Fragment key={r.eanKey}>
+                  <tr onClick={() => setExpanded(isExp ? null : r.eanKey)} style={{ borderTop: `1px solid ${T.lineSoft}`, cursor: 'pointer', background: isExp ? `${T.accent}06` : 'transparent' }}>
+                    <td style={{ padding: '8px', color: T.inkMute, textAlign: 'center', width: 24 }}>{isExp ? '▾' : '▸'}</td>
+                    <td style={{ padding: '8px' }}>
+                      <div style={{ fontWeight: 500, color: T.ink, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.name}>{r.name || r.ean}</div>
+                      <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono' }}>{r.ean} {r.fam1 && ` · ${r.fam1}`}</div>
+                    </td>
+                    <td style={{ padding: '8px', fontSize: 11, color: T.inkSoft }}>{(r.floors || []).join(', ')}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600 }}>{r.qty}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{_fmtEur2(r.revenue)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'Geist Mono', color: r.margem >= 0 ? T.green : T.red }}>{_fmtEur2(r.margem)}</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'Geist Mono', color: r.margemPct >= 5 ? T.green : r.margemPct >= 0 ? T.orange : T.red }}>{r.margemPct.toFixed(1)}%</td>
+                    <td style={{ padding: '8px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>{r.daysSold}</td>
+                    <td style={{ padding: '8px', textAlign: 'center' }}>
+                      <span style={{ fontSize: 9, padding: '2px 8px', background: status.bg, color: status.color, borderRadius: 999, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase', fontFamily: 'Geist Mono' }}>{status.label}</span>
+                    </td>
+                  </tr>
+                  {isExp && (
+                    <tr style={{ background: `${T.accent}04` }}>
+                      <td colSpan={9} style={{ padding: '12px 18px', borderTop: `1px solid ${T.lineSoft}` }}>
+                        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 11, color: T.inkSoft }}>
+                          {(r.slots || []).map((s, i) => (
+                            <div key={i}>
+                              <strong style={{ color: T.ink }}>{s.floorName} · {s.zoneName}</strong>
+                              {s.cartaz && <span style={{ marginLeft: 6 }}>cartaz: {s.cartaz}</span>}
+                              {s.state && <span style={{ marginLeft: 6, fontStyle: 'italic' }}>({s.state})</span>}
+                            </div>
+                          ))}
+                        </div>
+                        {/* Mini timeline */}
+                        {(() => {
+                          const dailyMap = new Map();
+                          for (const dr of allRowsForExpand) {
+                            if (normalizeEAN(dr.ean) !== r.eanKey) continue;
+                            if (!dailyMap.has(dr.date)) dailyMap.set(dr.date, { qty: 0, revenue: 0 });
+                            const e = dailyMap.get(dr.date);
+                            e.qty += dr.qty; e.revenue += dr.revenue;
+                          }
+                          const tl = Array.from(dailyMap.entries()).sort();
+                          if (tl.length === 0) return null;
+                          const maxQ = Math.max(...tl.map(([, v]) => v.qty));
+                          return (
+                            <div style={{ marginTop: 10 }}>
+                              <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Timeline</div>
+                              <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end', height: 40 }}>
+                                {tl.map(([date, v]) => (
+                                  <div key={date} title={`${date}: ${v.qty} unid. · ${_fmtEur2(v.revenue)}`} style={{
+                                    flex: 1, minWidth: 8,
+                                    height: `${maxQ > 0 ? (v.qty / maxQ) * 100 : 0}%`,
+                                    background: T.accent, opacity: 0.7, borderRadius: 1, cursor: 'help',
+                                  }} />
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────
