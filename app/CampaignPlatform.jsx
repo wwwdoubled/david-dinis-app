@@ -429,6 +429,26 @@ function _ddrFromFilename(name) {
   };
 }
 
+// v3.21.23: helpers para BD N / BD N-1
+function _catFromTipo(tipo) {
+  const m = String(tipo || '').toUpperCase();
+  if (m.includes('SMARTWATCH')) return 'smartwatch';
+  if (m.includes('TELECOM'))    return 'telecom';
+  if (m.includes('HARDWARE'))   return 'hardware';
+  if (m.includes('FOTO'))       return 'foto';
+  if (m.includes('RESTART'))    return 'restart';
+  if (m.includes('GAMING'))     return 'gaming';
+  if (m.includes('DRONE'))      return 'drone';
+  if (m.includes('MOB'))        return 'mob';
+  if (/\bTV\b/.test(m))         return 'tv';
+  return 'other';
+}
+function _dayFromSerial(serial) {
+  const ms = (Number(serial) - 25569) * 86400 * 1000;
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? 0 : d.getUTCDate();
+}
+
 function parsePenetrationExcel(file, onProgress, opts = {}) {
   const sellerStoreFilter = (opts.sellerStoreFilter || 'AVEIRO').toUpperCase();
   return new Promise((resolve, reject) => {
@@ -442,7 +462,8 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           type: 'array', cellDates: false,
           // v3.21.16: análise profunda — 10 sheets parsadas (~96MB total, mas
           // só as sheets pequenas/médias; BD* e PIVOT* gigantes ficam de fora).
-          sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA', 'RESUMO DIA', 'TP Escalões', 'TOTAL VIM', 'Churn Loja', 'Churn', 'AUX_1', 'Aux_Target', 'BD TT SEGUROS'],
+          // v3.21.23: BD N + BD N-1 → daily real por loja (RESUMO DIA é só company-wide)
+          sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA', 'RESUMO DIA', 'TP Escalões', 'TOTAL VIM', 'Churn Loja', 'Churn', 'AUX_1', 'Aux_Target', 'BD TT SEGUROS', 'BD N', 'BD N-1'],
         });
         const sh = wb.Sheets['RESUMO'];
         if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
@@ -900,6 +921,113 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           }
         }
 
+        // v3.21.23: BD N + BD N-1 → daily real por loja
+        onProgress?.({ stage: 'parse', message: 'A analisar BD N (transações)…' });
+        function _aggregateBD(sheet, target, targetAll) {
+          if (!sheet) return;
+          const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: null });
+          for (let r = 1; r < aoa.length; r++) {
+            const row = aoa[r]; if (!row) continue;
+            const store = String(row[1] || '').toUpperCase().trim();
+            if (!store || store === 'FNAC.PT') continue; // ignora online
+            const date = row[6]; if (!date) continue;
+            const qty = Number(row[7]) || 0; if (qty <= 0) continue;
+            const tipo = String(row[19] || '');
+            if (!tipo || tipo === 'VERIFICAR') continue;
+            const cat = _catFromTipo(tipo);
+            const kind =
+              tipo.startsWith('EQUIPAMENTO') ? 'equip' :
+              tipo.startsWith('SEGURO')      ? 'seg' :
+              tipo.startsWith('ADDON')       ? 'addon' : null;
+            if (!kind) continue;
+            // Per-store
+            if (!target.has(store)) target.set(store, new Map());
+            const m = target.get(store);
+            if (!m.has(date)) m.set(date, { equip: 0, seg: 0, addon: 0, byCat: {} });
+            const agg = m.get(date);
+            agg[kind] += qty;
+            if (!agg.byCat[cat]) agg.byCat[cat] = { equip: 0, seg: 0, addon: 0 };
+            agg.byCat[cat][kind] += qty;
+            // Companhia
+            if (!targetAll.has(date)) targetAll.set(date, { equip: 0, seg: 0, addon: 0, byCat: {} });
+            const allAgg = targetAll.get(date);
+            allAgg[kind] += qty;
+            if (!allAgg.byCat[cat]) allAgg.byCat[cat] = { equip: 0, seg: 0, addon: 0 };
+            allAgg.byCat[cat][kind] += qty;
+          }
+        }
+        const bdStoreMap = new Map();
+        const bdAllMap = new Map();
+        _aggregateBD(wb.Sheets['BD N'], bdStoreMap, bdAllMap);
+
+        const bdStoreMapN1 = new Map();
+        const bdAllMapN1 = new Map();
+        _aggregateBD(wb.Sheets['BD N-1'], bdStoreMapN1, bdAllMapN1);
+
+        // Formato compatível com DailyHeatmap actual: { day, total:{equip,seg,taxa}, tv:{equip,seg,taxa}, foto:..., ... }
+        function _mapToArray(dateMap) {
+          return Array.from(dateMap.entries())
+            .sort((a, b) => Number(a[0]) - Number(b[0]))
+            .map(([dateSerial, agg]) => {
+              const out = {
+                day: _dayFromSerial(dateSerial),
+                dateSerial: Number(dateSerial),
+                hasData: (agg.equip + agg.seg + agg.addon) > 0,
+                total: {
+                  equip: agg.equip,
+                  seg: agg.seg,
+                  addon: agg.addon,
+                  taxa: agg.equip > 0 ? agg.seg / agg.equip : 0,
+                },
+              };
+              for (const [cat, v] of Object.entries(agg.byCat)) {
+                out[cat] = {
+                  equip: v.equip,
+                  seg: v.seg,
+                  addon: v.addon,
+                  taxa: v.equip > 0 ? v.seg / v.equip : 0,
+                };
+              }
+              return out;
+            });
+        }
+        // Merge N-1 (mesmo dia do mês) → injecta equipN1/segN1/taxaN1 em cada day + cada categoria
+        function _mergeN1(currentArr, n1Arr) {
+          const n1ByDay = new Map(n1Arr.map(d => [d.day, d]));
+          for (const d of currentArr) {
+            const prev = n1ByDay.get(d.day);
+            if (!prev) continue;
+            d.total.equipN1 = prev.total.equip;
+            d.total.segN1   = prev.total.seg;
+            d.total.taxaN1  = prev.total.taxa;
+            // Categorias
+            for (const k of Object.keys(d)) {
+              if (k === 'day' || k === 'dateSerial' || k === 'hasData' || k === 'total') continue;
+              const pCat = prev[k];
+              if (!pCat) continue;
+              d[k].equipN1 = pCat.equip;
+              d[k].segN1   = pCat.seg;
+              d[k].taxaN1  = pCat.taxa;
+            }
+          }
+          return currentArr;
+        }
+        const dailyByStore = {};
+        for (const [store, dateMap] of bdStoreMap) {
+          dailyByStore[store] = _mapToArray(dateMap);
+        }
+        const dailyAllStores = _mapToArray(bdAllMap);
+        const dailyByStoreN1 = {};
+        for (const [store, dateMap] of bdStoreMapN1) {
+          dailyByStoreN1[store] = _mapToArray(dateMap);
+        }
+        const dailyAllStoresN1 = _mapToArray(bdAllMapN1);
+        // Aplica merge: cada loja current ↔ mesma loja N-1
+        for (const store of Object.keys(dailyByStore)) {
+          if (dailyByStoreN1[store]) _mergeN1(dailyByStore[store], dailyByStoreN1[store]);
+        }
+        _mergeN1(dailyAllStores, dailyAllStoresN1);
+
         const dd = _ddrFromFilename(file.name);
         resolve({
           month: dd.month || 'Mês não detectado',
@@ -923,6 +1051,11 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           familySummary,
           // v3.21.19: por colaborador
           uninsuredBySeller,
+          // v3.21.23: daily real por loja (de BD N)
+          dailyByStore,
+          dailyAllStores,
+          dailyByStoreN1,
+          dailyAllStoresN1,
         });
       } catch (err) { reject(err); }
     };
@@ -1608,10 +1741,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.22';
+const APP_VERSION = '3.21.23';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T03:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T04:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1621,6 +1754,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.23', date: '2026-05-28', summary: 'Tx Penetração: daily REAL por loja (BD N) + chart com selector + hover. (A) PROBLEMA: sheet RESUMO DIA é company-wide agregado (37,698 equip/mês ≈ TOTAL companhia, não Aveiro). (B) FONTE NOVA: parser passa a ler BD N (42k rows transações) e BD N-1 (45k) — classifica cada row por TIPO (col 19) em equip/seg/addon, agrupa por loja + data + categoria. Helper _catFromTipo + _dayFromSerial. (C) snap.dailyByStore[\'AVEIRO\'] = [{day, total:{equip,seg,addon,taxa,equipN1,segN1,taxaN1}, tv:{...}, foto:{...}, ...}] em formato compatível com a UI existente. (D) DailyHeatmap troca fonte para dailyByStore[storeKey] — valores agora são REALMENTE de Aveiro (~30-60 equip/dia em vez de ~1300). (E) DailyTrendChart: novo selector dropdown com todas as lojas + opção "Companhia (todas as lojas)". (F) Hover interactivo: mouseMove sobre SVG mostra linha vertical + highlight do ponto + tooltip flutuante com Dia, Equip, Seguros, Addons, TP, N-1. Vai do anti-pattern <title> simples para overlay React rico.' },
   { version: '3.21.22', date: '2026-05-28', summary: 'TP diária comparada com N-1 e companhia. (A) Diário: card de detalhe ganha 4 colunas TP — Aveiro (big 44px) · N-1 (28px com Δ vs Aveiro) · Companhia (28px com Δ). Equipamentos e Seguros movidos para linha separada abaixo. (B) Gráfico tendência (Visão Geral): adicionada linha tracejada de TP N-1 (cinza, ano anterior) + linha horizontal tracejada de TP Companhia média mensal (accent), referência constante. Legenda expandida com as 5 séries. Tooltips dos pontos mostram as 3 taxas. Nota: a "média companhia diária" usa o TP mensal total do RESUMO como referência — RESUMO DIA só tem dados da loja seleccionada, não há daily companhia disponível no ficheiro.' },
   { version: '3.21.21', date: '2026-05-28', summary: 'Fix: ReferenceError "uninsuredBySeller is not defined" no upload. A variável estava declarada dentro do if (shTT) mas usada no resolve() externamente. Movida para fora junto de uninsured/familySummary.' },
   { version: '3.21.20', date: '2026-05-28', summary: 'Tx Penetração: FIX TP diária + gráfico tendência. (A) BUG CRÍTICO no parser: ordem das colunas em RESUMO DIA estava errada após Smartwatch (faltava Restart, e MOB/DRONE/GAMING/TOTAL estavam swapados). O que aparecia como "TOTAL" era na verdade MOB ELETRICA. Mapping corrigido: TV(7), Foto(13), HW(19), Telecom(25), Smartwatch(31), Restart(37), Gaming(43), Drone(49), Mob(55), TOTAL(61). (B) Card de detalhe do dia no Diário redesenhado: TP Loja em fonte serif 48px com label explícito, 4 colunas (Dia · TP Loja · Equipamentos · Seguros+addons) com N-1 inline. (C) Novo gráfico DailyTrendChart na Visão Geral: SVG com barras duplas por dia (equip cinza, seguros accent) + linha TP laranja sobreposta, escala dupla (unidades à esquerda, % à direita), legenda + estatísticas agregadas. Inspirado no padrão do SalesView.' },
@@ -23658,8 +23792,8 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
       )}
 
       {/* v3.21.20: Gráfico de tendência diária — TP + equip + seguros */}
-      {Array.isArray(snap.daily) && snap.daily.filter(d => d.hasData).length > 0 && (
-        <DailyTrendChart snap={snap} ciaAvgTaxa={avgTaxa} />
+      {(snap.dailyByStore || snap.dailyAllStores || Array.isArray(snap.daily)) && (
+        <DailyTrendChart snap={snap} ciaAvgTaxa={avgTaxa} defaultStoreUpper={(myStoreRow?.name || 'AVEIRO').toUpperCase().trim()} />
       )}
 
       </>)}{/* fim overview */}
@@ -23911,9 +24045,35 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
 }
 
 // v3.21.20: Gráfico de tendência diária — TP linha + equip/seguros barras
-function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
-  const days = useMemo(() => (snap.daily || []).filter(d => d.hasData), [snap.daily]);
-  if (days.length === 0) return null;
+function DailyTrendChart({ snap, ciaAvgTaxa = 0, defaultStoreUpper = 'AVEIRO' }) {
+  // v3.21.23: Selector de loja + dados reais por loja (BD N)
+  const storeOptions = useMemo(() => {
+    const opts = Object.keys(snap.dailyByStore || {}).sort();
+    return opts;
+  }, [snap.dailyByStore]);
+  const [selectedStore, setSelectedStore] = useState(defaultStoreUpper);
+  useEffect(() => { setSelectedStore(defaultStoreUpper); }, [defaultStoreUpper]);
+
+  const isCompanhia = selectedStore === '__ALL__';
+  const days = useMemo(() => {
+    if (isCompanhia) {
+      return (snap.dailyAllStores || []).filter(d => d.hasData);
+    }
+    const arr = snap.dailyByStore?.[selectedStore];
+    if (Array.isArray(arr) && arr.length > 0) return arr.filter(d => d.hasData);
+    // Fallback: RESUMO DIA (apenas se BD N indisponível)
+    return (snap.daily || []).filter(d => d.hasData);
+  }, [snap, selectedStore, isCompanhia]);
+
+  // v3.21.23: hover interativo
+  const [hover, setHover] = useState(null);
+  const chartRef = useRef(null);
+
+  if (days.length === 0) return (
+    <div style={{ padding: '40px 24px', textAlign: 'center', color: T.inkMute, fontSize: 12, border: `1px dashed ${T.line}`, borderRadius: 8 }}>
+      Sem dados diários para esta loja.
+    </div>
+  );
 
   // Dimensões SVG
   const W = 880, H = 280;
@@ -23956,15 +24116,29 @@ function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
 
   return (
     <div style={{ marginBottom: 36 }}>
-      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <span>📈 Tendência diária — {days.length} dias</span>
-        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <span style={{ flex: 1, height: 1, background: T.line, minWidth: 20 }} />
+        {storeOptions.length > 0 && (
+          <select
+            value={selectedStore}
+            onChange={(e) => setSelectedStore(e.target.value)}
+            style={{
+              padding: '5px 10px', fontSize: 11, fontFamily: 'inherit',
+              background: T.bgEl, color: T.ink, border: `1px solid ${T.line}`,
+              borderRadius: 999, cursor: 'pointer', letterSpacing: 0, textTransform: 'none',
+            }}
+          >
+            {storeOptions.map(s => <option key={s} value={s}>{s}</option>)}
+            <option value="__ALL__">Companhia (todas as lojas)</option>
+          </select>
+        )}
         <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
-          {totalEquip} equip · {totalSeg} seg · TP médio {pctFmt(avgTP)}
+          {totalEquip} equip · {totalSeg} seg · TP {pctFmt(avgTP)}
         </span>
       </div>
 
-      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12, padding: '16px 12px 12px', overflowX: 'auto' }}>
+      <div style={{ background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12, padding: '16px 12px 12px', overflowX: 'auto', position: 'relative' }} ref={chartRef}>
         {/* Legenda */}
         <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 10, color: T.inkSoft, paddingLeft: PAD_L, flexWrap: 'wrap' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
@@ -23974,7 +24148,7 @@ function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
             <span style={{ display: 'inline-block', width: 10, height: 10, background: T.accent, borderRadius: 2 }} /> Seguros + addons
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ display: 'inline-block', width: 14, height: 2, background: T.orange, borderRadius: 1 }} /> TP Aveiro
+            <span style={{ display: 'inline-block', width: 14, height: 2, background: T.orange, borderRadius: 1 }} /> TP {isCompanhia ? 'Companhia' : selectedStore}
           </span>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <span style={{ display: 'inline-block', width: 14, height: 0, borderTop: `2px dashed ${T.inkSoft}` }} /> TP N-1 (ano anterior)
@@ -23986,7 +24160,20 @@ function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
           )}
         </div>
 
-        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: Math.max(W, days.length * 30), height: H, overflow: 'visible' }}>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          style={{ width: '100%', minWidth: Math.max(W, days.length * 30), height: H, overflow: 'visible' }}
+          onMouseMove={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const xPct = (e.clientX - rect.left) / rect.width;
+            const svgX = xPct * W;
+            if (svgX < PAD_L || svgX > W - PAD_R) { setHover(null); return; }
+            const i = Math.max(0, Math.min(days.length - 1, Math.round((svgX - PAD_L) / stepX)));
+            setHover({ i, mouseX: e.clientX - rect.left, mouseY: e.clientY - rect.top });
+          }}
+          onMouseLeave={() => setHover(null)}
+        >
           {/* Grid lines (TP %, escala direita) */}
           {gridSteps.map(g => {
             const y = tpY(g);
@@ -24079,7 +24266,77 @@ function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
           })}
           <text x={PAD_L} y={H - 2} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">unidades</text>
           <text x={W - PAD_R + 6} y={H - 2} fontSize={9} fill={T.inkMute} fontFamily="Geist Mono">TP %</text>
+
+          {/* v3.21.23: Hover — vertical line + highlight do ponto */}
+          {hover && days[hover.i] && (() => {
+            const d = days[hover.i];
+            const x = xScale(hover.i);
+            return (
+              <g pointerEvents="none">
+                <line x1={x} y1={PAD_T} x2={x} y2={PAD_T + chartH} stroke={T.ink} strokeWidth={1} strokeDasharray="3 3" opacity={0.4} />
+                <circle cx={x} cy={tpY(d.total?.taxa || 0)} r={6} fill="none" stroke={T.orange} strokeWidth={2} />
+              </g>
+            );
+          })()}
         </svg>
+
+        {/* v3.21.23: Tooltip overlay (absoluto, segue cursor) */}
+        {hover && days[hover.i] && (() => {
+          const d = days[hover.i];
+          const eq = d.total?.equip || 0;
+          const sg = d.total?.seg || 0;
+          const ad = d.total?.addon || 0;
+          const tp = d.total?.taxa || 0;
+          // Calcula posição evitando saída do container
+          const containerW = chartRef.current?.clientWidth || 600;
+          const TOOLTIP_W = 240;
+          const left = Math.min(Math.max(hover.mouseX - TOOLTIP_W / 2, 8), containerW - TOOLTIP_W - 8);
+          return (
+            <div style={{
+              position: 'absolute',
+              left, top: Math.max(8, hover.mouseY - 130),
+              width: TOOLTIP_W,
+              background: T.bg,
+              border: `1px solid ${T.line}`,
+              borderRadius: 8,
+              padding: '10px 12px',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              pointerEvents: 'none',
+              zIndex: 10,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8 }}>
+                <span className="mono" style={{ fontSize: 10, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                  Dia {String(d.day).padStart(2, '0')}
+                </span>
+                <span style={{ fontSize: 18, fontWeight: 600, color: _tpColor(tp), fontFamily: 'Geist Mono' }}>
+                  {pctFmt(tp)}
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 11 }}>
+                <div>
+                  <div style={{ color: T.inkMute, fontSize: 9, fontFamily: 'Geist Mono', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Equip.</div>
+                  <div style={{ color: T.ink, fontWeight: 600, fontFamily: 'Geist Mono' }}>{eq}</div>
+                </div>
+                <div>
+                  <div style={{ color: T.inkMute, fontSize: 9, fontFamily: 'Geist Mono', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Seguros</div>
+                  <div style={{ color: T.accent, fontWeight: 600, fontFamily: 'Geist Mono' }}>{sg}</div>
+                </div>
+                {ad > 0 && (
+                  <div>
+                    <div style={{ color: T.inkMute, fontSize: 9, fontFamily: 'Geist Mono', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Addons</div>
+                    <div style={{ color: T.inkSoft, fontWeight: 600, fontFamily: 'Geist Mono' }}>{ad}</div>
+                  </div>
+                )}
+                {d.total?.taxaN1 != null && (
+                  <div>
+                    <div style={{ color: T.inkMute, fontSize: 9, fontFamily: 'Geist Mono', textTransform: 'uppercase', letterSpacing: '0.08em' }}>N-1</div>
+                    <div style={{ color: T.inkSoft, fontWeight: 600, fontFamily: 'Geist Mono' }}>{pctFmt(d.total.taxaN1 || 0)}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -24088,10 +24345,17 @@ function DailyTrendChart({ snap, ciaAvgTaxa = 0 }) {
 // v3.21.16: Heatmap diário N vs N-1 por categoria
 function DailyHeatmap({ snap, myStoreRow, ciaAvgTaxa = 0 }) {
   const [hideEmpty, setHideEmpty] = useStoredState('penetration.daily.hideEmpty', true);
+  // v3.21.23: Fonte real por loja (BD N) — não a sheet RESUMO DIA company-wide
+  const storeKey = (myStoreRow?.name || 'AVEIRO').toUpperCase().trim();
+  const sourceArr = useMemo(() => {
+    const fromBD = snap.dailyByStore?.[storeKey];
+    if (Array.isArray(fromBD) && fromBD.length > 0) return fromBD;
+    // Fallback: RESUMO DIA (company-wide) — só se BD N indisponível
+    return Array.isArray(snap.daily) ? snap.daily : [];
+  }, [snap, storeKey]);
   const days = useMemo(() => {
-    if (!Array.isArray(snap.daily)) return [];
-    return hideEmpty ? snap.daily.filter(d => d.hasData) : snap.daily;
-  }, [snap.daily, hideEmpty]);
+    return hideEmpty ? sourceArr.filter(d => d.hasData) : sourceArr;
+  }, [sourceArr, hideEmpty]);
   // v3.21.20: ordem corrigida — Restart está entre Smartwatch e Gaming na sheet RESUMO DIA
   const cats = [
     { key: 'tv',         label: 'TV' },
@@ -24107,7 +24371,7 @@ function DailyHeatmap({ snap, myStoreRow, ciaAvgTaxa = 0 }) {
   ];
 
   // v3.21.17: Dia seleccionado — default = ontem se disponível, senão último com dados
-  const allDaysWithData = useMemo(() => (snap.daily || []).filter(d => d.hasData), [snap.daily]);
+  const allDaysWithData = useMemo(() => sourceArr.filter(d => d.hasData), [sourceArr]);
   const defaultDay = useMemo(() => {
     if (allDaysWithData.length === 0) return null;
     const today = new Date();
@@ -24127,8 +24391,8 @@ function DailyHeatmap({ snap, myStoreRow, ciaAvgTaxa = 0 }) {
   useEffect(() => { setSelectedDay(defaultDay); }, [defaultDay]);
 
   const selectedDayData = useMemo(
-    () => (snap.daily || []).find(d => d.day === selectedDay) || null,
-    [snap.daily, selectedDay]
+    () => sourceArr.find(d => d.day === selectedDay) || null,
+    [sourceArr, selectedDay]
   );
 
   // Totais por categoria
@@ -24164,6 +24428,9 @@ function DailyHeatmap({ snap, myStoreRow, ciaAvgTaxa = 0 }) {
       <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
         <span>📅 Análise diária · {myStoreRow.name} · {snap.month}</span>
         <span style={{ flex: 1, height: 1, background: T.line }} />
+        <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+          fonte: BD N (transações reais por loja)
+        </span>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 10, textTransform: 'none', letterSpacing: 0, color: T.inkSoft }}>
           <input type="checkbox" checked={hideEmpty} onChange={e => setHideEmpty(e.target.checked)} />
           Esconder dias vazios
