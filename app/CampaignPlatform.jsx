@@ -815,7 +815,9 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           }
           // Identificar uninsured: tickets onde #seguros < #equips
           const uninsuredMap = new Map();
-          for (const [, t] of ticketMap) {
+          // v3.21.19: agregado por vendedor — quais artigos cada um vendeu sem cobertura
+          const uninsuredBySeller = {};
+          for (const [ticketId, t] of ticketMap) {
             if (t.equips.length === 0) continue;
             if (t.segs.length >= t.equips.length) continue;
             const uncoveredCount = t.equips.length - t.segs.length;
@@ -824,16 +826,51 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
             for (const eq of exposed) {
               const key = eq.ean || eq.desc;
               if (!key) continue;
+              const family = _famFromDesc(eq.desc, eq.fam1);
               const prev = uninsuredMap.get(key) || {
                 ean: eq.ean, desc: eq.desc, fam1: eq.fam1, fam2: eq.fam2,
-                qty: 0, tickets: 0, family: _famFromDesc(eq.desc, eq.fam1),
+                qty: 0, tickets: 0, family,
                 topSellers: new Map(),
               };
               prev.qty += eq.qty;
               prev.tickets += 1;
               if (eq.seller) prev.topSellers.set(eq.seller, (prev.topSellers.get(eq.seller) || 0) + 1);
               uninsuredMap.set(key, prev);
+              // v3.21.19: aggregação por vendedor
+              const sellerKey = (eq.seller || '').toUpperCase().trim();
+              if (!sellerKey) continue;
+              if (!uninsuredBySeller[sellerKey]) {
+                uninsuredBySeller[sellerKey] = {
+                  totalQty: 0, totalItems: 0, byFamily: {}, items: [],
+                };
+              }
+              const bs = uninsuredBySeller[sellerKey];
+              bs.totalQty += eq.qty;
+              bs.byFamily[family] = (bs.byFamily[family] || 0) + eq.qty;
+              bs.items.push({
+                ean: eq.ean, desc: eq.desc, family,
+                qty: eq.qty, ticket: ticketId, date: t.date,
+              });
             }
+          }
+          // Consolida items por seller (agregar por EAN) e ordena
+          for (const sk of Object.keys(uninsuredBySeller)) {
+            const bs = uninsuredBySeller[sk];
+            const byEan = new Map();
+            for (const it of bs.items) {
+              const k = it.ean || it.desc;
+              if (!k) continue;
+              const prev = byEan.get(k);
+              if (prev) {
+                prev.qty += it.qty;
+                prev.tickets += 1;
+                if (it.date && (!prev.lastDate || it.date > prev.lastDate)) prev.lastDate = it.date;
+              } else {
+                byEan.set(k, { ean: it.ean, desc: it.desc, family: it.family, qty: it.qty, tickets: 1, lastDate: it.date || null });
+              }
+            }
+            bs.items = Array.from(byEan.values()).sort((a, b) => b.qty - a.qty).slice(0, 50);
+            bs.totalItems = bs.items.length;
           }
           for (const v of uninsuredMap.values()) {
             // Top vendedor (1)
@@ -878,6 +915,8 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           // v3.21.18: equipamentos sem seguro
           uninsured,
           familySummary,
+          // v3.21.19: por colaborador
+          uninsuredBySeller,
         });
       } catch (err) { reject(err); }
     };
@@ -1563,10 +1602,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.18';
+const APP_VERSION = '3.21.19';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T00:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T01:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1576,6 +1615,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.19', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem seguro por colaborador. (A) Parser estendido — durante o loop de tickets uncovered, popular snap.uninsuredBySeller[NOME] = { totalQty, byFamily, items:[{ean,desc,family,qty,tickets,lastDate}] }. Consolida por EAN, ordena por qty desc, max 50 items por vendedor. (B) SellerExpand (tab Equipa PTS, click numa linha) ganha nova secção 🚨 "Equipamentos vendidos sem seguro" com header (total + pills por família) e tabela (Família/Descrição/EAN/Qty/Talões). Toggle "ver todos / top 15". (C) Novo insight em Recomendações: "Top 3 PTS com mais equipamentos sem cobertura" — útil para coaching 1-a-1 focado.' },
   { version: '3.21.18', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem cobertura. (A) Parser estendido com BD TT SEGUROS (~20k linhas transacções) filtrado por loja. Heurística: em cada talão, conta equipamentos vs apólices vendidas (SEG/PP/Cartão Plano Proteção); excedentes contam como "sem cobertura". (B) Família inferida via regex no des_art (TELM→Telecom, OLED→TV, WATCH→Smartwatch, DRONE→Drone, etc.) com fallback para cod_fam (9730=Telecom). (C) Nova secção UninsuredBlock no tab Categorias: cards por família ordenados por contagem (click expande tabela com top 30 artigos: EAN, descrição, quant, talões, top vendedor). (D) Insight automático: "X equipamentos <família> sem cobertura" quando o top família tem ≥10 unidades.' },
   { version: '3.21.17', date: '2026-05-27', summary: 'Tx Penetração diário — selector de dia + foco. (A) Default auto-pick: se o snapshot é do mês actual escolhe ONTEM; senão último dia com dados. (B) Pill bar de dias no topo (cor consoante TP) — click para seleccionar. (C) Card de detalhe grande do dia escolhido: TP total em fonte serif, contagem seg/equip, Δ vs N-1 — e 8 sub-cards por categoria (TV/Foto/HW/Telecom/Smartwatch/Mob/Drone/Gaming) com TP+seg/equip+Δ vs N-1, cores conforme nível. (D) Heatmap mensal abaixo continua disponível; linha do dia seleccionado fica destacada (borda+bg accent) e click numa linha muda o dia seleccionado.' },
   { version: '3.21.16', date: '2026-05-27', summary: 'Tx Penetração: análise profunda multi-sheet — heatmap diário, equipa PTS, escalões, VIM/churn. (A) Parser estendido para 10 sheets: + RESUMO DIA, TP Escalões, TOTAL VIM, Churn Loja, Churn, Aux_Target, AUX_1. Sellers ganham 15 campos novos (vimTotal, vimTotalSCB, chargeBack, bonifBimestral, bonifAddon, challengeSafe, apolicesAnuladas, churnPct, pmcApolice, etc.). (B) PenetrationBreakdown reorganizado em 5 sub-tabs internos: Visão Geral · Diário · Equipa PTS · Categorias & Escalões · Recomendações. (C) Overview: KPIs novos VIM Total / Seguros+Addons € / Charge-back / Churn 6m + cluster. (D) Daily: novo DailyHeatmap — grelha calendário cor por TP (verde/laranja/vermelho), N vs N-1 visível, totais mensais no topo, toggle "esconder dias vazios". (E) Team PTS: TeamPTSAggregates (4 KPIs equipa) + SellersTable filtrada por dept PTS (/^pt/i case-insensitive, exclui SERVICOS/BACK OFFICE/CLINICA), expansível com breakdown por categoria (heatmap mini) + extras (DDR, Extra Seg/Cloud, Telecom <399/>399, À la carte, Challenge Safe). Colunas novas: VIM €, CB €, Líquido €, Bonif. €. Sort por VIM líquido por default, click em qualquer header ordena. (F) Categorias: novo PriceScalesBlock — TP por escalão de preço telecom com barra de peso% (volume da companhia). (G) Insights enriquecidos: vendedores VIM negativo, top 3 performers, gap no pior escalão, churn loja vs companhia. (H) Helpers _tpColor, _tpBg, _isPTS, _fmtEur reutilizáveis.' },
@@ -23388,6 +23428,28 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
       }
     }
 
+    // v3.21.19: Top 3 PTS com mais equipamentos sem seguro (coaching focus)
+    if (snap.uninsuredBySeller && Object.keys(snap.uninsuredBySeller).length > 0) {
+      // Cruza com sellers PTS (case-insensitive match)
+      const ptsNames = new Set(ptsSellers.map(s => (s.name || '').toUpperCase().trim()));
+      const rank = Object.entries(snap.uninsuredBySeller)
+        .filter(([k]) => ptsNames.has(k))
+        .map(([k, v]) => ({ name: k, qty: v.totalQty }))
+        .sort((a, b) => b.qty - a.qty)
+        .slice(0, 3);
+      if (rank.length > 0 && rank[0].qty >= 5) {
+        out.push({
+          kind: 'info',
+          title: 'Top equipamentos sem seguro · PTS',
+          body: rank.map((r, i) => {
+            const first = r.name.split(' ')[0];
+            const last = r.name.split(' ').slice(-1)[0];
+            return `${i + 1}. ${first} ${last !== first ? last[0] + '.' : ''} (${r.qty})`;
+          }).join(' · ') + '. Click no vendedor em Equipa PTS para ver a lista.',
+        });
+      }
+    }
+
     // v3.21.16: Churn loja vs companhia
     const myChurnVal = snap.churn?.[myStoreRow.name.toUpperCase()]?.taxa6m || 0;
     const allChurn = Object.entries(snap.churn || {}).filter(([k]) => k !== 'TOTAL' && k !== 'GRAND TOTAL');
@@ -24430,7 +24492,7 @@ function SellersTable({ snap, sellersPTS, budget, workdays }) {
                   {isExp && (
                     <tr style={{ background: `${T.accent}06` }}>
                       <td colSpan={13} style={{ padding: '14px 18px', borderTop: `1px solid ${T.lineSoft}` }}>
-                        <SellerExpand seller={s} />
+                        <SellerExpand seller={s} snap={snap} />
                       </td>
                     </tr>
                   )}
@@ -24445,7 +24507,8 @@ function SellersTable({ snap, sellersPTS, budget, workdays }) {
 }
 
 // v3.21.16: Detalhe expandido de um vendedor — breakdown por categoria
-function SellerExpand({ seller }) {
+function SellerExpand({ seller, snap }) {
+  const [showAllUn, setShowAllUn] = useState(false);
   const cats = [
     { key: 'tv',         label: 'TV' },
     { key: 'foto',       label: 'Foto' },
@@ -24457,6 +24520,9 @@ function SellerExpand({ seller }) {
     { key: 'gaming',     label: 'Gaming' },
     { key: 'restart',    label: 'Restart' },
   ];
+  // v3.21.19: equipamentos sem seguro deste vendedor
+  const sellerKey = (seller.name || '').toUpperCase().trim();
+  const myUn = snap?.uninsuredBySeller?.[sellerKey] || null;
   return (
     <div>
       <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 12 }}>
@@ -24493,6 +24559,64 @@ function SellerExpand({ seller }) {
           <span style={{ color: T.inkMute }}>Challenge Safe: <strong style={{ color: T.accent, fontFamily: 'Geist Mono' }}>{seller.challengeSafe}</strong></span>
         )}
       </div>
+
+      {/* v3.21.19: Equipamentos vendidos sem seguro */}
+      {myUn && myUn.totalQty > 0 && (
+        <div style={{ marginTop: 20, padding: '14px 16px', background: `${T.orange}10`, border: `1px solid ${T.orange}40`, borderRadius: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: T.orange }}>
+              🚨 {myUn.totalQty} {myUn.totalQty === 1 ? 'equipamento' : 'equipamentos'} sem seguro · {myUn.totalItems} {myUn.totalItems === 1 ? 'artigo' : 'artigos'} distintos
+            </span>
+            <span style={{ flex: 1 }} />
+            {Object.entries(myUn.byFamily).sort((a, b) => b[1] - a[1]).map(([fam, n]) => (
+              <span key={fam} style={{
+                fontSize: 9, padding: '2px 7px',
+                background: T.bgEl, color: T.inkSoft,
+                border: `1px solid ${T.lineSoft}`,
+                borderRadius: 999, fontFamily: 'Geist Mono',
+              }}>
+                {fam} <strong style={{ color: T.orange, marginLeft: 4 }}>{n}</strong>
+              </span>
+            ))}
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.lineSoft}` }}>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 500 }}>Família</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 500 }}>Descrição</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'left', fontWeight: 500 }}>EAN</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 500 }}>Qty</th>
+                  <th style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 500 }}>Talões</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(showAllUn ? myUn.items : myUn.items.slice(0, 15)).map((it, i) => (
+                  <tr key={`${it.ean}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                    <td style={{ padding: '5px 8px', fontSize: 10, color: T.inkSoft }}>{it.family}</td>
+                    <td style={{ padding: '5px 8px', fontSize: 11 }} title={it.desc}>
+                      {it.desc.length > 55 ? it.desc.slice(0, 53) + '…' : it.desc}
+                    </td>
+                    <td style={{ padding: '5px 8px', fontFamily: 'Geist Mono', fontSize: 10, color: T.inkSoft }}>{it.ean || '—'}</td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: T.orange }}>{it.qty}</td>
+                    <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 10 }}>{it.tickets}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {myUn.items.length > 15 && (
+            <button onClick={() => setShowAllUn(v => !v)}
+              style={{
+                marginTop: 8, padding: '5px 12px', fontSize: 10, fontFamily: 'inherit',
+                background: 'transparent', color: T.orange,
+                border: `1px solid ${T.orange}40`, borderRadius: 6, cursor: 'pointer',
+              }}>
+              {showAllUn ? `Mostrar só top 15` : `Ver todos (${myUn.items.length})`}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
