@@ -439,7 +439,10 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
         // Truque chave: sheets:['RESUMO','VENDEDOR_TOTAL'] reduz dramaticamente
         // a memória — só carrega estas duas sheets. Ficheiro tem 25 sheets, ~96MB.
         const wb = XLSX.read(new Uint8Array(e.target.result), {
-          type: 'array', sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA'], cellDates: false,
+          type: 'array', cellDates: false,
+          // v3.21.16: análise profunda — 10 sheets parsadas (~96MB total, mas
+          // só as sheets pequenas/médias; BD* e PIVOT* gigantes ficam de fora).
+          sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA', 'RESUMO DIA', 'TP Escalões', 'TOTAL VIM', 'Churn Loja', 'Churn', 'AUX_1', 'Aux_Target'],
         });
         const sh = wb.Sheets['RESUMO'];
         if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
@@ -504,6 +507,7 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
               nif: String(row[8] || '').trim(),
               carga: String(row[10] || '').trim(),
               dept: String(row[12] || '').trim(),
+              aux1: String(row[13] || '').trim(), // loja repetida
               taxaLoja: Number(row[19]) || 0,
               taxaAddons: Number(row[15]) || 0,
               telecomU: Number(row[16]) || 0,  // <399€
@@ -525,7 +529,24 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
               smartwatch:{ v: Number(row[40]) || 0, s: Number(row[41]) || 0 },
               mob:       { v: Number(row[43]) || 0, s: Number(row[44]) || 0 },
               gaming:    { v: Number(row[46]) || 0, s: Number(row[47]) || 0 },
-              churnPct:  Number(row[80]) || 0,
+              // v3.21.16: campos adicionais — bonificações, PMC, charge-back, VIM
+              tpAddon:        Number(row[56]) || 0,
+              outrasFamilias: Number(row[65]) || 0,
+              totalBimestrais: Number(row[69]) || 0,
+              totalSeguros:    Number(row[70]) || 0,
+              aLaCarte:        Number(row[71]) || 0,
+              aLaCarteValor:   Number(row[72]) || 0,
+              objetivoBimestral: Number(row[73]) || 0,
+              bonifLoja:       Number(row[74]) || 0,
+              bonifBimestral:  Number(row[75]) || 0,
+              bonifAddon:      Number(row[76]) || 0,
+              challengeSafe:   Number(row[77]) || 0,
+              chargeBack:      Number(row[79]) || 0,  // valor de CB
+              churnPct:        Number(row[80]) || 0,
+              valorDescontoCB: Number(row[81]) || 0,
+              vimTotalSCB:     Number(row[82]) || 0,  // VIM total sem charge-back
+              pmcApolice:      Number(row[84]) || 0,
+              vimTotal:        Number(row[85]) || 0,  // VIM total bruto
             });
           }
           // Ordena por TP desc
@@ -552,6 +573,212 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
             };
           }
         }
+        // v3.21.16: RESUMO DIA — dados diários N vs N-1 por categoria
+        onProgress?.({ stage: 'parse', message: 'A ler dados diários…' });
+        const daily = [];
+        const shDay = wb.Sheets['RESUMO DIA'];
+        if (shDay) {
+          const aoaDay = XLSX.utils.sheet_to_json(shDay, { header: 1, blankrows: false, defval: null });
+          // Estrutura: R7..end = "Dia X" rows
+          // Col 2: "Dia X", col 3: data N (excel serial), col 4: data N-1
+          // Por categoria (TV, Foto, HW, Telecom, Smartwatch, Mob, Drone, Gaming, Total):
+          //   N: equip(7), seg(8), tp(9) → próximo bloco a +3
+          //   N-1: equip(10), seg(11), tp(12)
+          //   FOTO N: equip(13), seg(14), tp(15) | FOTO N-1: 16/17/18
+          //   HW: 19/20/21 | 22/23/24
+          //   Telecom: 25/26/27 | 28/29/30
+          //   Smartwatch: 31/32/33 | 34/35/36
+          //   Drone: 37/38/39 | 40/41/42  (verificar com Excel layout)
+          //   Continua até col ~72
+          // Para simplificar: extrair pares (N, N-1) por categoria conhecida.
+          const catCols = [
+            { key: 'tv',         n: 7,  n1: 10 },
+            { key: 'foto',       n: 13, n1: 16 },
+            { key: 'hardware',   n: 19, n1: 22 },
+            { key: 'telecom',    n: 25, n1: 28 },
+            { key: 'smartwatch', n: 31, n1: 34 },
+            { key: 'mob',        n: 37, n1: 40 },
+            { key: 'drone',      n: 43, n1: 46 },
+            { key: 'gaming',     n: 49, n1: 52 },
+            { key: 'total',      n: 55, n1: 58 },
+          ];
+          for (let r = 7; r < aoaDay.length; r++) {
+            const row = aoaDay[r];
+            if (!row) continue;
+            const dia = String(row[2] || '').trim();
+            if (!/^Dia\s*\d+/.test(dia)) continue;
+            const dayNum = parseInt(dia.replace(/\D/g, ''), 10);
+            if (!dayNum) continue;
+            const entry = { day: dayNum, dateN: row[3], dateN1: row[4], dow: row[5] };
+            let hasData = false;
+            for (const c of catCols) {
+              const equip   = Number(row[c.n]) || 0;
+              const seg     = Number(row[c.n + 1]) || 0;
+              const taxa    = Number(row[c.n + 2]) || 0;
+              const equipN1 = Number(row[c.n1]) || 0;
+              const segN1   = Number(row[c.n1 + 1]) || 0;
+              const taxaN1  = Number(row[c.n1 + 2]) || 0;
+              entry[c.key] = { equip, seg, taxa, equipN1, segN1, taxaN1 };
+              if (equip > 0 || seg > 0) hasData = true;
+            }
+            entry.hasData = hasData;
+            daily.push(entry);
+          }
+        }
+
+        // v3.21.16: TOTAL VIM — VIM/comissão por loja
+        const vim = {};
+        const shV2 = wb.Sheets['TOTAL VIM'];
+        if (shV2) {
+          const aoaV2 = XLSX.utils.sheet_to_json(shV2, { header: 1, blankrows: false, defval: null });
+          // R2..end = dados; Col 0 = loja, 1 = BIMESTRAL, 2 = OUTROS, 3 = Tekkie, 4 = TOTAL
+          // Col 7 = TP, 8 = Seguros (€), 9 = Addons (€), 10 = Total (€), 11 = Apolices, 15 = Apolices (alt), 16 = VIM Media
+          // Col 20 = loja (repeat), 21 = Seguros €, 22 = Addons €, 23 = Total €
+          for (let r = 2; r < aoaV2.length; r++) {
+            const row = aoaV2[r];
+            if (!row || !row[0]) continue;
+            const lojaName = String(row[0]).toUpperCase().trim();
+            if (lojaName === 'TOTAL') continue;
+            vim[lojaName] = {
+              bimestral:    Number(row[1]) || 0,
+              outros:       Number(row[2]) || 0,
+              tekkie:       Number(row[3]) || 0,
+              totalUnid:    Number(row[4]) || 0,
+              tpRel:        Number(row[7]) || 0,
+              segurosEur:   Number(row[8]) || 0,
+              addonsEur:    Number(row[9]) || 0,
+              totalEur:     Number(row[10]) || 0,
+              apolices:     Number(row[11]) || 0,
+              vimMediaApolice: Number(row[16]) || 0,
+              segEurAlt:    Number(row[21]) || 0,
+              addonsEurAlt: Number(row[22]) || 0,
+              totalEurAlt:  Number(row[23]) || 0,
+            };
+          }
+        }
+
+        // v3.21.16: Churn Loja (col 4 = loja, col 5 = taxa 6m)
+        const churn = {};
+        const shC = wb.Sheets['Churn Loja'];
+        if (shC) {
+          const aoaC = XLSX.utils.sheet_to_json(shC, { header: 1, blankrows: false, defval: null });
+          for (let r = 2; r < aoaC.length; r++) {
+            const row = aoaC[r];
+            if (!row || !row[4]) continue;
+            const lojaName = String(row[4]).toUpperCase().trim();
+            churn[lojaName] = { taxa6m: Number(row[5]) || 0 };
+          }
+        }
+
+        // v3.21.16: Churn por colaborador (sheet Churn — col 7=NIF, 8=Apolices, 9=Taxa)
+        const sellerChurn = {};
+        const shCh = wb.Sheets['Churn'];
+        if (shCh) {
+          const aoaCh = XLSX.utils.sheet_to_json(shCh, { header: 1, blankrows: false, defval: null });
+          for (let r = 1; r < aoaCh.length; r++) {
+            const row = aoaCh[r];
+            if (!row || !row[7]) continue;
+            const nif = String(row[7]).trim();
+            if (nif === 'Sem Dados') continue;
+            sellerChurn[nif] = {
+              apolices: Number(row[8]) || 0,
+              taxa:     Number(row[9]) || 0,
+            };
+          }
+        }
+
+        // v3.21.16: TP Escalões — para AVEIRO (apenas escalão Telecom é detalhado)
+        const priceScales = { _meta: 'TP por escalão de preço telecom' };
+        const shPE = wb.Sheets['TP Escalões'];
+        if (shPE) {
+          const aoaPE = XLSX.utils.sheet_to_json(shPE, { header: 1, blankrows: false, defval: null });
+          // Col 5 = Escalão (global, lista única), col 6 = equip companhia, col 7 = apolices, col 10 = TP
+          // Col 0 = escalão (per loja), 1 = loja, 2 = equip, 3 = seg
+          const globalScales = [];
+          for (let r = 1; r < aoaPE.length; r++) {
+            const row = aoaPE[r];
+            if (!row) continue;
+            // Global (col 5)
+            if (row[5] && typeof row[5] === 'string' && row[5].includes('-')) {
+              globalScales.push({
+                band: row[5],
+                equipCia: Number(row[6]) || 0,
+                segCia:   Number(row[7]) || 0,
+                pesoEquip: Number(row[8]) || 0,
+                pesoSeg:   Number(row[9]) || 0,
+                tpCia:    Number(row[10]) || 0,
+              });
+            }
+          }
+          priceScales.global = globalScales;
+          // Per-loja: extrair só AVEIRO
+          priceScales.byStore = {};
+          let currentBand = null;
+          for (let r = 1; r < aoaPE.length; r++) {
+            const row = aoaPE[r];
+            if (!row) continue;
+            if (row[0] && typeof row[0] === 'string' && /\(\d/.test(row[0])) currentBand = row[0];
+            const loja = row[1] ? String(row[1]).toUpperCase().trim() : null;
+            if (loja && currentBand) {
+              if (!priceScales.byStore[loja]) priceScales.byStore[loja] = [];
+              priceScales.byStore[loja].push({
+                band: currentBand,
+                equip: Number(row[2]) || 0,
+                seg:   Number(row[3]) || 0,
+              });
+            }
+          }
+        }
+
+        // v3.21.16: AUX_1 — cluster por loja (col 20 = loja, 24/25 = loja → cluster?)
+        // Estrutura: col 24 = Loja, 25 = Coach. col 17 = LOJA (segunda lista)
+        const clusters = {};
+        const shA1 = wb.Sheets['AUX_1'];
+        if (shA1) {
+          const aoaA1 = XLSX.utils.sheet_to_json(shA1, { header: 1, blankrows: false, defval: null });
+          // Tenta col 24+25 (Loja → Coach)
+          for (let r = 1; r < aoaA1.length; r++) {
+            const row = aoaA1[r];
+            if (!row) continue;
+            if (row[24] && row[25]) {
+              const loja = String(row[24]).toUpperCase().trim();
+              clusters[loja] = String(row[25]).trim();
+            }
+          }
+        }
+
+        // v3.21.16: Aux_Target — target diário por loja
+        const targetsDaily = {};
+        const shAT = wb.Sheets['Aux_Target'];
+        if (shAT) {
+          const aoaAT = XLSX.utils.sheet_to_json(shAT, { header: 1, blankrows: false, defval: null });
+          // R0 = headers (col 16 = "Data", col 17+ = lojas)
+          const headerRow = aoaAT[0] || [];
+          const lojaCols = [];
+          for (let c = 17; c < headerRow.length; c++) {
+            if (headerRow[c] && typeof headerRow[c] === 'string') {
+              lojaCols.push({ col: c, loja: String(headerRow[c]).toUpperCase().trim() });
+            }
+          }
+          // R1..end = linhas de data
+          for (let r = 1; r < aoaAT.length; r++) {
+            const row = aoaAT[r];
+            if (!row || !row[16]) continue;
+            const dateSerial = row[16];
+            // Excel serial → ISO date (1900-01-01 origin)
+            const ms = (Number(dateSerial) - 25569) * 86400 * 1000;
+            const d = new Date(ms);
+            if (isNaN(d.getTime())) continue;
+            const iso = d.toISOString().slice(0, 10);
+            for (const { col, loja } of lojaCols) {
+              if (row[col] != null) {
+                if (!targetsDaily[loja]) targetsDaily[loja] = {};
+                targetsDaily[loja][iso] = Number(row[col]) || 0;
+              }
+            }
+          }
+        }
+
         const dd = _ddrFromFilename(file.name);
         resolve({
           month: dd.month || 'Mês não detectado',
@@ -562,6 +789,14 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           sellers,
           sellerStoreFilter,
           budgets,
+          // v3.21.16: novos campos
+          daily,
+          vim,
+          churn,
+          sellerChurn,
+          priceScales,
+          clusters,
+          targetsDaily,
         });
       } catch (err) { reject(err); }
     };
@@ -1247,10 +1482,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.15';
+const APP_VERSION = '3.21.16';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-27T21:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-27T22:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1260,6 +1495,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.16', date: '2026-05-27', summary: 'Tx Penetração: análise profunda multi-sheet — heatmap diário, equipa PTS, escalões, VIM/churn. (A) Parser estendido para 10 sheets: + RESUMO DIA, TP Escalões, TOTAL VIM, Churn Loja, Churn, Aux_Target, AUX_1. Sellers ganham 15 campos novos (vimTotal, vimTotalSCB, chargeBack, bonifBimestral, bonifAddon, challengeSafe, apolicesAnuladas, churnPct, pmcApolice, etc.). (B) PenetrationBreakdown reorganizado em 5 sub-tabs internos: Visão Geral · Diário · Equipa PTS · Categorias & Escalões · Recomendações. (C) Overview: KPIs novos VIM Total / Seguros+Addons € / Charge-back / Churn 6m + cluster. (D) Daily: novo DailyHeatmap — grelha calendário cor por TP (verde/laranja/vermelho), N vs N-1 visível, totais mensais no topo, toggle "esconder dias vazios". (E) Team PTS: TeamPTSAggregates (4 KPIs equipa) + SellersTable filtrada por dept PTS (/^pt/i case-insensitive, exclui SERVICOS/BACK OFFICE/CLINICA), expansível com breakdown por categoria (heatmap mini) + extras (DDR, Extra Seg/Cloud, Telecom <399/>399, À la carte, Challenge Safe). Colunas novas: VIM €, CB €, Líquido €, Bonif. €. Sort por VIM líquido por default, click em qualquer header ordena. (F) Categorias: novo PriceScalesBlock — TP por escalão de preço telecom com barra de peso% (volume da companhia). (G) Insights enriquecidos: vendedores VIM negativo, top 3 performers, gap no pior escalão, churn loja vs companhia. (H) Helpers _tpColor, _tpBg, _isPTS, _fmtEur reutilizáveis.' },
   { version: '3.21.15', date: '2026-05-27', summary: 'Versão mostra sempre hora de Portugal. APP_BUILD_DATE passa a string ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT). VersionFooter e StatCard formatam com timeZone:"Europe/Lisbon" → utilizadores em qualquer timezone vêem hora PT. Etiqueta "PT" no footer para deixar claro.' },
   { version: '3.21.14', date: '2026-05-27', summary: 'Tx Penetração: target + diarização + N-1 + carga horária. (A) Parser estendido para ler sheet BUDGET LOJA → target total mensal, realizado, % atingimento e diferença por loja. (B) Nova secção "🎯 Objetivo da loja": target / realizado / faltam / por dia, calculando automaticamente dias úteis restantes do mês (Mon-Sab). (C) Tabela "Por categoria" agora tem 7 colunas: TP+unidades, Companhia, N-1 (mês anterior se disponível na BD), Faltam (equip×média - actual), Por dia, Barra. (D) Comparação N-1 automática quando há 2+ meses carregados — usa o snapshot imediatamente anterior. (E) Colaboradores ganham 2 colunas novas: "Por 40h" (seguros normalizados a 40h semanais para comparação justa) e "/ dia" (quota diária do colaborador proporcional às horas vs target da loja). Helpers _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga.' },
   { version: '3.21.13', date: '2026-05-27', summary: 'Tx Penetração: redesign minimalista + insights automáticos. (A) Toolbar reformulada: chips pill em vez de card pesado para selector de meses; upload e apagar ficam à direita, mais discreto. (B) Hero block: 4 números grandes em serif (display font) com tipografia hierárquica em vez de cards — Aveiro / Companhia / Diferença / Ranking. Linhas finas a separar. (C) Nova secção "✨ Recomendações" — gera 2-6 sugestões accionáveis automaticamente: categorias mais fracas (com cálculo de "faltam X seguros para atingir média"), categorias fortes, addons abaixo, entrega cartões baixa, colaboradores abaixo de 70% da média, churn elevado por colaborador. Cards com borda colorida à esquerda (verde/laranja/azul). (D) Categoria por linhas inline (sem table pesada): 5 colunas em grid com barras finas (6px) de comparação. (E) TP Addon + Entrega: 2 stats inline sem cards. (F) Top 10 lojas: barras horizontais proporcionais ao máximo, badge "TU" pill na linha da própria loja. (G) Tabela colaboradores: header mais leve, bordas suaves. (H) Empty state mais elegante.' },
@@ -22862,7 +23098,32 @@ function _hoursFromCarga(carga) {
   return m ? Number(m[1]) : 40;
 }
 
+// v3.21.16: cor consoante TP — 3 níveis (heatmap)
+function _tpColor(taxa) {
+  const v = Number(taxa) || 0;
+  if (v >= 0.40) return T.green;
+  if (v >= 0.25) return T.orange;
+  return T.red;
+}
+function _tpBg(taxa) {
+  const v = Number(taxa) || 0;
+  if (v >= 0.40) return `${T.green}18`;
+  if (v >= 0.25) return `${T.orange}14`;
+  if (v > 0)     return `${T.red}10`;
+  return 'transparent';
+}
+function _isPTS(seller) {
+  // Match case-insensitive 'PT' no início → apanha PTs, PTS, Pts
+  return /^pt/i.test(seller?.dept || '');
+}
+function _fmtEur(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('pt-PT', { maximumFractionDigits: 0 }) + ' €';
+}
+
 function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
+  // v3.21.16: tabs internas — overview | daily | team | categories | insights
+  const [sub, setSub] = useStoredState('penetration.sub', 'overview');
   const totalRow = snap.total;
   // Ranking: posição do myStore por taxa total (descrescente)
   const ranking = useMemo(() => {
@@ -22885,6 +23146,26 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
     if (!prevSnap) return null;
     return prevSnap.stores.find(s => s.name === myStoreRow.name) || null;
   }, [prevSnap, myStoreRow]);
+
+  // v3.21.16: dados ricos
+  const myVim   = snap.vim?.[myStoreRow.name.toUpperCase()] || null;
+  const ciaVim  = snap.vim?.['TOTAL'] || null;
+  const myChurn = snap.churn?.[myStoreRow.name.toUpperCase()] || null;
+  const ciaChurn = (() => {
+    const all = Object.entries(snap.churn || {}).filter(([k]) => k !== 'TOTAL' && k !== 'GRAND TOTAL');
+    if (all.length === 0) return null;
+    const sum = all.reduce((a, [, v]) => a + (v.taxa6m || 0), 0);
+    return { taxa6m: sum / all.length };
+  })();
+  const myScales = snap.priceScales?.byStore?.[myStoreRow.name.toUpperCase()] || [];
+  const ciaScales = snap.priceScales?.global || [];
+  const cluster = snap.clusters?.[myStoreRow.name.toUpperCase()] || null;
+
+  // Colaboradores PTS — case-insensitive
+  const sellersPTS = useMemo(
+    () => (snap.sellers || []).filter(_isPTS),
+    [snap.sellers]
+  );
 
   // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
   // gera sugestões accionáveis. Computado uma vez por snap+row.
@@ -22926,28 +23207,113 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         body: `Só ${pctFmt(myStoreRow.deliveryPct)} dos cartões físicos estão a ser entregues — risco de churn elevado. Reforça follow-up.`,
       });
     }
-    // 4) Vendedores fracos
-    if (Array.isArray(snap.sellers) && snap.sellers.length > 3) {
-      const weak = snap.sellers.filter(s => s.vendas >= 20 && s.taxa < avgTaxa * 0.7).slice(0, 3);
+    // 4) Vendedores fracos (PTS only)
+    const ptsSellers = (snap.sellers || []).filter(_isPTS);
+    if (ptsSellers.length > 3) {
+      const weak = ptsSellers.filter(s => s.vendas >= 20 && s.taxa < avgTaxa * 0.7).slice(0, 3);
       if (weak.length > 0) {
         out.push({
-          kind: 'info', title: `${weak.length} colaborador${weak.length > 1 ? 'es' : ''} abaixo de 70% da média`,
-          body: weak.map(s => `${s.name} (${pctFmt(s.taxa)})`).join(' · ') + '. Considera mentoria 1-a-1.',
+          kind: 'info', title: `${weak.length} colaborador${weak.length > 1 ? 'es' : ''} PTS abaixo de 70% da média`,
+          body: weak.map(s => `${s.name.split(' ')[0]} (${pctFmt(s.taxa)})`).join(' · ') + '. Considera mentoria 1-a-1.',
         });
       }
-      const churn = snap.sellers.filter(s => s.churnPct > 0.15).slice(0, 3);
+      const churn = ptsSellers.filter(s => s.churnPct > 0.15).slice(0, 3);
       if (churn.length > 0) {
         out.push({
           kind: 'warn', title: `Churn elevado em ${churn.length} colaborador${churn.length > 1 ? 'es' : ''}`,
-          body: churn.map(s => `${s.name} (${pctFmt(s.churnPct)})`).join(' · ') + '. Validar qualidade da venda.',
+          body: churn.map(s => `${s.name.split(' ')[0]} (${pctFmt(s.churnPct)})`).join(' · ') + '. Validar qualidade da venda.',
+        });
+      }
+      // v3.21.16: vendedores com VIM negativo (charge-back > VIM bruto)
+      const vimNeg = ptsSellers.filter(s => (s.chargeBack || 0) > (s.vimTotal || 0) && (s.chargeBack || 0) > 0);
+      if (vimNeg.length > 0) {
+        out.push({
+          kind: 'warn', title: `${vimNeg.length} vendedor${vimNeg.length > 1 ? 'es' : ''} com VIM negativo`,
+          body: vimNeg.slice(0, 3).map(s => `${s.name.split(' ')[0]} (CB ${_fmtEur(s.chargeBack)})`).join(' · ') + '. Charge-back supera VIM bruto — perda líquida.',
+        });
+      }
+      // v3.21.16: Top 3 performers (para reconhecimento)
+      const topVim = [...ptsSellers].sort((a, b) => (b.vimTotalSCB || 0) - (a.vimTotalSCB || 0)).slice(0, 3);
+      if (topVim.length > 0 && (topVim[0].vimTotalSCB || 0) > 0) {
+        out.push({
+          kind: 'good', title: 'Top 3 colaboradores (VIM líquido)',
+          body: topVim.map((s, i) => `${i+1}. ${s.name.split(' ')[0]} ${_fmtEur(s.vimTotalSCB || 0)}`).join(' · '),
         });
       }
     }
-    return out.slice(0, 6);
+
+    // v3.21.16: Análise de escalões de preço
+    const myScales = snap.priceScales?.byStore?.[myStoreRow.name.toUpperCase()] || [];
+    const ciaScales = snap.priceScales?.global || [];
+    if (myScales.length > 0 && ciaScales.length > 0) {
+      const byBand = new Map();
+      for (const r of myScales) {
+        if (!r.band || /Total/i.test(r.band)) continue;
+        const prev = byBand.get(r.band) || { equip: 0, seg: 0 };
+        byBand.set(r.band, { equip: prev.equip + r.equip, seg: prev.seg + r.seg });
+      }
+      const ciaByBand = new Map(ciaScales.map(c => [c.band, c]));
+      const gapsByBand = [];
+      for (const [band, vals] of byBand) {
+        if (vals.equip < 8) continue; // ignora escalões com poucos dados
+        const cia = ciaByBand.get(band) || {};
+        const myTp = vals.equip > 0 ? vals.seg / vals.equip : 0;
+        const gap = myTp - (cia.tpCia || 0);
+        gapsByBand.push({ band, equip: vals.equip, seg: vals.seg, myTp, ciaTp: cia.tpCia || 0, gap });
+      }
+      gapsByBand.sort((a, b) => a.gap - b.gap);
+      const worstBand = gapsByBand[0];
+      if (worstBand && worstBand.gap < -0.05) {
+        out.push({
+          kind: 'warn',
+          title: `Escalão Telecom ${worstBand.band} — TP fraca`,
+          body: `${worstBand.equip} equip vendidos, só ${worstBand.seg} seguros (TP ${pctFmt(worstBand.myTp)} vs ${pctFmt(worstBand.ciaTp)} cia). Maior gap negativo nos escalões.`,
+        });
+      }
+    }
+
+    // v3.21.16: Churn loja vs companhia
+    const myChurnVal = snap.churn?.[myStoreRow.name.toUpperCase()]?.taxa6m || 0;
+    const allChurn = Object.entries(snap.churn || {}).filter(([k]) => k !== 'TOTAL' && k !== 'GRAND TOTAL');
+    if (allChurn.length > 0) {
+      const ciaAvg = allChurn.reduce((a, [, v]) => a + (v.taxa6m || 0), 0) / allChurn.length;
+      if (myChurnVal > ciaAvg + 0.05 && myChurnVal > 0) {
+        out.push({
+          kind: 'warn',
+          title: 'Churn 6m acima da média',
+          body: `Loja: ${pctFmt(myChurnVal)} vs ${pctFmt(ciaAvg)} média companhia. Validar qualidade das apólices vendidas.`,
+        });
+      }
+    }
+
+    return out.slice(0, 10);
   }, [snap, myStoreRow, totalRow, avgTaxa]);
 
   return (
     <div>
+      {/* v3.21.16: Sub-tabs internos */}
+      <div style={{ display: 'flex', gap: 2, marginBottom: 24, padding: 4, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10, width: 'fit-content' }}>
+        {[
+          { id: 'overview',   label: 'Visão Geral' },
+          { id: 'daily',      label: 'Diário' },
+          { id: 'team',       label: `Equipa PTS · ${sellersPTS.length}` },
+          { id: 'categories', label: 'Categorias & Escalões' },
+          { id: 'insights',   label: 'Recomendações' },
+        ].map(t => (
+          <button key={t.id} onClick={() => setSub(t.id)} style={{
+            padding: '7px 14px', fontSize: 12, fontFamily: 'inherit',
+            background: sub === t.id ? T.ink : 'transparent',
+            color: sub === t.id ? T.bg : T.inkSoft,
+            border: 'none', borderRadius: 6,
+            fontWeight: sub === t.id ? 600 : 500,
+            cursor: 'pointer',
+          }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {sub === 'overview' && (<>
       {/* v3.21.13: Hero block — números grandes, minimalista, sem cards pesados */}
       <div style={{
         marginBottom: 36,
@@ -23054,6 +23420,63 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         </div>
       )}
 
+      {/* v3.21.16: 4 KPIs VIM/Churn — overview */}
+      {(myVim || myChurn) && (
+        <div style={{ marginBottom: 36 }}>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>💰 VIM & Churn — {snap.month}</span>
+            <span style={{ flex: 1, height: 1, background: T.line }} />
+            {cluster && <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>Cluster: {cluster}</span>}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 24, alignItems: 'end', padding: '0 4px' }}>
+            <div>
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>VIM Total</div>
+              <div style={{ fontSize: 26, fontWeight: 600, color: T.ink, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                {_fmtEur(myVim?.totalEurAlt || myVim?.totalEur || 0)}
+              </div>
+              <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>
+                {myVim?.apolices || 0} apólices · {_fmtEur(myVim?.vimMediaApolice || 0)}/apólice
+              </div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Seguros + Addons (€)</div>
+              <div style={{ fontSize: 26, fontWeight: 600, color: T.accent, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                {_fmtEur((myVim?.segEurAlt || 0) + (myVim?.addonsEurAlt || 0))}
+              </div>
+              <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>
+                {_fmtEur(myVim?.segEurAlt || 0)} seg + {_fmtEur(myVim?.addonsEurAlt || 0)} add
+              </div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Charge-back</div>
+              <div style={{ fontSize: 26, fontWeight: 600, color: T.red, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                {(() => {
+                  const cb = (snap.sellers || []).filter(_isPTS).reduce((a, s) => a + (s.chargeBack || 0), 0);
+                  return _fmtEur(cb);
+                })()}
+              </div>
+              <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>equipa PTS</div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Churn 6m</div>
+              <div style={{ fontSize: 26, fontWeight: 600, color: (myChurn?.taxa6m || 0) > (ciaChurn?.taxa6m || 0) ? T.red : T.green, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                {pctFmt(myChurn?.taxa6m || 0)}
+              </div>
+              <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>
+                companhia: {pctFmt(ciaChurn?.taxa6m || 0)}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      </>)}{/* fim overview */}
+
+      {sub === 'daily' && (
+        <DailyHeatmap snap={snap} myStoreRow={myStoreRow} />
+      )}
+
+      {sub === 'insights' && (<>
       {/* v3.21.13: Insights automáticos — sugestões accionáveis */}
       {insights.length > 0 && (
         <div style={{ marginBottom: 36 }}>
@@ -23112,6 +23535,9 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         />
       </div>
 
+      </>)}{/* fim insights */}
+
+      {sub === 'categories' && (<>
       {/* v3.21.14: Categoria — TP, unidades, N-1, faltam, por dia */}
       <div style={{ marginBottom: 36 }}>
         <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -23230,79 +23656,22 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         </div>
       </div>
 
-      {/* v3.21.13: Colaboradores — header inline minimalista */}
-      {Array.isArray(snap.sellers) && snap.sellers.length > 0 && (
-        <div style={{ marginBottom: 36 }}>
-          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span>Colaboradores · {snap.sellerStoreFilter || 'AVEIRO'} ({snap.sellers.length})</span>
-            <span style={{ flex: 1, height: 1, background: T.line }} />
-            <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>ordenado por TP</span>
-          </div>
-          <div style={{ overflowX: 'auto', border: `1px solid ${T.lineSoft}`, borderRadius: 8 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-              <thead>
-                <tr style={{ background: 'transparent', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
-                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>#</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Vendedor</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'left', fontWeight: 500 }}>Carga</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Vendas</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Seguros</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>TP</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }} title="Seguros normalizados a 40h semanais — para comparação justa entre cargas horárias diferentes">Por 40h</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }} title="Seguros por dia útil restante (consoante target da loja)">/ dia</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Addons</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Plano Tot.</th>
-                  <th style={{ padding: '10px 10px', textAlign: 'right', fontWeight: 500 }}>Churn 6m</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(() => {
-                  // v3.21.14: total de seguros + horas para calcular share necessário
-                  const totalHours = snap.sellers.reduce((acc, s) => acc + _hoursFromCarga(s.carga), 0);
-                  return snap.sellers.map((s, i) => {
-                    const tpColor = s.taxa >= 0.4 ? T.green : s.taxa >= 0.25 ? T.orange : T.red;
-                    const hours = _hoursFromCarga(s.carga);
-                    // Seguros normalizados a 40h
-                    const per40h = hours > 0 ? (s.seguros / hours) * 40 : 0;
-                    // Quota diária: share do target da loja proporcional às horas
-                    let dailyQuota = 0;
-                    if (budget && workdays.days > 0 && totalHours > 0) {
-                      const shareTarget = (Math.max(0, budget.target - budget.real)) * (hours / totalHours);
-                      dailyQuota = Math.ceil(shareTarget / workdays.days);
-                    }
-                    return (
-                      <tr key={`${s.nif}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
-                        <td style={{ padding: '8px 10px', color: T.inkMute, fontFamily: 'Geist Mono' }}>{i + 1}</td>
-                        <td style={{ padding: '8px 10px', fontWeight: 500 }}>
-                          <div>{s.name}</div>
-                          <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono' }}>{s.nif}</div>
-                        </td>
-                        <td style={{ padding: '8px 10px', color: T.inkSoft, fontSize: 11 }}>{hours}h</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.vendas}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.seguros}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: tpColor }}>
-                          {pctFmt(s.taxa)}
-                        </td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }} title={`Normalizado a 40h: ${per40h.toFixed(1)} seguros equivalentes`}>
-                          {per40h.toFixed(1)}
-                        </td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: dailyQuota > 0 ? T.accent : T.inkMute, fontSize: 11, fontWeight: dailyQuota > 0 ? 600 : 400 }}>
-                          {dailyQuota > 0 ? dailyQuota : '—'}
-                        </td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft }}>{pctFmt(s.taxaAddons)}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.planoTotal}</td>
-                        <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.churnPct > 0.1 ? T.red : T.inkSoft, fontSize: 11 }}>
-                          {pctFmt(s.churnPct)}
-                        </td>
-                      </tr>
-                    );
-                  });
-                })()}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {/* v3.21.16: Escalões de Preço (Telecom) — TP por banda de preço */}
+      {myScales.length > 0 && (
+        <PriceScalesBlock myScales={myScales} ciaScales={ciaScales} />
       )}
+
+      </>)}{/* fim categories */}
+
+      {sub === 'team' && (<>
+      {/* v3.21.16: Equipa PTS — agregados topo */}
+      {sellersPTS.length > 0 && (
+        <TeamPTSAggregates sellersPTS={sellersPTS} budget={budget} workdays={workdays} avgTaxa={avgTaxa} />
+      )}
+
+      {/* v3.21.16: Tabela de colaboradores PTS — expansível com breakdown */}
+      <SellersTable snap={snap} sellersPTS={sellersPTS} budget={budget} workdays={workdays} />
+
 
       {/* v3.21.13: Top 10 lojas — versão minimalista com barras */}
       <div style={{ marginBottom: 24 }}>
@@ -23339,11 +23708,452 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
           });
         })()}
       </div>
+      </>)}{/* fim team */}
+    </div>
+  );
+}
+
+// v3.21.16: Heatmap diário N vs N-1 por categoria
+function DailyHeatmap({ snap, myStoreRow }) {
+  const [hideEmpty, setHideEmpty] = useStoredState('penetration.daily.hideEmpty', true);
+  const days = useMemo(() => {
+    if (!Array.isArray(snap.daily)) return [];
+    return hideEmpty ? snap.daily.filter(d => d.hasData) : snap.daily;
+  }, [snap.daily, hideEmpty]);
+  const cats = [
+    { key: 'tv',         label: 'TV' },
+    { key: 'foto',       label: 'Foto' },
+    { key: 'hardware',   label: 'HW' },
+    { key: 'telecom',    label: 'Telecom' },
+    { key: 'smartwatch', label: 'Smartwt.' },
+    { key: 'mob',        label: 'Mob.El' },
+    { key: 'drone',      label: 'Drone' },
+    { key: 'gaming',     label: 'Gaming' },
+    { key: 'total',      label: 'TOTAL' },
+  ];
+
+  // Totais por categoria
+  const totals = useMemo(() => {
+    const out = {};
+    for (const c of cats) {
+      let eq = 0, sg = 0, eqN1 = 0, sgN1 = 0;
+      for (const d of days) {
+        eq   += d[c.key]?.equip || 0;
+        sg   += d[c.key]?.seg || 0;
+        eqN1 += d[c.key]?.equipN1 || 0;
+        sgN1 += d[c.key]?.segN1 || 0;
+      }
+      out[c.key] = {
+        eq, sg, eqN1, sgN1,
+        taxa: eq > 0 ? sg / eq : 0,
+        taxaN1: eqN1 > 0 ? sgN1 / eqN1 : 0,
+      };
+    }
+    return out;
+  }, [days, cats]);
+
+  if (!days || days.length === 0) {
+    return (
+      <div style={{ padding: '60px 24px', textAlign: 'center', color: T.inkMute }}>
+        Sem dados diários neste ficheiro (sheet RESUMO DIA estava vazia ou loja não seleccionada).
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span>📅 Heatmap diário · {myStoreRow.name} · {snap.month}</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 10, textTransform: 'none', letterSpacing: 0, color: T.inkSoft }}>
+          <input type="checkbox" checked={hideEmpty} onChange={e => setHideEmpty(e.target.checked)} />
+          Esconder dias vazios
+        </label>
+      </div>
+
+      {/* Linha de totais por categoria (sticky-like) */}
+      <div style={{ display: 'grid', gridTemplateColumns: `60px repeat(${cats.length}, 1fr)`, gap: 4, marginBottom: 12, padding: '10px 0', borderBottom: `1px solid ${T.line}`, fontSize: 11 }}>
+        <div style={{ color: T.inkMute, fontFamily: 'Geist Mono', fontSize: 10 }}>Mês</div>
+        {cats.map(c => {
+          const t = totals[c.key];
+          const dN1 = t.taxa - t.taxaN1;
+          return (
+            <div key={c.key} style={{ textAlign: 'center', fontFamily: 'Geist Mono', padding: '4px 6px', background: _tpBg(t.taxa), borderRadius: 4 }}>
+              <div style={{ fontWeight: 600, color: _tpColor(t.taxa), fontSize: 11 }}>{pctFmt(t.taxa)}</div>
+              <div style={{ fontSize: 9, color: T.inkMute }}>{t.sg}/{t.eq}</div>
+              {t.eqN1 > 0 && (
+                <div style={{ fontSize: 9, color: dN1 >= 0 ? T.green : T.red, marginTop: 2 }}>
+                  {pctDelta(dN1)}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Linha de headers (categorias) */}
+      <div style={{ display: 'grid', gridTemplateColumns: `60px repeat(${cats.length}, 1fr)`, gap: 4, marginBottom: 4, fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+        <div style={{ textAlign: 'right' }}>Dia</div>
+        {cats.map(c => <div key={c.key} style={{ textAlign: 'center' }}>{c.label}</div>)}
+      </div>
+
+      {/* Linhas diárias */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {days.map(d => (
+          <div key={d.day} style={{ display: 'grid', gridTemplateColumns: `60px repeat(${cats.length}, 1fr)`, gap: 4, fontSize: 10 }}>
+            <div style={{ textAlign: 'right', padding: '6px 8px', color: T.inkSoft, fontFamily: 'Geist Mono', fontSize: 11 }}>
+              {String(d.day).padStart(2, '0')}
+            </div>
+            {cats.map(c => {
+              const cell = d[c.key] || {};
+              const bg = _tpBg(cell.taxa);
+              const dN1 = (cell.taxa || 0) - (cell.taxaN1 || 0);
+              return (
+                <div key={c.key} title={`${c.label}: ${cell.seg || 0}/${cell.equip || 0}  ·  N-1: ${cell.segN1 || 0}/${cell.equipN1 || 0}`} style={{
+                  textAlign: 'center', padding: '6px 4px',
+                  background: bg, borderRadius: 4,
+                  border: `1px solid ${cell.taxa >= 0.4 ? T.green + '40' : cell.taxa >= 0.25 ? T.orange + '30' : cell.taxa > 0 ? T.red + '20' : T.lineSoft}`,
+                  fontFamily: 'Geist Mono', minHeight: 38,
+                }}>
+                  <div style={{ fontWeight: 600, color: _tpColor(cell.taxa), fontSize: 10 }}>
+                    {cell.equip > 0 ? pctFmt(cell.taxa) : '—'}
+                  </div>
+                  {cell.equip > 0 && (
+                    <div style={{ fontSize: 8, color: T.inkMute, marginTop: 1 }}>
+                      {cell.seg}/{cell.equip}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 16, display: 'flex', gap: 16, fontSize: 10, color: T.inkMute, justifyContent: 'center' }}>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: `${T.green}30`, borderRadius: 2, verticalAlign: 'middle', marginRight: 4 }} /> ≥40%</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: `${T.orange}30`, borderRadius: 2, verticalAlign: 'middle', marginRight: 4 }} /> 25-40%</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: `${T.red}20`, borderRadius: 2, verticalAlign: 'middle', marginRight: 4 }} /> &lt;25%</span>
+      </div>
+    </div>
+  );
+}
+
+// v3.21.16: Escalões de preço (telecom)
+function PriceScalesBlock({ myScales, ciaScales }) {
+  // Agregar myScales por banda (podem haver linhas tipo "Total")
+  const rows = useMemo(() => {
+    const byBand = new Map();
+    for (const r of myScales) {
+      if (!r.band || /Total/i.test(r.band)) continue;
+      const prev = byBand.get(r.band) || { equip: 0, seg: 0 };
+      byBand.set(r.band, { equip: prev.equip + r.equip, seg: prev.seg + r.seg });
+    }
+    const ciaByBand = new Map();
+    for (const c of (ciaScales || [])) {
+      ciaByBand.set(c.band, c);
+    }
+    const out = [];
+    for (const [band, vals] of byBand) {
+      const cia = ciaByBand.get(band) || {};
+      const taxa = vals.equip > 0 ? vals.seg / vals.equip : 0;
+      out.push({ band, equip: vals.equip, seg: vals.seg, taxa, tpCia: cia.tpCia || 0, pesoEquip: cia.pesoEquip || 0 });
+    }
+    // Ordena por valor numérico do escalão
+    out.sort((a, b) => {
+      const an = parseFloat((a.band.match(/[\d.,]+/) || ['0'])[0].replace(',', '.'));
+      const bn = parseFloat((b.band.match(/[\d.,]+/) || ['0'])[0].replace(',', '.'));
+      return an - bn;
+    });
+    return out;
+  }, [myScales, ciaScales]);
+
+  if (rows.length === 0) return null;
+
+  const maxEquip = Math.max(...rows.map(r => r.equip));
+
+  return (
+    <div style={{ marginBottom: 36, marginTop: 36 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>💶 Escalões de preço (Telecom)</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>tx penetração por banda de preço</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '180px 80px 80px 80px 80px 1fr', gap: 14, padding: '8px 12px', fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono', letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: `1px solid ${T.line}` }}>
+        <div>Escalão</div>
+        <div style={{ textAlign: 'right' }}>Equip</div>
+        <div style={{ textAlign: 'right' }}>Apólices</div>
+        <div style={{ textAlign: 'right' }}>TP</div>
+        <div style={{ textAlign: 'right' }}>Companhia</div>
+        <div>Volume (companhia %)</div>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {rows.map(r => {
+          const d = r.taxa - r.tpCia;
+          return (
+            <div key={r.band} style={{
+              display: 'grid', gridTemplateColumns: '180px 80px 80px 80px 80px 1fr', gap: 14, alignItems: 'center',
+              padding: '10px 12px', borderTop: `1px solid ${T.lineSoft}`, fontSize: 12,
+            }}>
+              <div style={{ color: T.ink, fontFamily: 'Geist Mono', fontSize: 11 }}>{r.band}</div>
+              <div style={{ textAlign: 'right', fontFamily: 'Geist Mono' }}>{r.equip}</div>
+              <div style={{ textAlign: 'right', fontFamily: 'Geist Mono' }}>{r.seg}</div>
+              <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: _tpColor(r.taxa) }}>
+                {pctFmt(r.taxa)}
+              </div>
+              <div style={{ textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>
+                {pctFmt(r.tpCia)}
+                <span style={{ marginLeft: 6, fontSize: 9, color: d >= 0 ? T.green : T.red, fontWeight: 600 }}>{pctDelta(d)}</span>
+              </div>
+              <div style={{ position: 'relative', height: 8, background: T.lineSoft, borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ width: `${(r.pesoEquip || 0) * 100}%`, height: '100%', background: T.accent, opacity: 0.7 }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// v3.21.16: KPIs agregados equipa PTS no topo do tab Equipa
+function TeamPTSAggregates({ sellersPTS, budget, workdays, avgTaxa }) {
+  const agg = useMemo(() => {
+    const vimBruto = sellersPTS.reduce((a, s) => a + (s.vimTotal || 0), 0);
+    const cb       = sellersPTS.reduce((a, s) => a + (s.chargeBack || 0), 0);
+    const vimLiq   = sellersPTS.reduce((a, s) => a + (s.vimTotalSCB || 0), 0);
+    const seguros  = sellersPTS.reduce((a, s) => a + (s.seguros || 0), 0);
+    const vendas   = sellersPTS.reduce((a, s) => a + (s.vendas || 0), 0);
+    const bonif    = sellersPTS.reduce((a, s) => a + (s.bonifBimestral || 0) + (s.bonifAddon || 0), 0);
+    const tp = vendas > 0 ? seguros / vendas : 0;
+    return { vimBruto, cb, vimLiq, seguros, vendas, tp, bonif };
+  }, [sellersPTS]);
+  return (
+    <div style={{ marginBottom: 28, padding: '20px 24px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14 }}>
+        👥 Agregados equipa PTS ({sellersPTS.length})
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 24 }}>
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, marginBottom: 4 }}>VIM Líquido</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: T.green, fontFamily: 'Geist Mono', lineHeight: 1 }}>{_fmtEur(agg.vimLiq)}</div>
+          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>bruto: {_fmtEur(agg.vimBruto)}</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, marginBottom: 4 }}>Charge-back</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: T.red, fontFamily: 'Geist Mono', lineHeight: 1 }}>{_fmtEur(agg.cb)}</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, marginBottom: 4 }}>TP Equipa</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: _tpColor(agg.tp), fontFamily: 'Geist Mono', lineHeight: 1 }}>{pctFmt(agg.tp)}</div>
+          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>cia: {pctFmt(avgTaxa)}</div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 9, color: T.inkMute, marginBottom: 4 }}>Bonificação Prevista</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: T.accent, fontFamily: 'Geist Mono', lineHeight: 1 }}>{_fmtEur(agg.bonif)}</div>
+          <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>bimestral + addon</div>
+        </div>
+      </div>
     </div>
   );
 }
 
 // Mini card de KPI reutilizado
+// v3.21.16: Tabela completa de colaboradores (toggle PTS-only / Todos), expansível
+function SellersTable({ snap, sellersPTS, budget, workdays }) {
+  const [ptsOnly, setPtsOnly] = useStoredState('penetration.team.ptsOnly', true);
+  const [expanded, setExpanded] = useState(null);
+  const [sortKey, setSortKey] = useStoredState('penetration.team.sort', 'vimLiq');
+  const allSellers = snap.sellers || [];
+  const list = ptsOnly ? sellersPTS : allSellers;
+
+  const totalHours = list.reduce((acc, s) => acc + _hoursFromCarga(s.carga), 0);
+
+  const enriched = useMemo(() => list.map(s => {
+    const hours = _hoursFromCarga(s.carga);
+    const per40h = hours > 0 ? (s.seguros / hours) * 40 : 0;
+    let dailyQuota = 0;
+    if (budget && workdays.days > 0 && totalHours > 0) {
+      const shareTarget = (Math.max(0, budget.target - budget.real)) * (hours / totalHours);
+      dailyQuota = Math.ceil(shareTarget / workdays.days);
+    }
+    const vimLiq = s.vimTotalSCB || ((s.vimTotal || 0) - (s.chargeBack || 0));
+    const bonif = (s.bonifBimestral || 0) + (s.bonifAddon || 0);
+    return { ...s, hours, per40h, dailyQuota, vimLiq, bonif };
+  }), [list, budget, workdays, totalHours]);
+
+  const sorted = useMemo(() => {
+    const arr = [...enriched];
+    arr.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
+    return arr;
+  }, [enriched, sortKey]);
+
+  if (list.length === 0) return (
+    <div style={{ padding: '60px 24px', textAlign: 'center', color: T.inkMute, border: `1px dashed ${T.line}`, borderRadius: 8 }}>
+      Sem colaboradores {ptsOnly ? 'PTS' : ''} no ficheiro para esta loja.
+      {ptsOnly && (
+        <div style={{ marginTop: 12 }}>
+          <button onClick={() => setPtsOnly(false)} style={{ padding: '6px 14px', background: T.accent, color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, cursor: 'pointer' }}>Mostrar todos</button>
+        </div>
+      )}
+    </div>
+  );
+
+  const Th = ({ k, children, align = 'left' }) => (
+    <th onClick={() => setSortKey(k)}
+      style={{
+        padding: '10px 10px', textAlign: align, fontWeight: 500, cursor: 'pointer',
+        color: sortKey === k ? T.ink : T.inkMute,
+      }}
+    >
+      {children} {sortKey === k && '↓'}
+    </th>
+  );
+
+  return (
+    <div style={{ marginBottom: 36 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span>Colaboradores · {snap.sellerStoreFilter || 'AVEIRO'} ({list.length}{ptsOnly ? ' PTS' : ' total'})</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 10, textTransform: 'none', letterSpacing: 0, color: T.inkSoft }}>
+          <input type="checkbox" checked={ptsOnly} onChange={e => setPtsOnly(e.target.checked)} />
+          Só PTS
+        </label>
+        <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>click numa linha para detalhe</span>
+      </div>
+      <div style={{ overflowX: 'auto', border: `1px solid ${T.lineSoft}`, borderRadius: 8 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: 'transparent', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+              <th style={{ padding: '10px 10px', textAlign: 'left' }}>#</th>
+              <th style={{ padding: '10px 10px', textAlign: 'left' }}>Vendedor</th>
+              <th style={{ padding: '10px 10px', textAlign: 'left' }}>Carga</th>
+              <Th k="vendas" align="right">Vendas</Th>
+              <Th k="seguros" align="right">Seguros</Th>
+              <Th k="taxa" align="right">TP</Th>
+              <th style={{ padding: '10px 10px', textAlign: 'right' }} title="Seguros normalizados a 40h">Por 40h</th>
+              <Th k="dailyQuota" align="right">/ dia</Th>
+              <Th k="vimTotal" align="right">VIM €</Th>
+              <Th k="chargeBack" align="right">CB €</Th>
+              <Th k="vimLiq" align="right">Líquido €</Th>
+              <Th k="bonif" align="right">Bonif. €</Th>
+              <Th k="churnPct" align="right">Churn</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((s, i) => {
+              const isExp = expanded === `${s.nif}-${i}`;
+              const tpColor = _tpColor(s.taxa);
+              return (
+                <React.Fragment key={`${s.nif}-${i}`}>
+                  <tr style={{ borderTop: `1px solid ${T.lineSoft}`, cursor: 'pointer', background: isExp ? `${T.accent}08` : 'transparent' }}
+                      onClick={() => setExpanded(isExp ? null : `${s.nif}-${i}`)}>
+                    <td style={{ padding: '8px 10px', color: T.inkMute, fontFamily: 'Geist Mono' }}>{i + 1}</td>
+                    <td style={{ padding: '8px 10px', fontWeight: 500 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 10, color: T.inkMute }}>{isExp ? '▾' : '▸'}</span>
+                        <div>
+                          <div>{s.name}</div>
+                          <div style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono' }}>{s.nif} · {s.dept || '—'}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 10px', color: T.inkSoft, fontSize: 11 }}>{s.hours}h</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.vendas}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{s.seguros}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: tpColor }}>
+                      {pctFmt(s.taxa)}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>
+                      {s.per40h.toFixed(1)}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.dailyQuota > 0 ? T.accent : T.inkMute, fontSize: 11, fontWeight: s.dailyQuota > 0 ? 600 : 400 }}>
+                      {s.dailyQuota > 0 ? s.dailyQuota : '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11 }}>{_fmtEur(s.vimTotal || 0)}</td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11, color: (s.chargeBack || 0) > 0 ? T.red : T.inkMute }}>
+                      {(s.chargeBack || 0) > 0 ? _fmtEur(s.chargeBack) : '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11, color: s.vimLiq > 0 ? T.green : T.red, fontWeight: 600 }}>
+                      {_fmtEur(s.vimLiq)}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontSize: 11, color: s.bonif > 0 ? T.accent : T.inkMute }}>
+                      {s.bonif > 0 ? _fmtEur(s.bonif) : '—'}
+                    </td>
+                    <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: s.churnPct > 0.1 ? T.red : T.inkSoft, fontSize: 11 }}>
+                      {pctFmt(s.churnPct)}
+                    </td>
+                  </tr>
+                  {isExp && (
+                    <tr style={{ background: `${T.accent}06` }}>
+                      <td colSpan={13} style={{ padding: '14px 18px', borderTop: `1px solid ${T.lineSoft}` }}>
+                        <SellerExpand seller={s} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// v3.21.16: Detalhe expandido de um vendedor — breakdown por categoria
+function SellerExpand({ seller }) {
+  const cats = [
+    { key: 'tv',         label: 'TV' },
+    { key: 'foto',       label: 'Foto' },
+    { key: 'hardware',   label: 'HW' },
+    { key: 'telecom',    label: 'Telecom' },
+    { key: 'smartwatch', label: 'Smartwatch' },
+    { key: 'mob',        label: 'Mob.Eléc.' },
+    { key: 'drone',      label: 'Drone' },
+    { key: 'gaming',     label: 'Gaming' },
+    { key: 'restart',    label: 'Restart' },
+  ];
+  return (
+    <div>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 12 }}>
+        Breakdown por categoria · {seller.name}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cats.length}, 1fr)`, gap: 6 }}>
+        {cats.map(c => {
+          const v = seller[c.key]?.v || 0;
+          const s = seller[c.key]?.s || 0;
+          const tp = v > 0 ? s / v : 0;
+          return (
+            <div key={c.key} style={{
+              padding: '10px 8px', background: _tpBg(tp), borderRadius: 6,
+              border: `1px solid ${T.lineSoft}`, textAlign: 'center',
+            }}>
+              <div className="mono" style={{ fontSize: 9, color: T.inkMute, marginBottom: 4 }}>{c.label}</div>
+              <div style={{ fontFamily: 'Geist Mono', fontWeight: 600, color: _tpColor(tp), fontSize: 13 }}>
+                {v > 0 ? pctFmt(tp) : '—'}
+              </div>
+              <div style={{ fontSize: 9, color: T.inkSoft, fontFamily: 'Geist Mono' }}>{s}/{v}</div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Métricas suplementares */}
+      <div style={{ marginTop: 14, display: 'flex', gap: 18, flexWrap: 'wrap', fontSize: 11 }}>
+        <span style={{ color: T.inkMute }}>DDR Bimestral: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{seller.ddr || 0}</strong></span>
+        <span style={{ color: T.inkMute }}>Extra Segurança: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{seller.extraSeg || 0}</strong></span>
+        <span style={{ color: T.inkMute }}>Extra Cloud: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{seller.extraCloud || 0}</strong></span>
+        <span style={{ color: T.inkMute }}>Telecom &lt;399€: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{pctFmt(seller.telecomU || 0)}</strong></span>
+        <span style={{ color: T.inkMute }}>Telecom &gt;399€: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{pctFmt(seller.telecomO || 0)}</strong></span>
+        <span style={{ color: T.inkMute }}>À la carte: <strong style={{ color: T.ink, fontFamily: 'Geist Mono' }}>{seller.aLaCarte || 0}</strong> ({_fmtEur(seller.aLaCarteValor || 0)})</span>
+        {seller.challengeSafe > 0 && (
+          <span style={{ color: T.inkMute }}>Challenge Safe: <strong style={{ color: T.accent, fontFamily: 'Geist Mono' }}>{seller.challengeSafe}</strong></span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PenKpiCard({ label, value, sub, accent }) {
   return (
     <div style={{ padding: 16, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 10 }}>
