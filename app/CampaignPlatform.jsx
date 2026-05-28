@@ -442,7 +442,7 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           type: 'array', cellDates: false,
           // v3.21.16: análise profunda — 10 sheets parsadas (~96MB total, mas
           // só as sheets pequenas/médias; BD* e PIVOT* gigantes ficam de fora).
-          sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA', 'RESUMO DIA', 'TP Escalões', 'TOTAL VIM', 'Churn Loja', 'Churn', 'AUX_1', 'Aux_Target'],
+          sheets: ['RESUMO', 'VENDEDOR_TOTAL', 'BUDGET LOJA', 'RESUMO DIA', 'TP Escalões', 'TOTAL VIM', 'Churn Loja', 'Churn', 'AUX_1', 'Aux_Target', 'BD TT SEGUROS'],
         });
         const sh = wb.Sheets['RESUMO'];
         if (!sh) return reject(new Error('Sheet "RESUMO" não encontrada no ficheiro.'));
@@ -779,6 +779,84 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           }
         }
 
+        // v3.21.18: BD TT SEGUROS — identificar equipamentos vendidos sem
+        // seguro/PP/extensão de garantia, agrupados por família.
+        onProgress?.({ stage: 'parse', message: 'A analisar transações…' });
+        const uninsured = [];
+        const familySummary = {};
+        const shTT = wb.Sheets['BD TT SEGUROS'];
+        if (shTT) {
+          const aoaTT = XLSX.utils.sheet_to_json(shTT, { header: 1, blankrows: false, defval: null });
+          const ticketMap = new Map(); // ticket_id -> { equips, segs }
+          for (let r = 1; r < aoaTT.length; r++) {
+            const row = aoaTT[r];
+            if (!row || !row[1]) continue;
+            const store = String(row[1]).toUpperCase().trim();
+            if (store !== sellerStoreFilter) continue;
+            const ticket = String(row[2] || '');
+            if (!ticket) continue;
+            const desc = String(row[8] || '').trim();
+            const ean  = String(row[6] || '').trim();
+            const qty  = Number(row[9]) || 0;
+            const fam1 = row[13] != null ? String(row[13]) : '';
+            const fam2 = row[14] != null ? String(row[14]) : '';
+            const seller = String(row[11] || '').trim();
+            const isSeg  = /^SEG[\s_]/i.test(desc);
+            const isPP   = /^PP[\s_]/i.test(desc);
+            const isCard = /Cart[ãa]o.*Prote[çc][ãa]o/i.test(desc);
+            const isInsurance = isSeg || isPP || isCard;
+            if (!ticketMap.has(ticket)) {
+              ticketMap.set(ticket, { equips: [], segs: [], date: row[5] || null });
+            }
+            const t = ticketMap.get(ticket);
+            const item = { desc, ean, qty: Math.abs(qty), fam1, fam2, seller, signed: qty };
+            if (isInsurance) t.segs.push(item);
+            else if (qty > 0) t.equips.push(item); // ignora devoluções (qty < 0)
+          }
+          // Identificar uninsured: tickets onde #seguros < #equips
+          const uninsuredMap = new Map();
+          for (const [, t] of ticketMap) {
+            if (t.equips.length === 0) continue;
+            if (t.segs.length >= t.equips.length) continue;
+            const uncoveredCount = t.equips.length - t.segs.length;
+            // Heurística: os últimos N equipamentos (sem garantia)
+            const exposed = t.equips.slice(-uncoveredCount);
+            for (const eq of exposed) {
+              const key = eq.ean || eq.desc;
+              if (!key) continue;
+              const prev = uninsuredMap.get(key) || {
+                ean: eq.ean, desc: eq.desc, fam1: eq.fam1, fam2: eq.fam2,
+                qty: 0, tickets: 0, family: _famFromDesc(eq.desc, eq.fam1),
+                topSellers: new Map(),
+              };
+              prev.qty += eq.qty;
+              prev.tickets += 1;
+              if (eq.seller) prev.topSellers.set(eq.seller, (prev.topSellers.get(eq.seller) || 0) + 1);
+              uninsuredMap.set(key, prev);
+            }
+          }
+          for (const v of uninsuredMap.values()) {
+            // Top vendedor (1)
+            const sortedSellers = Array.from(v.topSellers.entries()).sort((a, b) => b[1] - a[1]);
+            v.topSeller = sortedSellers[0]?.[0] || '';
+            delete v.topSellers;
+            uninsured.push(v);
+          }
+          uninsured.sort((a, b) => b.qty - a.qty);
+          // Sumário por família
+          for (const u of uninsured) {
+            const fam = u.family || 'Outras';
+            if (!familySummary[fam]) familySummary[fam] = { count: 0, items: 0, topEans: [] };
+            familySummary[fam].count += u.qty;
+            familySummary[fam].items += 1;
+          }
+          // Top 5 EANs por família
+          for (const fam of Object.keys(familySummary)) {
+            const items = uninsured.filter(u => (u.family || 'Outras') === fam).slice(0, 5);
+            familySummary[fam].topEans = items.map(i => ({ ean: i.ean, desc: i.desc, qty: i.qty }));
+          }
+        }
+
         const dd = _ddrFromFilename(file.name);
         resolve({
           month: dd.month || 'Mês não detectado',
@@ -797,6 +875,9 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
           priceScales,
           clusters,
           targetsDaily,
+          // v3.21.18: equipamentos sem seguro
+          uninsured,
+          familySummary,
         });
       } catch (err) { reject(err); }
     };
@@ -1482,10 +1563,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.17';
+const APP_VERSION = '3.21.18';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-27T23:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-28T00:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1495,6 +1576,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.18', date: '2026-05-28', summary: 'Tx Penetração: equipamentos sem cobertura. (A) Parser estendido com BD TT SEGUROS (~20k linhas transacções) filtrado por loja. Heurística: em cada talão, conta equipamentos vs apólices vendidas (SEG/PP/Cartão Plano Proteção); excedentes contam como "sem cobertura". (B) Família inferida via regex no des_art (TELM→Telecom, OLED→TV, WATCH→Smartwatch, DRONE→Drone, etc.) com fallback para cod_fam (9730=Telecom). (C) Nova secção UninsuredBlock no tab Categorias: cards por família ordenados por contagem (click expande tabela com top 30 artigos: EAN, descrição, quant, talões, top vendedor). (D) Insight automático: "X equipamentos <família> sem cobertura" quando o top família tem ≥10 unidades.' },
   { version: '3.21.17', date: '2026-05-27', summary: 'Tx Penetração diário — selector de dia + foco. (A) Default auto-pick: se o snapshot é do mês actual escolhe ONTEM; senão último dia com dados. (B) Pill bar de dias no topo (cor consoante TP) — click para seleccionar. (C) Card de detalhe grande do dia escolhido: TP total em fonte serif, contagem seg/equip, Δ vs N-1 — e 8 sub-cards por categoria (TV/Foto/HW/Telecom/Smartwatch/Mob/Drone/Gaming) com TP+seg/equip+Δ vs N-1, cores conforme nível. (D) Heatmap mensal abaixo continua disponível; linha do dia seleccionado fica destacada (borda+bg accent) e click numa linha muda o dia seleccionado.' },
   { version: '3.21.16', date: '2026-05-27', summary: 'Tx Penetração: análise profunda multi-sheet — heatmap diário, equipa PTS, escalões, VIM/churn. (A) Parser estendido para 10 sheets: + RESUMO DIA, TP Escalões, TOTAL VIM, Churn Loja, Churn, Aux_Target, AUX_1. Sellers ganham 15 campos novos (vimTotal, vimTotalSCB, chargeBack, bonifBimestral, bonifAddon, challengeSafe, apolicesAnuladas, churnPct, pmcApolice, etc.). (B) PenetrationBreakdown reorganizado em 5 sub-tabs internos: Visão Geral · Diário · Equipa PTS · Categorias & Escalões · Recomendações. (C) Overview: KPIs novos VIM Total / Seguros+Addons € / Charge-back / Churn 6m + cluster. (D) Daily: novo DailyHeatmap — grelha calendário cor por TP (verde/laranja/vermelho), N vs N-1 visível, totais mensais no topo, toggle "esconder dias vazios". (E) Team PTS: TeamPTSAggregates (4 KPIs equipa) + SellersTable filtrada por dept PTS (/^pt/i case-insensitive, exclui SERVICOS/BACK OFFICE/CLINICA), expansível com breakdown por categoria (heatmap mini) + extras (DDR, Extra Seg/Cloud, Telecom <399/>399, À la carte, Challenge Safe). Colunas novas: VIM €, CB €, Líquido €, Bonif. €. Sort por VIM líquido por default, click em qualquer header ordena. (F) Categorias: novo PriceScalesBlock — TP por escalão de preço telecom com barra de peso% (volume da companhia). (G) Insights enriquecidos: vendedores VIM negativo, top 3 performers, gap no pior escalão, churn loja vs companhia. (H) Helpers _tpColor, _tpBg, _isPTS, _fmtEur reutilizáveis.' },
   { version: '3.21.15', date: '2026-05-27', summary: 'Versão mostra sempre hora de Portugal. APP_BUILD_DATE passa a string ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT). VersionFooter e StatCard formatam com timeZone:"Europe/Lisbon" → utilizadores em qualquer timezone vêem hora PT. Etiqueta "PT" no footer para deixar claro.' },
@@ -23122,6 +23204,25 @@ function _fmtEur(n) {
   return v.toLocaleString('pt-PT', { maximumFractionDigits: 0 }) + ' €';
 }
 
+// v3.21.18: infere família a partir da descrição (heurística) ou cod_fam
+function _famFromDesc(desc, codFam) {
+  const d = String(desc || '').toUpperCase();
+  if (/\b(TELM|TELEM|TELEMOV|SMTP|SMARTPHONE|TLM)\b/.test(d)) return 'Telecom';
+  if (/\b(TV|LCD|LED|OLED|QLED|MONITOR)\b/.test(d))           return 'TV/Vídeo';
+  if (/\b(SMARTWATCH|SMTWATCH|WATCH)\b/.test(d))              return 'Smartwatch';
+  if (/\b(TABLET|TAB)\b/.test(d))                              return 'Tablet';
+  if (/\b(NOTEB|PORTATIL|LAPTOP|MACBOOK|DESKTOP|PC\s)/.test(d))return 'Hardware';
+  if (/\b(FOTO|CAMARA|CAMERA|GOPRO|LENTE|REFLEX|MIRROR)\b/.test(d)) return 'Foto';
+  if (/\b(DRONE|DJI|MAVIC)\b/.test(d))                         return 'Drone';
+  if (/\b(CONSOLA|PS5|XBOX|SWITCH|GAMING|PLAYSTATION|NINTENDO)\b/.test(d)) return 'Gaming';
+  if (/\b(TROTI|SCOOTER|BIKE|BICICLETA|ELETRICA|XIAOMI\s+MI)\b/.test(d)) return 'Mob.Eléctrica';
+  if (/\b(IPAD)\b/.test(d))                                    return 'Tablet';
+  if (/\b(IPHONE)\b/.test(d))                                  return 'Telecom';
+  // Fallback: usar código família (9730 = Telecom)
+  if (String(codFam) === '9730') return 'Telecom';
+  return 'Outras';
+}
+
 function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
   // v3.21.16: tabs internas — overview | daily | team | categories | insights
   const [sub, setSub] = useStoredState('penetration.sub', 'overview');
@@ -23269,6 +23370,20 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
           kind: 'warn',
           title: `Escalão Telecom ${worstBand.band} — TP fraca`,
           body: `${worstBand.equip} equip vendidos, só ${worstBand.seg} seguros (TP ${pctFmt(worstBand.myTp)} vs ${pctFmt(worstBand.ciaTp)} cia). Maior gap negativo nos escalões.`,
+        });
+      }
+    }
+
+    // v3.21.18: Equipamentos sem cobertura — top família
+    if (Array.isArray(snap.uninsured) && snap.uninsured.length > 0 && snap.familySummary) {
+      const fams = Object.entries(snap.familySummary).map(([f, v]) => ({ fam: f, count: v.count })).sort((a, b) => b.count - a.count);
+      if (fams[0] && fams[0].count >= 10) {
+        const top = fams[0];
+        const topItem = snap.uninsured.filter(u => (u.family || 'Outras') === top.fam)[0];
+        out.push({
+          kind: 'warn',
+          title: `${top.count} equipamentos ${top.fam} sem cobertura`,
+          body: `Maior bolso de oportunidade.${topItem ? ` Top artigo: ${topItem.desc.slice(0, 60)}${topItem.desc.length > 60 ? '…' : ''} (${topItem.qty} unid).` : ''} Vê na tab Categorias → Equipamentos sem seguro.`,
         });
       }
     }
@@ -23662,6 +23777,11 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
         <PriceScalesBlock myScales={myScales} ciaScales={ciaScales} />
       )}
 
+      {/* v3.21.18: Equipamentos sem seguro/PP/extensão de garantia */}
+      {Array.isArray(snap.uninsured) && snap.uninsured.length > 0 && (
+        <UninsuredBlock uninsured={snap.uninsured} familySummary={snap.familySummary} />
+      )}
+
       </>)}{/* fim categories */}
 
       {sub === 'team' && (<>
@@ -23970,6 +24090,99 @@ function DailyHeatmap({ snap, myStoreRow }) {
 }
 
 // v3.21.16: Escalões de preço (telecom)
+// v3.21.18: Equipamentos vendidos sem seguro/PP por família
+function UninsuredBlock({ uninsured, familySummary }) {
+  const [expandedFam, setExpandedFam] = useState(null);
+  const families = useMemo(() => {
+    return Object.entries(familySummary || {})
+      .map(([fam, v]) => ({ fam, ...v }))
+      .sort((a, b) => b.count - a.count);
+  }, [familySummary]);
+
+  if (!families.length) return null;
+  const totalUninsured = families.reduce((acc, f) => acc + f.count, 0);
+
+  return (
+    <div style={{ marginTop: 36, marginBottom: 36 }}>
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>🚨 Equipamentos sem seguro · PP · extensão de garantia</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
+        <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+          Total: {totalUninsured} equipamentos não cobertos
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 16, lineHeight: 1.5, padding: '10px 14px', background: `${T.orange}10`, border: `1px solid ${T.orange}30`, borderRadius: 6 }}>
+        <strong>Heurística:</strong> em cada talão (ticket), conta-se equipamentos vs apólices vendidas. Se houver mais equipamentos do que apólices, os excedentes contam como &quot;sem cobertura&quot;. Foca-te nos artigos mais frequentes para campanhas de follow-up.
+      </div>
+
+      {/* Card por família */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
+        {families.map(f => {
+          const isExp = expandedFam === f.fam;
+          return (
+            <button key={f.fam}
+              onClick={() => setExpandedFam(isExp ? null : f.fam)}
+              style={{
+                padding: '14px 16px', textAlign: 'left', cursor: 'pointer',
+                background: isExp ? `${T.orange}14` : T.bgEl,
+                border: `1px solid ${isExp ? T.orange : T.line}`,
+                borderRadius: 10, fontFamily: 'inherit',
+                transition: 'background 0.12s, border 0.12s',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{f.fam}</span>
+                <span style={{ fontSize: 10, color: T.inkMute }}>{isExp ? '▾' : '▸'}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 6 }}>
+                <span className="display" style={{ fontSize: 24, fontWeight: 500, color: T.orange, fontFamily: 'Geist Mono', lineHeight: 1 }}>
+                  {f.count}
+                </span>
+                <span style={{ fontSize: 10, color: T.inkMute }}>
+                  unidades · {f.items} EAN{f.items !== 1 ? 's' : ''} distintos
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tabela detalhada da família expandida */}
+      {expandedFam && (
+        <div style={{ overflowX: 'auto', border: `1px solid ${T.lineSoft}`, borderRadius: 8, marginBottom: 12 }}>
+          <div style={{ padding: '12px 16px', borderBottom: `1px solid ${T.line}`, fontSize: 11, fontFamily: 'Geist Mono', color: T.inkSoft, background: T.bgEl }}>
+            <strong>{expandedFam}</strong> · top 30 artigos
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: 'transparent', fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', borderBottom: `1px solid ${T.line}` }}>
+                <th style={{ padding: '10px', textAlign: 'left', fontWeight: 500 }}>EAN</th>
+                <th style={{ padding: '10px', textAlign: 'left', fontWeight: 500 }}>Descrição</th>
+                <th style={{ padding: '10px', textAlign: 'right', fontWeight: 500 }}>Quant.</th>
+                <th style={{ padding: '10px', textAlign: 'right', fontWeight: 500 }}>Talões</th>
+                <th style={{ padding: '10px', textAlign: 'left', fontWeight: 500 }}>Top vendedor</th>
+              </tr>
+            </thead>
+            <tbody>
+              {uninsured.filter(u => (u.family || 'Outras') === expandedFam).slice(0, 30).map((u, i) => (
+                <tr key={`${u.ean}-${i}`} style={{ borderTop: `1px solid ${T.lineSoft}` }}>
+                  <td style={{ padding: '8px 10px', fontFamily: 'Geist Mono', fontSize: 11, color: T.inkSoft }}>{u.ean || '—'}</td>
+                  <td style={{ padding: '8px 10px', fontSize: 11 }} title={u.desc}>
+                    {u.desc.length > 60 ? u.desc.slice(0, 58) + '…' : u.desc}
+                  </td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', fontWeight: 600, color: T.orange }}>{u.qty}</td>
+                  <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft, fontSize: 11 }}>{u.tickets}</td>
+                  <td style={{ padding: '8px 10px', fontSize: 10, color: T.inkSoft }}>{u.topSeller || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PriceScalesBlock({ myScales, ciaScales }) {
   // Agregar myScales por banda (podem haver linhas tipo "Total")
   const rows = useMemo(() => {
