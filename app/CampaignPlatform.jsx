@@ -1482,10 +1482,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.16';
+const APP_VERSION = '3.21.17';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-27T22:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-27T23:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1495,6 +1495,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.17', date: '2026-05-27', summary: 'Tx Penetração diário — selector de dia + foco. (A) Default auto-pick: se o snapshot é do mês actual escolhe ONTEM; senão último dia com dados. (B) Pill bar de dias no topo (cor consoante TP) — click para seleccionar. (C) Card de detalhe grande do dia escolhido: TP total em fonte serif, contagem seg/equip, Δ vs N-1 — e 8 sub-cards por categoria (TV/Foto/HW/Telecom/Smartwatch/Mob/Drone/Gaming) com TP+seg/equip+Δ vs N-1, cores conforme nível. (D) Heatmap mensal abaixo continua disponível; linha do dia seleccionado fica destacada (borda+bg accent) e click numa linha muda o dia seleccionado.' },
   { version: '3.21.16', date: '2026-05-27', summary: 'Tx Penetração: análise profunda multi-sheet — heatmap diário, equipa PTS, escalões, VIM/churn. (A) Parser estendido para 10 sheets: + RESUMO DIA, TP Escalões, TOTAL VIM, Churn Loja, Churn, Aux_Target, AUX_1. Sellers ganham 15 campos novos (vimTotal, vimTotalSCB, chargeBack, bonifBimestral, bonifAddon, challengeSafe, apolicesAnuladas, churnPct, pmcApolice, etc.). (B) PenetrationBreakdown reorganizado em 5 sub-tabs internos: Visão Geral · Diário · Equipa PTS · Categorias & Escalões · Recomendações. (C) Overview: KPIs novos VIM Total / Seguros+Addons € / Charge-back / Churn 6m + cluster. (D) Daily: novo DailyHeatmap — grelha calendário cor por TP (verde/laranja/vermelho), N vs N-1 visível, totais mensais no topo, toggle "esconder dias vazios". (E) Team PTS: TeamPTSAggregates (4 KPIs equipa) + SellersTable filtrada por dept PTS (/^pt/i case-insensitive, exclui SERVICOS/BACK OFFICE/CLINICA), expansível com breakdown por categoria (heatmap mini) + extras (DDR, Extra Seg/Cloud, Telecom <399/>399, À la carte, Challenge Safe). Colunas novas: VIM €, CB €, Líquido €, Bonif. €. Sort por VIM líquido por default, click em qualquer header ordena. (F) Categorias: novo PriceScalesBlock — TP por escalão de preço telecom com barra de peso% (volume da companhia). (G) Insights enriquecidos: vendedores VIM negativo, top 3 performers, gap no pior escalão, churn loja vs companhia. (H) Helpers _tpColor, _tpBg, _isPTS, _fmtEur reutilizáveis.' },
   { version: '3.21.15', date: '2026-05-27', summary: 'Versão mostra sempre hora de Portugal. APP_BUILD_DATE passa a string ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT). VersionFooter e StatCard formatam com timeZone:"Europe/Lisbon" → utilizadores em qualquer timezone vêem hora PT. Etiqueta "PT" no footer para deixar claro.' },
   { version: '3.21.14', date: '2026-05-27', summary: 'Tx Penetração: target + diarização + N-1 + carga horária. (A) Parser estendido para ler sheet BUDGET LOJA → target total mensal, realizado, % atingimento e diferença por loja. (B) Nova secção "🎯 Objetivo da loja": target / realizado / faltam / por dia, calculando automaticamente dias úteis restantes do mês (Mon-Sab). (C) Tabela "Por categoria" agora tem 7 colunas: TP+unidades, Companhia, N-1 (mês anterior se disponível na BD), Faltam (equip×média - actual), Por dia, Barra. (D) Comparação N-1 automática quando há 2+ meses carregados — usa o snapshot imediatamente anterior. (E) Colaboradores ganham 2 colunas novas: "Por 40h" (seguros normalizados a 40h semanais para comparação justa) e "/ dia" (quota diária do colaborador proporcional às horas vs target da loja). Helpers _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga.' },
@@ -23732,6 +23733,31 @@ function DailyHeatmap({ snap, myStoreRow }) {
     { key: 'total',      label: 'TOTAL' },
   ];
 
+  // v3.21.17: Dia seleccionado — default = ontem se disponível, senão último com dados
+  const allDaysWithData = useMemo(() => (snap.daily || []).filter(d => d.hasData), [snap.daily]);
+  const defaultDay = useMemo(() => {
+    if (allDaysWithData.length === 0) return null;
+    const today = new Date();
+    const yest = today.getDate() - 1;
+    // Procura dia = ontem (apenas se snap.monthKey corresponde ao mês actual)
+    const snapMonth = snap.monthKey || '';
+    const todayMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+    if (snapMonth === todayMonth) {
+      const yestMatch = allDaysWithData.find(d => d.day === yest);
+      if (yestMatch) return yestMatch.day;
+    }
+    // Fallback: último dia com dados
+    return allDaysWithData[allDaysWithData.length - 1].day;
+  }, [allDaysWithData, snap.monthKey]);
+  const [selectedDay, setSelectedDay] = useState(defaultDay);
+  // Reset quando snap muda
+  useEffect(() => { setSelectedDay(defaultDay); }, [defaultDay]);
+
+  const selectedDayData = useMemo(
+    () => (snap.daily || []).find(d => d.day === selectedDay) || null,
+    [snap.daily, selectedDay]
+  );
+
   // Totais por categoria
   const totals = useMemo(() => {
     const out = {};
@@ -23763,12 +23789,105 @@ function DailyHeatmap({ snap, myStoreRow }) {
   return (
     <div>
       <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
-        <span>📅 Heatmap diário · {myStoreRow.name} · {snap.month}</span>
+        <span>📅 Análise diária · {myStoreRow.name} · {snap.month}</span>
         <span style={{ flex: 1, height: 1, background: T.line }} />
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 10, textTransform: 'none', letterSpacing: 0, color: T.inkSoft }}>
           <input type="checkbox" checked={hideEmpty} onChange={e => setHideEmpty(e.target.checked)} />
           Esconder dias vazios
         </label>
+      </div>
+
+      {/* v3.21.17: Seletor de dia (pills) + detalhe do dia seleccionado */}
+      {allDaysWithData.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          {/* Pills de dias */}
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
+            <span style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono', letterSpacing: '0.08em', textTransform: 'uppercase', marginRight: 6 }}>
+              Dia:
+            </span>
+            {allDaysWithData.map(d => {
+              const on = d.day === selectedDay;
+              const tp = d.total?.taxa || 0;
+              return (
+                <button key={d.day} onClick={() => setSelectedDay(d.day)} title={`Dia ${d.day} · TP ${pctFmt(tp)}`}
+                  style={{
+                    padding: '4px 10px', fontSize: 11, fontFamily: 'Geist Mono',
+                    borderRadius: 999, fontWeight: on ? 600 : 500,
+                    border: `1px solid ${on ? T.ink : _tpColor(tp) + '40'}`,
+                    background: on ? T.ink : _tpBg(tp),
+                    color: on ? T.bg : _tpColor(tp),
+                    cursor: 'pointer', minWidth: 32,
+                  }}>
+                  {String(d.day).padStart(2, '0')}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Detalhe do dia seleccionado */}
+          {selectedDayData && (
+            <div style={{ padding: '20px 24px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginBottom: 18, flexWrap: 'wrap' }}>
+                <div>
+                  <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 4 }}>
+                    Dia {selectedDayData.day} · {snap.month}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}>
+                    <span className="display" style={{ fontSize: 36, fontWeight: 500, color: _tpColor(selectedDayData.total?.taxa || 0), lineHeight: 1, letterSpacing: '-0.02em' }}>
+                      {pctFmt(selectedDayData.total?.taxa || 0)}
+                    </span>
+                    <span style={{ fontSize: 12, color: T.inkSoft, fontFamily: 'Geist Mono' }}>
+                      {selectedDayData.total?.seg || 0} / {selectedDayData.total?.equip || 0}
+                    </span>
+                    {selectedDayData.total?.equipN1 > 0 && (() => {
+                      const d = (selectedDayData.total?.taxa || 0) - (selectedDayData.total?.taxaN1 || 0);
+                      return (
+                        <span style={{ fontSize: 12, fontWeight: 600, color: d >= 0 ? T.green : T.red, fontFamily: 'Geist Mono' }}>
+                          {pctDelta(d)} vs N-1 ({pctFmt(selectedDayData.total?.taxaN1)})
+                        </span>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+
+              {/* Categorias do dia */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8 }}>
+                {cats.filter(c => c.key !== 'total').map(c => {
+                  const cell = selectedDayData[c.key] || {};
+                  const tp = cell.taxa || 0;
+                  const dN1 = tp - (cell.taxaN1 || 0);
+                  return (
+                    <div key={c.key} style={{
+                      padding: '10px 12px', background: _tpBg(tp), borderRadius: 8,
+                      border: `1px solid ${tp >= 0.4 ? T.green + '40' : tp >= 0.25 ? T.orange + '30' : tp > 0 ? T.red + '20' : T.lineSoft}`,
+                    }}>
+                      <div className="mono" style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+                        {c.label}
+                      </div>
+                      <div style={{ fontFamily: 'Geist Mono', fontWeight: 600, color: _tpColor(tp), fontSize: 16 }}>
+                        {cell.equip > 0 ? pctFmt(tp) : '—'}
+                      </div>
+                      <div style={{ fontSize: 10, color: T.inkSoft, fontFamily: 'Geist Mono', marginTop: 2 }}>
+                        {cell.seg || 0}/{cell.equip || 0}
+                      </div>
+                      {cell.equipN1 > 0 && (
+                        <div style={{ fontSize: 9, color: dN1 >= 0 ? T.green : T.red, marginTop: 4, fontFamily: 'Geist Mono', fontWeight: 600 }}>
+                          {pctDelta(dN1)}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginTop: 24, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>Vista mensal — heatmap</span>
+        <span style={{ flex: 1, height: 1, background: T.line }} />
       </div>
 
       {/* Linha de totais por categoria (sticky-like) */}
@@ -23799,9 +23918,19 @@ function DailyHeatmap({ snap, myStoreRow }) {
 
       {/* Linhas diárias */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {days.map(d => (
-          <div key={d.day} style={{ display: 'grid', gridTemplateColumns: `60px repeat(${cats.length}, 1fr)`, gap: 4, fontSize: 10 }}>
-            <div style={{ textAlign: 'right', padding: '6px 8px', color: T.inkSoft, fontFamily: 'Geist Mono', fontSize: 11 }}>
+        {days.map(d => {
+          const isSelected = d.day === selectedDay;
+          return (
+          <div key={d.day} onClick={() => setSelectedDay(d.day)}
+            style={{
+              display: 'grid', gridTemplateColumns: `60px repeat(${cats.length}, 1fr)`, gap: 4, fontSize: 10,
+              cursor: 'pointer',
+              padding: isSelected ? '4px' : 0,
+              background: isSelected ? `${T.accent}10` : 'transparent',
+              borderRadius: isSelected ? 6 : 0,
+              border: isSelected ? `1px solid ${T.accent}50` : '1px solid transparent',
+            }}>
+            <div style={{ textAlign: 'right', padding: '6px 8px', color: isSelected ? T.accent : T.inkSoft, fontFamily: 'Geist Mono', fontSize: 11, fontWeight: isSelected ? 600 : 400 }}>
               {String(d.day).padStart(2, '0')}
             </div>
             {cats.map(c => {
@@ -23827,7 +23956,8 @@ function DailyHeatmap({ snap, myStoreRow }) {
               );
             })}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div style={{ marginTop: 16, display: 'flex', gap: 16, fontSize: 10, color: T.inkMute, justifyContent: 'center' }}>
