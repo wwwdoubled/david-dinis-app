@@ -448,6 +448,13 @@ function _dayFromSerial(serial) {
   const d = new Date(ms);
   return isNaN(d.getTime()) ? 0 : d.getUTCDate();
 }
+// v3.21.28: ano + mês + dia a partir de Excel serial
+function _ymdFromSerial(serial) {
+  const ms = (Number(serial) - 25569) * 86400 * 1000;
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return null;
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
 
 function parsePenetrationExcel(file, onProgress, opts = {}) {
   const sellerStoreFilter = (opts.sellerStoreFilter || 'AVEIRO').toUpperCase();
@@ -1029,9 +1036,40 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
         _mergeN1(dailyAllStores, dailyAllStoresN1);
 
         const dd = _ddrFromFilename(file.name);
+
+        // v3.21.28: derivar ano/mês reais a partir do workbook (Excel serials)
+        // em vez de confiar apenas no filename — fix para casos como
+        // "Mai_27" onde 27 = dia de geração e não ano 2027.
+        let workbookYmd = null;
+        // P1: BD N → primeira data com dados
+        for (const [, dateMap] of bdStoreMap) {
+          const firstSerial = Array.from(dateMap.keys())[0];
+          const ymd = _ymdFromSerial(firstSerial);
+          if (ymd) { workbookYmd = ymd; break; }
+        }
+        // P2: RESUMO DIA primeira linha com data
+        if (!workbookYmd && daily.length > 0 && daily[0].dateN) {
+          workbookYmd = _ymdFromSerial(daily[0].dateN);
+        }
+        let monthKey = dd.monthKey;
+        let monthLabel = dd.month || 'Mês não detectado';
+        let snapshotDay = null;
+        if (workbookYmd) {
+          monthKey = `${workbookYmd.year}-${String(workbookYmd.month).padStart(2, '0')}`;
+          const monthsAbbr = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+          monthLabel = `${monthsAbbr[workbookYmd.month - 1]}/${String(workbookYmd.year).slice(-2)}`;
+          // Filename day hint (se ≤ 31 e diferente dos últimos 2 dígitos do ano)
+          const fileNumMatch = file.name.match(/(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[_\- ]+(\d{1,2})\b/i);
+          const fileNum = fileNumMatch ? Number(fileNumMatch[1]) : null;
+          if (fileNum && fileNum >= 1 && fileNum <= 31 && fileNum !== workbookYmd.year % 100) {
+            snapshotDay = fileNum;
+          }
+        }
+
         resolve({
-          month: dd.month || 'Mês não detectado',
-          monthKey: dd.monthKey,
+          month: monthLabel,
+          monthKey,
+          snapshotDay,
           importedAt: new Date().toISOString(),
           filename: file.name,
           stores, total,
@@ -1741,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.27';
+const APP_VERSION = '3.21.28';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-29T00:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-29T02:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1754,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.28', date: '2026-05-29', summary: 'Fix CRÍTICO: monthKey lido do workbook em vez do filename. Antes "TX_Penetração_Mai_27.xlsx" era interpretado como ano 2027 → mês inteiro futuro → "26 dias úteis restantes" e "Por dia: 2". Agora o parser deriva ano/mês das Excel serials reais em BD N ou RESUMO DIA (fonte de verdade) e trata o número do filename (1-31) como dia de geração do snapshot. Aveiro Mai/27 passa a "Dados até dia 27 · 3 dias úteis restantes" com "Por dia: 13" — alinhado com a realidade. Novo helper _ymdFromSerial, novo campo snap.snapshotDay, P0 no chain de referenceDay no PenetrationBreakdown.' },
   { version: '3.21.27', date: '2026-05-29', summary: 'Fix Planos de Proteção (Tx Penetração): dias úteis restantes + faltam por dia estavam errados. (A) _daysRemainingInMonth aceita agora referenceDay opcional — dias úteis contam a partir de refDay+1 (porque refDay já está no real). (B) PenetrationBreakdown infere referenceDay automaticamente: P1 última data com dados em snap.dailyByStore (BD N), P2 inferir do ratio budget.targetYtd/target × diasNoMes, fallback hoje. (C) Header do card "Objetivo da loja" mostra agora "Dados até dia X · N dias úteis restantes" (deixa claro a data de referência). (D) Nova coluna "À data devias ter" usa budget.targetYtd (sheet BUDGET LOJA col 2) — mostra delta vs real (+N acima/-N atrás) com cor verde/vermelho. (E) Tabela "Por categoria" e quota /dia dos colaboradores PTS herdam o cálculo correcto automaticamente. Exemplo Aveiro Mai/26: antes dailyToHit=13 (39/3), agora 8 (39/5) — alinhado com a data real do ficheiro.' },
   { version: '3.21.25', date: '2026-05-28', summary: 'Envio real de emails via Resend. (A) Nova migration email_queue (cria tabela com status pending/sent/error/skipped + attempts + provider_id + error_message + RLS admin-all + insert-authed). (B) Nova Edge Function send-emails (Deno) — consome fila e envia via Resend API. Auth dual: admin via JWT user OU cron via SUPABASE_SERVICE_ROLE_KEY. Retry com attempts até 3, depois marca error. Tags Resend por categoria. (C) Botão "📤 Enviar pendentes agora" no Admin → Emails — invoca a function, processa até 50 por execução, mostra toast com sent/failed. Log de actividade. (D) AdminEmailsTab ganha filtro "Erro" + EmailRow mostra error_message no tooltip + provider_id Resend visível em sent + indicador retry para attempts<3. (E) README detalhado em supabase/functions/send-emails/README.md com setup Resend (DNS SPF/DKIM), secrets, cron diário 9h.' },
   { version: '3.21.24', date: '2026-05-28', summary: 'Análise de Vendas da Campanha (admin). Novo botão "📊 Análise de Vendas" no header do period em CampaignsView abre full-screen report com: 4 KPIs (unidades/revenue/margem/conversão), gráfico de linha diária com hover interativo (linha total da loja em fundo), top 10 produtos com toggle units/revenue/margem, donut por família + por móvel (clicáveis para filtrar), heatmap hora×dia da semana, tabela detalhada expansível com sort em qualquer coluna + filtros (vendidos/sem venda) e timeline mini por artigo, insights automáticos (top 3, móvel mais produtivo, hora pico, família forte, destaques sem venda). Export PDF multi-página (html2canvas + jsPDF) + Copiar Email HTML rico (clipboard text/html + text/plain fallback) + Enviar via email_queue. Filtros: período de vendas custom (default = period), modo destaque (todos/state/star). Reutiliza buildZoneIndex, normalizeEAN, idbGetActiveSalesSnapshot, queueEmail, padrões SVG existentes.' },
@@ -24373,9 +24412,10 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
 
   // v3.21.14: Budget da loja + diarização
   const budget = snap.budgets?.[myStoreRow.name.toUpperCase()] || null;
-  // v3.21.27: data de referência = último dia com dados do ficheiro (BD N) ou
-  // inferido do budget.targetYtd (proporção do mês). Fallback: hoje.
+  // v3.21.27/28: data de referência (snapshotDay > BD N > budget ratio > hoje)
   const referenceDay = useMemo(() => {
+    // P0 (v3.21.28): snapshotDay vindo do filename "Mai_27" → 27
+    if (snap.snapshotDay && Number.isFinite(snap.snapshotDay)) return snap.snapshotDay;
     const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
     // P1: última data com dados em BD N
     const arr = snap.dailyByStore?.[storeKey];
