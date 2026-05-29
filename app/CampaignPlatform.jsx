@@ -1741,10 +1741,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.25';
+const APP_VERSION = '3.21.27';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-28T09:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-29T00:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1754,6 +1754,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.27', date: '2026-05-29', summary: 'Fix Planos de Proteção (Tx Penetração): dias úteis restantes + faltam por dia estavam errados. (A) _daysRemainingInMonth aceita agora referenceDay opcional — dias úteis contam a partir de refDay+1 (porque refDay já está no real). (B) PenetrationBreakdown infere referenceDay automaticamente: P1 última data com dados em snap.dailyByStore (BD N), P2 inferir do ratio budget.targetYtd/target × diasNoMes, fallback hoje. (C) Header do card "Objetivo da loja" mostra agora "Dados até dia X · N dias úteis restantes" (deixa claro a data de referência). (D) Nova coluna "À data devias ter" usa budget.targetYtd (sheet BUDGET LOJA col 2) — mostra delta vs real (+N acima/-N atrás) com cor verde/vermelho. (E) Tabela "Por categoria" e quota /dia dos colaboradores PTS herdam o cálculo correcto automaticamente. Exemplo Aveiro Mai/26: antes dailyToHit=13 (39/3), agora 8 (39/5) — alinhado com a data real do ficheiro.' },
   { version: '3.21.25', date: '2026-05-28', summary: 'Envio real de emails via Resend. (A) Nova migration email_queue (cria tabela com status pending/sent/error/skipped + attempts + provider_id + error_message + RLS admin-all + insert-authed). (B) Nova Edge Function send-emails (Deno) — consome fila e envia via Resend API. Auth dual: admin via JWT user OU cron via SUPABASE_SERVICE_ROLE_KEY. Retry com attempts até 3, depois marca error. Tags Resend por categoria. (C) Botão "📤 Enviar pendentes agora" no Admin → Emails — invoca a function, processa até 50 por execução, mostra toast com sent/failed. Log de actividade. (D) AdminEmailsTab ganha filtro "Erro" + EmailRow mostra error_message no tooltip + provider_id Resend visível em sent + indicador retry para attempts<3. (E) README detalhado em supabase/functions/send-emails/README.md com setup Resend (DNS SPF/DKIM), secrets, cron diário 9h.' },
   { version: '3.21.24', date: '2026-05-28', summary: 'Análise de Vendas da Campanha (admin). Novo botão "📊 Análise de Vendas" no header do period em CampaignsView abre full-screen report com: 4 KPIs (unidades/revenue/margem/conversão), gráfico de linha diária com hover interativo (linha total da loja em fundo), top 10 produtos com toggle units/revenue/margem, donut por família + por móvel (clicáveis para filtrar), heatmap hora×dia da semana, tabela detalhada expansível com sort em qualquer coluna + filtros (vendidos/sem venda) e timeline mini por artigo, insights automáticos (top 3, móvel mais produtivo, hora pico, família forte, destaques sem venda). Export PDF multi-página (html2canvas + jsPDF) + Copiar Email HTML rico (clipboard text/html + text/plain fallback) + Enviar via email_queue. Filtros: período de vendas custom (default = period), modo destaque (todos/state/star). Reutiliza buildZoneIndex, normalizeEAN, idbGetActiveSalesSnapshot, queueEmail, padrões SVG existentes.' },
   { version: '3.21.23', date: '2026-05-28', summary: 'Tx Penetração: daily REAL por loja (BD N) + chart com selector + hover. (A) PROBLEMA: sheet RESUMO DIA é company-wide agregado (37,698 equip/mês ≈ TOTAL companhia, não Aveiro). (B) FONTE NOVA: parser passa a ler BD N (42k rows transações) e BD N-1 (45k) — classifica cada row por TIPO (col 19) em equip/seg/addon, agrupa por loja + data + categoria. Helper _catFromTipo + _dayFromSerial. (C) snap.dailyByStore[\'AVEIRO\'] = [{day, total:{equip,seg,addon,taxa,equipN1,segN1,taxaN1}, tv:{...}, foto:{...}, ...}] em formato compatível com a UI existente. (D) DailyHeatmap troca fonte para dailyByStore[storeKey] — valores agora são REALMENTE de Aveiro (~30-60 equip/dia em vez de ~1300). (E) DailyTrendChart: novo selector dropdown com todas as lojas + opção "Companhia (todas as lojas)". (F) Hover interactivo: mouseMove sobre SVG mostra linha vertical + highlight do ponto + tooltip flutuante com Dia, Equip, Seguros, Addons, TP, N-1. Vai do anti-pattern <title> simples para overlay React rico.' },
@@ -24277,20 +24278,34 @@ function _workingDaysInMonth(year, month1, fromDay = 1) {
   }
   return count;
 }
-function _daysRemainingInMonth(monthKey) {
-  if (!monthKey) return { days: 22, total: 26 };
+function _daysRemainingInMonth(monthKey, referenceDay = null) {
+  // v3.21.27: aceita `referenceDay` (data até onde os dados estão actualizados,
+  // e.g. último dia com dados no ficheiro). Quando dado, conta dias úteis a
+  // partir de refDay+1 (porque refDay já está incluído no `real`). Sem refDay,
+  // comportamento legado: usa hoje.
+  if (!monthKey) return { days: 22, total: 26, refDay: null };
   const [y, m] = monthKey.split('-').map(Number);
+  const total = _workingDaysInMonth(y, m, 1);
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const refIsExplicit = Number.isFinite(referenceDay) && referenceDay > 0;
+  if (refIsExplicit) {
+    // Dia explícito (do ficheiro) — restantes começam no dia seguinte
+    const safeRef = Math.min(Math.max(1, referenceDay), daysInMonth);
+    const fromDay = safeRef + 1;
+    const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
+    return { days: remaining, total, elapsed: total - remaining, refDay: safeRef };
+  }
+  // Sem refDay → usa hoje (legacy)
   const today = new Date();
   const monthEnd = new Date(y, m, 0);
   const monthStart = new Date(y, m - 1, 1);
-  const total = _workingDaysInMonth(y, m, 1);
-  // Se hoje já passou o mês, retorna 0 remaining
-  if (today > monthEnd) return { days: 0, total, elapsed: total };
-  // Se ainda não chegou, retorna total (mês ainda nem começou)
-  if (today < monthStart) return { days: total, total, elapsed: 0 };
-  // Mês actual — conta dias úteis do hoje até final
-  const remaining = _workingDaysInMonth(y, m, today.getDate());
-  return { days: remaining, total, elapsed: total - remaining };
+  if (today > monthEnd) return { days: 0, total, elapsed: total, refDay: daysInMonth };
+  if (today < monthStart) return { days: total, total, elapsed: 0, refDay: null };
+  // Mês actual — refDay = hoje, restantes a partir de hoje+1
+  const todayDay = today.getDate();
+  const fromDay = todayDay + 1;
+  const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
+  return { days: remaining, total, elapsed: total - remaining, refDay: todayDay };
 }
 function _hoursFromCarga(carga) {
   // "40H00 Semanais" → 40; "35H00 Semanais" → 35; etc.
@@ -24358,7 +24373,26 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
 
   // v3.21.14: Budget da loja + diarização
   const budget = snap.budgets?.[myStoreRow.name.toUpperCase()] || null;
-  const workdays = useMemo(() => _daysRemainingInMonth(snap.monthKey), [snap.monthKey]);
+  // v3.21.27: data de referência = último dia com dados do ficheiro (BD N) ou
+  // inferido do budget.targetYtd (proporção do mês). Fallback: hoje.
+  const referenceDay = useMemo(() => {
+    const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
+    // P1: última data com dados em BD N
+    const arr = snap.dailyByStore?.[storeKey];
+    if (Array.isArray(arr) && arr.length > 0) {
+      const withData = arr.filter(d => d.hasData);
+      const last = withData[withData.length - 1];
+      if (last?.day) return last.day;
+    }
+    // P2: inferir do ratio targetYtd / target × diasNoMes
+    if (budget && budget.target > 0 && budget.targetYtd > 0 && snap.monthKey) {
+      const [y, m] = snap.monthKey.split('-').map(Number);
+      const dim = new Date(y, m, 0).getDate();
+      return Math.round((budget.targetYtd / budget.target) * dim);
+    }
+    return null; // → _daysRemainingInMonth usa hoje
+  }, [snap, myStoreRow, budget]);
+  const workdays = useMemo(() => _daysRemainingInMonth(snap.monthKey, referenceDay), [snap.monthKey, referenceDay]);
 
   // Linha equivalente no snapshot anterior (mesmo nome de loja)
   const prevMyStoreRow = useMemo(() => {
@@ -24627,10 +24661,11 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
       {/* v3.21.14: Diarização — target da loja, faltam, por dia */}
       {budget && (
         <div style={{ marginBottom: 36, padding: '20px 24px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 12 }}>
-          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div className="mono" style={{ fontSize: 9, letterSpacing: '0.14em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span>🎯 Objetivo da loja — {snap.month}</span>
             <span style={{ flex: 1, height: 1, background: T.line }} />
             <span style={{ fontSize: 9, color: T.inkMute, textTransform: 'none', letterSpacing: 0 }}>
+              {workdays.refDay ? `Dados até dia ${workdays.refDay} · ` : ''}
               {workdays.days > 0 ? `${workdays.days} dias úteis restantes` : `${workdays.total} dias úteis totais`}
             </span>
           </div>
@@ -24653,6 +24688,21 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
                   <div style={{ fontSize: 28, fontWeight: 600, color: pctColor, fontFamily: 'Geist Mono', lineHeight: 1 }}>{real}</div>
                   <div style={{ fontSize: 10, color: T.inkMute, marginTop: 4 }}>{pctFmt(pctOf)} do target</div>
                 </div>
+                {/* v3.21.27: À data — devia ter vs tem (gap proporcional ao tempo decorrido) */}
+                {budget.targetYtd > 0 && (() => {
+                  const ytd = Math.round(budget.targetYtd);
+                  const gap = real - ytd;
+                  const onTrack = gap >= 0;
+                  return (
+                    <div title="TARGET À DATA do ficheiro BUDGET LOJA — quanto devias ter neste momento para estar on-track">
+                      <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>À data devias ter</div>
+                      <div style={{ fontSize: 28, fontWeight: 600, color: T.inkSoft, fontFamily: 'Geist Mono', lineHeight: 1 }}>{ytd}</div>
+                      <div style={{ fontSize: 10, color: onTrack ? T.green : T.red, marginTop: 4, fontWeight: 600 }}>
+                        {onTrack ? `+${gap} acima` : `${gap} atrás`}
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div>
                   <div className="mono" style={{ fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: T.inkMute, marginBottom: 6 }}>Faltam</div>
                   <div style={{ fontSize: 28, fontWeight: 600, color: missing > 0 ? T.orange : T.green, fontFamily: 'Geist Mono', lineHeight: 1 }}>
