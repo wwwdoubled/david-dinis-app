@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.28';
+const APP_VERSION = '3.21.29';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-29T02:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-29T03:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.29', date: '2026-05-29', summary: 'Análise de Vendas: diagnóstico de linha. Quando preços (PVP/PMP) variam muito sob o mesmo EAN (max > 3× min), aparece ⚠ pequeno na descrição da row. Click expande nova secção "🔍 Diagnóstico" com (a) stats PVP s/IVA + PMP min/max/avg/mediana, (b) lista das hipóteses (EAN scaneado com produto errado, descrição vs preço errado, EANs colididos), (c) tabela top 10 rows raw (Data/POS/Talão/Qty/PVP/PMP/Revenue) com outliers destacados a laranja. Ajuda diagnosticar casos como "8018080492785 CAPA com revenue 6647€/11 unid" — provavelmente EAN registado como telemóvel. Novo helper _priceStats. Lógica de cálculo intacta (correcta).' },
   { version: '3.21.28', date: '2026-05-29', summary: 'Fix CRÍTICO: monthKey lido do workbook em vez do filename. Antes "TX_Penetração_Mai_27.xlsx" era interpretado como ano 2027 → mês inteiro futuro → "26 dias úteis restantes" e "Por dia: 2". Agora o parser deriva ano/mês das Excel serials reais em BD N ou RESUMO DIA (fonte de verdade) e trata o número do filename (1-31) como dia de geração do snapshot. Aveiro Mai/27 passa a "Dados até dia 27 · 3 dias úteis restantes" com "Por dia: 13" — alinhado com a realidade. Novo helper _ymdFromSerial, novo campo snap.snapshotDay, P0 no chain de referenceDay no PenetrationBreakdown.' },
   { version: '3.21.27', date: '2026-05-29', summary: 'Fix Planos de Proteção (Tx Penetração): dias úteis restantes + faltam por dia estavam errados. (A) _daysRemainingInMonth aceita agora referenceDay opcional — dias úteis contam a partir de refDay+1 (porque refDay já está no real). (B) PenetrationBreakdown infere referenceDay automaticamente: P1 última data com dados em snap.dailyByStore (BD N), P2 inferir do ratio budget.targetYtd/target × diasNoMes, fallback hoje. (C) Header do card "Objetivo da loja" mostra agora "Dados até dia X · N dias úteis restantes" (deixa claro a data de referência). (D) Nova coluna "À data devias ter" usa budget.targetYtd (sheet BUDGET LOJA col 2) — mostra delta vs real (+N acima/-N atrás) com cor verde/vermelho. (E) Tabela "Por categoria" e quota /dia dos colaboradores PTS herdam o cálculo correcto automaticamente. Exemplo Aveiro Mai/26: antes dailyToHit=13 (39/3), agora 8 (39/5) — alinhado com a data real do ficheiro.' },
   { version: '3.21.25', date: '2026-05-28', summary: 'Envio real de emails via Resend. (A) Nova migration email_queue (cria tabela com status pending/sent/error/skipped + attempts + provider_id + error_message + RLS admin-all + insert-authed). (B) Nova Edge Function send-emails (Deno) — consome fila e envia via Resend API. Auth dual: admin via JWT user OU cron via SUPABASE_SERVICE_ROLE_KEY. Retry com attempts até 3, depois marca error. Tags Resend por categoria. (C) Botão "📤 Enviar pendentes agora" no Admin → Emails — invoca a function, processa até 50 por execução, mostra toast com sent/failed. Log de actividade. (D) AdminEmailsTab ganha filtro "Erro" + EmailRow mostra error_message no tooltip + provider_id Resend visível em sent + indicador retry para attempts<3. (E) README detalhado em supabase/functions/send-emails/README.md com setup Resend (DNS SPF/DKIM), secrets, cron diário 9h.' },
@@ -13904,6 +13905,28 @@ function _fmtEur2(n) {
   const v = Number(n) || 0;
   return v.toLocaleString('pt-PT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €';
 }
+// v3.21.29: estatísticas de preço por EAN — detecta inconsistências
+function _priceStats(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  function s(arr) {
+    if (arr.length === 0) return { min: 0, max: 0, avg: 0, med: 0 };
+    const sorted = [...arr].sort((a, b) => a - b);
+    const avg = arr.reduce((a, b) => a + b, 0) / arr.length;
+    return {
+      min: sorted[0], max: sorted[arr.length - 1], avg,
+      med: sorted[Math.floor(arr.length / 2)],
+    };
+  }
+  const pvps = rows.map(r => Number(r.pvpNoVat) || 0).filter(v => v > 0);
+  const pmps = rows.map(r => Number(r.pmp) || 0).filter(v => v > 0);
+  const pvp = s(pvps), pmp = s(pmps);
+  return {
+    n: rows.length,
+    pvp, pmp,
+    // heurística: se max > 3× min → preços muito diferentes → suspeito
+    inconsistent: (pvp.max > pvp.min * 3 && pvp.min > 0) || (pmp.max > pmp.min * 3 && pmp.min > 0),
+  };
+}
 
 function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose }) {
   const reportRef = useRef(null);
@@ -14716,12 +14739,24 @@ function _RTable({ rows, totalDestaques, sort, setSort, filter, setFilter, expan
               const status = r.qty === 0 ? { label: 'Sem venda', color: T.red, bg: `${T.red}10` }
                 : r.qty < 3 ? { label: 'Fraca', color: T.orange, bg: `${T.orange}10` }
                 : { label: 'OK', color: T.green, bg: `${T.green}10` };
+              // v3.21.29: indicador inline ⚠ se preços do EAN são inconsistentes
+              const eanRowsForStats = r.qty > 0
+                ? allRowsForExpand.filter(dr => normalizeEAN(dr.ean) === r.eanKey)
+                : [];
+              const priceWarn = eanRowsForStats.length > 1
+                ? _priceStats(eanRowsForStats)?.inconsistent
+                : false;
               return (
                 <React.Fragment key={r.eanKey}>
                   <tr onClick={() => setExpanded(isExp ? null : r.eanKey)} style={{ borderTop: `1px solid ${T.lineSoft}`, cursor: 'pointer', background: isExp ? `${T.accent}06` : 'transparent' }}>
                     <td style={{ padding: '8px', color: T.inkMute, textAlign: 'center', width: 24 }}>{isExp ? '▾' : '▸'}</td>
                     <td style={{ padding: '8px' }}>
-                      <div style={{ fontWeight: 500, color: T.ink, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.name}>{r.name || r.ean}</div>
+                      <div style={{ fontWeight: 500, color: T.ink, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.name}>
+                        {r.name || r.ean}
+                        {priceWarn && (
+                          <span title="Preços variam muito sob este EAN — clica para diagnóstico" style={{ marginLeft: 6, color: T.orange, fontSize: 11 }}>⚠</span>
+                        )}
+                      </div>
                       <div style={{ fontSize: 10, color: T.inkMute, fontFamily: 'Geist Mono' }}>{r.ean} {r.fam1 && ` · ${r.fam1}`}</div>
                     </td>
                     <td style={{ padding: '8px', fontSize: 11, color: T.inkSoft }}>{(r.floors || []).join(', ')}</td>
@@ -14769,6 +14804,84 @@ function _RTable({ rows, totalDestaques, sort, setSort, filter, setFilter, expan
                                     background: T.accent, opacity: 0.7, borderRadius: 1, cursor: 'help',
                                   }} />
                                 ))}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                        {/* v3.21.29: Diagnóstico de preços (PVP/PMP min/max/avg) + top rows */}
+                        {(() => {
+                          const eanRows = allRowsForExpand.filter(dr => normalizeEAN(dr.ean) === r.eanKey);
+                          if (eanRows.length === 0) return null;
+                          const stats = _priceStats(eanRows);
+                          const topRows = [...eanRows].sort((a, b) => Math.abs(b.qty) - Math.abs(a.qty)).slice(0, 10);
+                          const warnColor = stats.inconsistent ? T.orange : T.inkSoft;
+                          return (
+                            <div style={{ marginTop: 16, padding: '12px 14px', background: stats.inconsistent ? `${T.orange}08` : T.bgEl, border: `1px solid ${stats.inconsistent ? T.orange + '40' : T.line}`, borderRadius: 8 }}>
+                              <div className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
+                                🔍 Diagnóstico de preços · {stats.n} rows
+                              </div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, fontSize: 11 }}>
+                                <div>
+                                  <span style={{ color: T.inkMute, fontSize: 10 }}>PVP s/IVA</span>
+                                  <div style={{ fontFamily: 'Geist Mono', color: warnColor }}>
+                                    avg <strong>{_fmtEur2(stats.pvp.avg)}</strong> · min {_fmtEur2(stats.pvp.min)} · max {_fmtEur2(stats.pvp.max)}
+                                  </div>
+                                </div>
+                                <div>
+                                  <span style={{ color: T.inkMute, fontSize: 10 }}>PMP (custo)</span>
+                                  <div style={{ fontFamily: 'Geist Mono', color: warnColor }}>
+                                    avg <strong>{_fmtEur2(stats.pmp.avg)}</strong> · min {_fmtEur2(stats.pmp.min)} · max {_fmtEur2(stats.pmp.max)}
+                                  </div>
+                                </div>
+                              </div>
+                              {stats.inconsistent && (
+                                <div style={{ marginTop: 10, fontSize: 11, color: T.orange, lineHeight: 1.5 }}>
+                                  ⚠ <strong>Preços muito variáveis</strong> sob o mesmo EAN. Possíveis causas:
+                                  <ul style={{ margin: '4px 0 0 18px', padding: 0, fontSize: 10, color: T.inkSoft }}>
+                                    <li>EAN scaneado com produto errado no POS</li>
+                                    <li>Descrição no ficheiro não bate com preço real</li>
+                                    <li>Múltiplos produtos com mesma normalização EAN</li>
+                                  </ul>
+                                </div>
+                              )}
+                              {/* Top rows tabela compacta */}
+                              <div style={{ marginTop: 12, overflowX: 'auto' }}>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 10 }}>
+                                  <thead>
+                                    <tr style={{ color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: `1px solid ${T.lineSoft}` }}>
+                                      <th style={{ padding: '4px 6px', textAlign: 'left', fontWeight: 500 }}>Data</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'left', fontWeight: 500 }}>POS</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'left', fontWeight: 500 }}>Talão</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 500 }}>Qty</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 500 }}>PVP s/IVA</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 500 }}>PMP</th>
+                                      <th style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 500 }}>Revenue</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {topRows.map((dr, i) => {
+                                      const isOutlier = stats.inconsistent && (
+                                        (dr.pvpNoVat > stats.pvp.med * 2) || (dr.pvpNoVat < stats.pvp.med / 2 && dr.pvpNoVat > 0)
+                                      );
+                                      return (
+                                        <tr key={i} style={{ borderTop: `1px solid ${T.lineSoft}`, background: isOutlier ? `${T.orange}10` : 'transparent' }}>
+                                          <td style={{ padding: '4px 6px', fontFamily: 'Geist Mono' }}>{dr.date || '—'}</td>
+                                          <td style={{ padding: '4px 6px', fontFamily: 'Geist Mono', color: T.inkSoft }}>{dr.pos != null ? dr.pos : '—'}</td>
+                                          <td style={{ padding: '4px 6px', fontFamily: 'Geist Mono', color: T.inkSoft }}>{dr.transactionId != null ? String(dr.transactionId).slice(-6) : '—'}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'Geist Mono', color: dr.qty < 0 ? T.red : T.ink }}>{dr.qty}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'Geist Mono', color: isOutlier ? T.orange : T.ink, fontWeight: isOutlier ? 600 : 400 }}>{_fmtEur2(dr.pvpNoVat)}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'Geist Mono', color: T.inkSoft }}>{_fmtEur2(dr.pmp)}</td>
+                                          <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'Geist Mono' }}>{_fmtEur2(dr.revenue)}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                                {eanRows.length > 10 && (
+                                  <div style={{ marginTop: 4, fontSize: 10, color: T.inkMute, fontStyle: 'italic' }}>
+                                    + {eanRows.length - 10} rows não mostradas (sort por |qty| desc)
+                                  </div>
+                                )}
                               </div>
                             </div>
                           );
