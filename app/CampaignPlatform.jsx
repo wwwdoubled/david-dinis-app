@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.29';
+const APP_VERSION = '3.21.30';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-29T03:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-29T04:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.30', date: '2026-05-29', summary: 'Análise de Vendas: toggle "⚠ Excluir anómalos" no header. Quando ligado, todos os EANs com preços inconsistentes (max > 3× min) saem de KPIs, gráficos (linha diária, top 10, donuts, heatmap), tabela detalhada e insights. Recalcula tudo automaticamente via destaqueRowsRaw → destaqueRows. Toggle só aparece se há EANs anómalos (badge com contagem). Indicador laranja persistente no header do relatório (visível no PDF/email exportado): "N EANs excluídos · R rows · Q unid · X€ revenue". Casos como capa com revenue 6647€ removidos com 1 click.' },
   { version: '3.21.29', date: '2026-05-29', summary: 'Análise de Vendas: diagnóstico de linha. Quando preços (PVP/PMP) variam muito sob o mesmo EAN (max > 3× min), aparece ⚠ pequeno na descrição da row. Click expande nova secção "🔍 Diagnóstico" com (a) stats PVP s/IVA + PMP min/max/avg/mediana, (b) lista das hipóteses (EAN scaneado com produto errado, descrição vs preço errado, EANs colididos), (c) tabela top 10 rows raw (Data/POS/Talão/Qty/PVP/PMP/Revenue) com outliers destacados a laranja. Ajuda diagnosticar casos como "8018080492785 CAPA com revenue 6647€/11 unid" — provavelmente EAN registado como telemóvel. Novo helper _priceStats. Lógica de cálculo intacta (correcta).' },
   { version: '3.21.28', date: '2026-05-29', summary: 'Fix CRÍTICO: monthKey lido do workbook em vez do filename. Antes "TX_Penetração_Mai_27.xlsx" era interpretado como ano 2027 → mês inteiro futuro → "26 dias úteis restantes" e "Por dia: 2". Agora o parser deriva ano/mês das Excel serials reais em BD N ou RESUMO DIA (fonte de verdade) e trata o número do filename (1-31) como dia de geração do snapshot. Aveiro Mai/27 passa a "Dados até dia 27 · 3 dias úteis restantes" com "Por dia: 13" — alinhado com a realidade. Novo helper _ymdFromSerial, novo campo snap.snapshotDay, P0 no chain de referenceDay no PenetrationBreakdown.' },
   { version: '3.21.27', date: '2026-05-29', summary: 'Fix Planos de Proteção (Tx Penetração): dias úteis restantes + faltam por dia estavam errados. (A) _daysRemainingInMonth aceita agora referenceDay opcional — dias úteis contam a partir de refDay+1 (porque refDay já está no real). (B) PenetrationBreakdown infere referenceDay automaticamente: P1 última data com dados em snap.dailyByStore (BD N), P2 inferir do ratio budget.targetYtd/target × diasNoMes, fallback hoje. (C) Header do card "Objetivo da loja" mostra agora "Dados até dia X · N dias úteis restantes" (deixa claro a data de referência). (D) Nova coluna "À data devias ter" usa budget.targetYtd (sheet BUDGET LOJA col 2) — mostra delta vs real (+N acima/-N atrás) com cor verde/vermelho. (E) Tabela "Por categoria" e quota /dia dos colaboradores PTS herdam o cálculo correcto automaticamente. Exemplo Aveiro Mai/26: antes dailyToHit=13 (39/3), agora 8 (39/5) — alinhado com a data real do ficheiro.' },
@@ -13935,6 +13936,8 @@ function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose
   const [salesFrom, setSalesFrom] = useState(period.startDate || '');
   const [salesTo, setSalesTo]     = useState(period.endDate || '');
   const [destaqueMode, setDestaqueMode] = useState('all'); // all | destaque | star
+  // v3.21.30: exclui EANs com preços inconsistentes (max > 3× min)
+  const [excludeAnomalies, setExcludeAnomalies] = useState(false);
   const [topMode, setTopMode] = useState('units'); // units | revenue | margin
   const [tableSort, setTableSort] = useState({ key: 'revenue', dir: 'desc' });
   const [tableFilter, setTableFilter] = useState({ sold: 'all', fam: null, floor: null });
@@ -13988,10 +13991,39 @@ function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose
 
   // 2. Sales rows: destaques + outros, dentro do período
   const inRange = (d) => d && d >= salesFrom && d <= salesTo;
-  const destaqueRows = useMemo(() => {
+  const destaqueRowsRaw = useMemo(() => {
     if (!snap) return [];
     return snap.rows.filter(r => inRange(r.date) && destaqueIndex.has(normalizeEAN(r.ean)));
   }, [snap, salesFrom, salesTo, destaqueIndex]);
+
+  // v3.21.30: identifica EANs com preços anómalos (max > 3× min em PVP ou PMP)
+  const inconsistentEans = useMemo(() => {
+    const grouped = new Map();
+    for (const r of destaqueRowsRaw) {
+      const k = normalizeEAN(r.ean);
+      if (!k) continue;
+      if (!grouped.has(k)) grouped.set(k, []);
+      grouped.get(k).push(r);
+    }
+    const set = new Set();
+    let excludedRows = 0, excludedQty = 0, excludedRevenue = 0;
+    for (const [k, rows] of grouped) {
+      const stats = _priceStats(rows);
+      if (stats?.inconsistent) {
+        set.add(k);
+        excludedRows += rows.length;
+        for (const r of rows) { excludedQty += r.qty; excludedRevenue += r.revenue; }
+      }
+    }
+    return { set, count: set.size, excludedRows, excludedQty, excludedRevenue };
+  }, [destaqueRowsRaw]);
+
+  // Aplicar filtro de exclusão (toggle no header)
+  const destaqueRows = useMemo(() => {
+    if (!excludeAnomalies) return destaqueRowsRaw;
+    return destaqueRowsRaw.filter(r => !inconsistentEans.set.has(normalizeEAN(r.ean)));
+  }, [destaqueRowsRaw, excludeAnomalies, inconsistentEans]);
+
   const allRowsInPeriod = useMemo(() => {
     if (!snap) return [];
     return snap.rows.filter(r => inRange(r.date));
@@ -14351,6 +14383,32 @@ function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose
               <option value="star">Só destaques portáteis</option>
             </select>
           </label>
+          {/* v3.21.30: toggle para excluir EANs com preços inconsistentes */}
+          {inconsistentEans.count > 0 && (
+            <label
+              title={`${inconsistentEans.count} EAN${inconsistentEans.count !== 1 ? 's' : ''} com preços inconsistentes (max > 3× min). Quando ligado, são removidos de KPIs, gráficos e tabela.`}
+              style={{
+                fontSize: 11, color: excludeAnomalies ? T.orange : T.inkSoft,
+                display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                padding: '8px 12px', border: `1px solid ${excludeAnomalies ? T.orange : T.line}`,
+                background: excludeAnomalies ? `${T.orange}10` : 'transparent',
+                borderRadius: 6, fontFamily: 'inherit', userSelect: 'none',
+                alignSelf: 'flex-end',
+              }}>
+              <input
+                type="checkbox"
+                checked={excludeAnomalies}
+                onChange={(e) => setExcludeAnomalies(e.target.checked)}
+                style={{ accentColor: T.orange }}
+              />
+              <span>
+                ⚠ Excluir anómalos
+                <span style={{ color: T.inkMute, marginLeft: 4, fontFamily: 'Geist Mono', fontSize: 10 }}>
+                  ({inconsistentEans.count} EAN{inconsistentEans.count !== 1 ? 's' : ''})
+                </span>
+              </span>
+            </label>
+          )}
           <div style={{ flex: 1 }} />
           <input type="email" value={emailDest} onChange={e => setEmailDest(e.target.value)} placeholder="email@destino" style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${T.line}`, borderRadius: 4, fontFamily: 'inherit', width: 200 }} />
           <button onClick={handleSendQueue} style={{ padding: '7px 12px', background: 'transparent', color: T.accent, border: `1px solid ${T.accent}`, borderRadius: 6, fontSize: 11, fontWeight: 500, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -14368,6 +14426,15 @@ function CampaignSalesReport({ period, campaigns: scopedCampaigns, user, onClose
             <div className="display" style={{ fontSize: 20, fontStyle: 'italic', marginTop: 4 }}>
               {period.name}
             </div>
+            {/* v3.21.30: indicador de exclusão (visível no PDF) */}
+            {excludeAnomalies && inconsistentEans.count > 0 && (
+              <div style={{ marginTop: 8, fontSize: 11, color: T.orange, display: 'flex', alignItems: 'center', gap: 6 }}>
+                ⚠ {inconsistentEans.count} EAN{inconsistentEans.count !== 1 ? 's' : ''} com preços inconsistentes excluído{inconsistentEans.count !== 1 ? 's' : ''}
+                <span style={{ color: T.inkMute, fontFamily: 'Geist Mono', fontSize: 10 }}>
+                  ({inconsistentEans.excludedRows} rows · {inconsistentEans.excludedQty} unid · {_fmtEur2(inconsistentEans.excludedRevenue)} revenue)
+                </span>
+              </div>
+            )}
           </div>
 
           {loading ? (
