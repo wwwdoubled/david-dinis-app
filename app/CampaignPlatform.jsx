@@ -1798,10 +1798,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.39';
+const APP_VERSION = '3.21.40';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T23:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T23:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1811,6 +1811,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.40', date: '2026-05-30', summary: 'Equipa PTS: filtra sellersPTS por horário built-in. Colaboradores que estão em VENDEDOR_TOTAL mas não constam do horário (ex: Luis Morais — saído do quadro mas ainda no histórico FNAC) ficam fora da tabela, agregados, insights e diarização. Sem horário built-in para o mês, mantém comportamento antigo.' },
   { version: '3.21.39', date: '2026-05-30', summary: 'Diarização redefinida como PLANEAMENTO: o botão deixa de copiar totais históricos e passa a calcular o objectivo de seguros para o dia escolhido e distribuir por colaboradores PTS que trabalham nesse dia (horário built-in) proporcionalmente à carga horária. Modo "ritmo normal" = target/dias úteis totais. Modo "recuperar atraso" (quando real < targetYtd) = missing/dias úteis restantes. Preview live de quotas individuais (h × share% → PP) antes do click. pp_count guarda a quota planeada, equipment_count fica a 0. Botão renomeado "Diarizar dia".' },
   { version: '3.21.38', date: '2026-05-30', summary: 'Equipamentos sem seguro: (A) FIX CRÍTICO — regex /^SEG[\\s_]/ não detectava "SEG-EXT GAR TV…" (hífen ≠ espaço/underscore). Como resultado, as próprias APÓLICES (SEG-EXT, SEG-DDR, etc) eram classificadas como equipamentos e apareciam listadas como "equipamentos sem seguro" — paradoxal. Regex passa a /^(SEG|EXT|GAR)[\\s_-]/ e PP idem. (B) Nova vista "📦 Por Talão" no SellerExpand: cards com cada talão problemático, mostrando equipamentos (com ⚠ nos uncovered, · nos covered) e seguros (✓ verde) lado a lado. Permite ver o contexto representativo — quais equips entraram juntos no talão, quantos saíram com seguro, quantos não. Toggle entre "Por EAN" (vista antiga agregada) e "Por Talão" (nova).' },
   { version: '3.21.37', date: '2026-05-30', summary: 'TPAutoImportButton simplificado: agora é um picker de DATA (input type=date, default=refDay, min/max do mês). Todos os colaboradores PTS recebem 1 registo PP nesse dia único com os totais mensais. Removida a distribuição por horário (built-in/paste) — fica como referência interna mas não influencia a importação. Apaga apenas o registo existente do mesmo colaborador no mesmo dia (não o mês inteiro).' },
@@ -25099,10 +25100,17 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
   const cluster = snap.clusters?.[myStoreRow.name.toUpperCase()] || null;
 
   // Colaboradores PTS — case-insensitive
-  const sellersPTS = useMemo(
-    () => (snap.sellers || []).filter(_isPTS),
-    [snap.sellers]
-  );
+  // v3.21.40: exclui nomes que não estão no horário built-in (ex: Luis Morais
+  // que sai do quadro mas continua a aparecer na sheet VENDEDOR_TOTAL com
+  // vendas/seguros = 0). Aplica-se só quando há horário built-in para o mês.
+  const sellersPTS = useMemo(() => {
+    const all = (snap.sellers || []).filter(_isPTS);
+    const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
+    const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey];
+    if (!Array.isArray(sched) || sched.length === 0) return all;
+    const allowed = new Set(sched.map(c => c.name.toUpperCase().trim()));
+    return all.filter(s => allowed.has(String(s.name || '').toUpperCase().trim()));
+  }, [snap.sellers, snap.monthKey, myStoreRow?.name]);
 
   // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
   // gera sugestões accionáveis. Computado uma vez por snap+row.
