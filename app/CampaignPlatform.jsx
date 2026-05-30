@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.3';
+const APP_VERSION = '3.22.4';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T02:15:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T02:45:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.4', date: '2026-05-31', summary: 'PLANTA Fase 3 — Campanha no Mapa. Novo tab "🗺 Mapa" dentro da campanha (ao lado de Listagem/Plano/Saída): mostra a planta da loja com cada móvel pintado pelo ESTADO dos produtos da campanha — verde (tudo feito), laranja (pendente), vermelho (falta/mínima), anel amarelo (destaque/cartaz). Liga as zonas do período aos móveis da planta por nome (_zoneFixtureScore: móvel inteiro contido no nome da zona, ex: "MLS"→"MLS SOM", "PML APPLE"→"PML APPLE"). Selector de piso (PISO 0/PISO 1), localizador de móvel + localizador de PRODUTO (escreve EAN/nome → centra no móvel onde está). Hover num móvel lista os produtos lá colocados. Aviso das zonas com produtos que não casaram com nenhum móvel (nomes divergentes) — base para linking manual futuro. CampaignsView recebe currentStoreId.' },
   { version: '3.22.3', date: '2026-05-31', summary: 'Fix diarização: distribuição justa por horas (método do maior resto / Hamilton). Antes era Math.round + "o último colaborador fica com o resto" — os full-time (40h) arredondavam a quota para cima e despejavam o resto negativo no part-time (ex: 16 seguros = 5+5+5 deixava só 1 para o de 20h). Agora cada um leva o floor da quota exacta e o que falta para fechar o objectivo vai para os maiores restos fraccionários. Exemplo 16 seguros / 40+40+40+20h: passa de [5,5,5,1] para [5,5,4,2] — Ricardo Gabriel (20h) recebe 2 (quota justa) em vez de 1.' },
   { version: '3.22.2', date: '2026-05-31', summary: 'Planta: TODOS os móveis visíveis + localizador. (A) StoreMapSVG: móveis sem cor do Excel (D6V, T1-T4, estantes numeradas…) passam a ter cor por departamento/produto (_deptColor: PTS=azul/roxo/verde por categoria, EDIT/livros=castanho, SERVICES=rosa). Labels visíveis em móveis a partir de 5px, texto branco/preto consoante o fundo, número mostrado quando não há label. Fundo do Excel atenuado para os móveis sobressaírem. (B) Novo StoreMapLocate: caixa de procura por código/número/nome/mobiliário → lista de resultados → clica para DESTACAR (anel amarelo a pulsar) e CENTRAR o móvel no mapa (scroll automático). (C) Admin → Planta da loja ganha o localizador acima do mapa + clicar num móvel destaca-o. Resolve "mais móveis no mapa e saber onde estão".' },
   { version: '3.22.1', date: '2026-05-31', summary: 'Planta: garantia dos DOIS pisos + upsert null-safe. O parser e o save já tratavam ambos os pisos (Excel PISO 1→app PISO 0, PISO 2→app PISO 1), mas o cloudUpsertFloorPlan usava onConflict que, com store_id=NULL, o Postgres trata como distinto → re-upload duplicava registos. Agora faz find-then-update/insert explícito (eq floor_name + eq/is store_id), garantindo 1 registo por piso por loja e re-uploads idempotentes. Selector de pisos no admin mostra ambos com contagem de móveis.' },
@@ -6445,6 +6446,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
             excludedFamilies={excludedFamilies}
             syncError={syncError} syncing={syncing} onClearSyncError={() => setSyncError(null)}
             cloudDataLoaded={cloudDataLoaded}
+            currentStoreId={currentStoreId}
           />}
           {view === 'calendar' && <CalendarView periods={filteredPeriods} campaigns={filteredCampaigns} onEnterPeriod={(id) => { setView('campaigns'); storeSet('campaigns.selectedPeriodId', id); window.location.reload(); }} />}
           {/* v3.20.12: 'sales' no sidebar (admin-only) + também acessível dentro de Admin */}
@@ -11561,6 +11563,7 @@ function CampaignsView({
   excludedFamilies = [],
   syncError = null, syncing = false, onClearSyncError,
   cloudDataLoaded = true,
+  currentStoreId = null,
 }) {
   // Selected period (null = show periods overview / no period entered)
   const [selectedPeriodId, setSelectedPeriodId] = useStoredState('campaigns.selectedPeriodId', null);
@@ -12624,6 +12627,7 @@ function CampaignsView({
             {[
               { id: 'list', l: 'Listagem', icon: ListTree },
               { id: 'plan', l: 'Plano', icon: Layers },
+              { id: 'map', l: 'Mapa', icon: MapPin },
               { id: 'output', l: 'Saída', icon: Eye },
               { id: 'pedido', l: 'Pedido GU', icon: Warehouse },
             ].map(m => {
@@ -12968,6 +12972,12 @@ function CampaignsView({
             </div>
           </div>
         )
+      ) : mode === 'map' ? (
+        <CampaignMapView
+          floors={floors}
+          currentStoreId={currentStoreId}
+          periodName={primaryCampaign?.name || selectedPeriod?.name || 'Campanha'}
+        />
       ) : mode === 'output' ? (
         <OutputPreview
           floors={combinedFloors}
@@ -27344,6 +27354,189 @@ function StoreMapLocate({ floor, onLocate, placeholder = 'Localizar móvel (cód
       {q && matches.length === 0 && (
         <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, fontSize: 11, color: T.inkMute, padding: '6px 10px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
           Nenhum móvel encontrado.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v3.22.4: CampaignMapView — mapa da loja com o estado da campanha por móvel.
+// Liga as zonas do período aos móveis da planta (match por nome) e pinta cada
+// móvel pelo estado dos slots. Localizador + selector de piso.
+// ─────────────────────────────────────────────────────────────────────────
+function _planTokens(s) {
+  return String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+}
+// score do match zona↔móvel (0 = não bate)
+function _zoneFixtureScore(zoneName, fixture) {
+  const zt = _planTokens(zoneName);
+  const ft = _planTokens(fixture.label);
+  if (ft.length === 0 || zt.length === 0) return 0;
+  if (ft.every(t => zt.includes(t))) return ft.length + 2; // móvel inteiro contido na zona
+  const shared = ft.filter(t => t.length >= 3 && zt.includes(t));
+  return shared.length;
+}
+function CampaignMapView({ floors, currentStoreId, periodName }) {
+  const [plans, setPlans] = useState(null);
+  const [floorIdx, setFloorIdx] = useState(0);
+  const [focusKey, setFocusKey] = useState(null);
+  const [highlightKeys, setHighlightKeys] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+    cloudFetchFloorPlans(currentStoreId).then(rows => { if (alive) setPlans(rows); });
+    return () => { alive = false; };
+  }, [currentStoreId]);
+
+  const planFloors = useMemo(
+    () => (plans || []).map(r => ({ ...r.grid_json, name: r.floor_name })),
+    [plans]
+  );
+  const activeFloor = planFloors[floorIdx] || null;
+
+  // Todas as zonas do período (com slots), achatadas
+  const allZones = useMemo(() => {
+    const out = [];
+    for (const f of (floors || [])) for (const z of (f.zones || [])) out.push({ ...z, floorName: f.name });
+    return out;
+  }, [floors]);
+
+  // Match zona → melhor móvel do piso activo + overlay por estado
+  const { overlayMap, matchedZoneIds, fixtureZones } = useMemo(() => {
+    const ovl = new Map();
+    const matched = new Set();
+    const fxZones = new Map(); // fixtureKey → [{zone, slots}]
+    if (!activeFloor) return { overlayMap: ovl, matchedZoneIds: matched, fixtureZones: fxZones };
+    for (const z of allZones) {
+      let best = null, bestScore = 0;
+      for (const fx of (activeFloor.fixtures || [])) {
+        const sc = _zoneFixtureScore(z.name, fx);
+        if (sc > bestScore) { bestScore = sc; best = fx; }
+      }
+      if (!best || bestScore <= 0) continue;
+      matched.add(z.id);
+      const key = _fixtureKey(best);
+      if (!fxZones.has(key)) fxZones.set(key, []);
+      fxZones.get(key).push(z);
+    }
+    // agrega estado por móvel
+    for (const [key, zones] of fxZones) {
+      const slots = zones.flatMap(z => (z.slots || []).filter(s => s.ref));
+      const states = slots.map(s => s.state || 'pending');
+      const hasFalta = states.some(s => s === 'falta' || s === 'minima');
+      const hasPending = states.some(s => s === 'pending');
+      const hasDestaque = states.some(s => s === 'destaque') || slots.some(s => s.star);
+      const hasCartaz = slots.some(s => s.cartaz);
+      let color = 'rgba(140,140,140,0.18)';
+      if (slots.length === 0) color = 'rgba(140,140,140,0.12)';
+      else if (hasFalta) color = T.red;
+      else if (hasPending) color = T.orange;
+      else color = T.green;
+      const names = slots.slice(0, 6).map(s => '• ' + (s.name || s.ref)).join('\n');
+      const tip = `${zones.map(z => z.name).join(', ')}\n${slots.length} produto(s)`
+        + (names ? '\n' + names : '') + (slots.length > 6 ? `\n… +${slots.length - 6}` : '');
+      ovl.set(key, {
+        color, stroke: hasCartaz || hasDestaque ? T.yellow : undefined,
+        badge: hasDestaque ? T.yellow : (hasCartaz ? T.accent : undefined),
+        tooltip: tip,
+      });
+    }
+    return { overlayMap: ovl, matchedZoneIds: matched, fixtureZones: fxZones };
+  }, [activeFloor, allZones]);
+
+  const unmatchedZones = allZones.filter(z => !matchedZoneIds.has(z.id) && (z.slots || []).some(s => s.ref));
+
+  // Localizar produto → encontra a zona → o móvel
+  const locateProduct = (term) => {
+    const t = String(term || '').toUpperCase().trim();
+    if (!t) { setFocusKey(null); setHighlightKeys(null); return; }
+    const hits = [];
+    for (const [key, zones] of fixtureZones) {
+      for (const z of zones) {
+        for (const s of (z.slots || [])) {
+          if (!s.ref) continue;
+          if (String(s.ref).includes(t) || String(s.name || '').toUpperCase().includes(t)) { hits.push(key); break; }
+        }
+      }
+    }
+    if (hits.length) { setFocusKey(hits[0]); setHighlightKeys(new Set(hits)); }
+  };
+
+  if (plans === null) {
+    return <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13 }}>A carregar planta…</div>;
+  }
+  if (planFloors.length === 0) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
+        <MapPin size={28} strokeWidth={1.25} style={{ color: T.inkMute, marginBottom: 10 }} />
+        <div style={{ fontSize: 15, color: T.ink, marginBottom: 4 }}>Sem planta carregada</div>
+        <div>Vai a <strong>Admin → Planta da loja</strong> e carrega o Excel da planta para usar o mapa.</div>
+      </div>
+    );
+  }
+
+  const totalMatched = matchedZoneIds.size;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Toolbar */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        {/* Floor switcher */}
+        <div style={{ display: 'flex', gap: 4, padding: 3, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8 }}>
+          {planFloors.map((f, i) => (
+            <button key={f.name} onClick={() => { setFloorIdx(i); setFocusKey(null); setHighlightKeys(null); }} style={{
+              padding: '6px 12px', fontSize: 12, fontFamily: 'inherit', borderRadius: 6,
+              background: floorIdx === i ? T.ink : 'transparent', color: floorIdx === i ? T.bg : T.inkSoft,
+              border: 'none', cursor: 'pointer',
+            }}>{f.name}</button>
+          ))}
+        </div>
+        <StoreMapLocate floor={activeFloor} placeholder="Localizar móvel…"
+          onLocate={(fk, all) => { setFocusKey(fk); setHighlightKeys(fk ? new Set(all) : null); }} />
+        <div style={{ position: 'relative', minWidth: 200, flex: 1, maxWidth: 320 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+            <Package size={13} style={{ color: T.inkMute }} />
+            <input placeholder="Localizar produto (EAN/nome)…" onChange={e => locateProduct(e.target.value)}
+              style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: T.ink, fontSize: 12, fontFamily: 'inherit' }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Legenda + cobertura */}
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: T.inkSoft }}>
+        <span style={{ fontWeight: 600 }}>Estado:</span>
+        {[[T.green, 'Tudo feito'], [T.orange, 'Pendente'], [T.red, 'Falta/Mínima'], [T.yellow, 'Destaque/Cartaz']].map(([c, l]) => (
+          <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: c }} /> {l}
+          </span>
+        ))}
+        <span style={{ marginLeft: 'auto', color: T.inkMute }}>
+          {totalMatched} de {allZones.length} zonas ligadas a móveis
+        </span>
+      </div>
+
+      {/* Mapa */}
+      <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl }}>
+        <StoreMapSVG floor={activeFloor} mode="overlay" overlayMap={overlayMap}
+          focusKey={focusKey} highlightKeys={highlightKeys} selectedKey={focusKey}
+          onFixtureClick={(f) => { const k = _fixtureKey(f); setFocusKey(k); setHighlightKeys(new Set([k])); }}
+          maxHeight={640} />
+      </div>
+
+      {/* Zonas sem móvel correspondente */}
+      {unmatchedZones.length > 0 && (
+        <div style={{ padding: 12, background: `${T.orange}10`, border: `1px solid ${T.orange}40`, borderRadius: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: T.orange, marginBottom: 6 }}>
+            ⚠ {unmatchedZones.length} zonas com produtos não foram ligadas a um móvel da planta (nomes não coincidem)
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {unmatchedZones.map(z => (
+              <span key={z.id} style={{ fontSize: 10, padding: '3px 8px', background: T.bgEl, color: T.inkSoft, border: `1px solid ${T.lineSoft}`, borderRadius: 999 }}>
+                {z.name} <strong style={{ color: T.ink }}>({(z.slots || []).filter(s => s.ref).length})</strong>
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
