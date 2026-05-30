@@ -1798,10 +1798,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.40';
+const APP_VERSION = '3.21.41';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T23:15:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T23:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1811,6 +1811,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.41', date: '2026-05-30', summary: 'Fix v3.21.40: match name flexível (primeiro+último). "RICARDO MIGUEL SILVA" do VENDEDOR_TOTAL agora bate com "RICARDO SILVA" do horário. Aplica-se ao filtro sellersPTS + worksToday do TPAutoImportButton.' },
   { version: '3.21.40', date: '2026-05-30', summary: 'Equipa PTS: filtra sellersPTS por horário built-in. Colaboradores que estão em VENDEDOR_TOTAL mas não constam do horário (ex: Luis Morais — saído do quadro mas ainda no histórico FNAC) ficam fora da tabela, agregados, insights e diarização. Sem horário built-in para o mês, mantém comportamento antigo.' },
   { version: '3.21.39', date: '2026-05-30', summary: 'Diarização redefinida como PLANEAMENTO: o botão deixa de copiar totais históricos e passa a calcular o objectivo de seguros para o dia escolhido e distribuir por colaboradores PTS que trabalham nesse dia (horário built-in) proporcionalmente à carga horária. Modo "ritmo normal" = target/dias úteis totais. Modo "recuperar atraso" (quando real < targetYtd) = missing/dias úteis restantes. Preview live de quotas individuais (h × share% → PP) antes do click. pp_count guarda a quota planeada, equipment_count fica a 0. Botão renomeado "Diarizar dia".' },
   { version: '3.21.38', date: '2026-05-30', summary: 'Equipamentos sem seguro: (A) FIX CRÍTICO — regex /^SEG[\\s_]/ não detectava "SEG-EXT GAR TV…" (hífen ≠ espaço/underscore). Como resultado, as próprias APÓLICES (SEG-EXT, SEG-DDR, etc) eram classificadas como equipamentos e apareciam listadas como "equipamentos sem seguro" — paradoxal. Regex passa a /^(SEG|EXT|GAR)[\\s_-]/ e PP idem. (B) Nova vista "📦 Por Talão" no SellerExpand: cards com cada talão problemático, mostrando equipamentos (com ⚠ nos uncovered, · nos covered) e seguros (✓ verde) lado a lado. Permite ver o contexto representativo — quais equips entraram juntos no talão, quantos saíram com seguro, quantos não. Toggle entre "Por EAN" (vista antiga agregada) e "Por Talão" (nova).' },
@@ -24865,10 +24866,19 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow, budget
     // Quem trabalha nesse dia? Usa BUILTIN_PT_SCHEDULES.
     const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
     const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey] || null;
+    const firstLast = (s) => {
+      const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+      if (parts.length < 2) return parts[0] || '';
+      return `${parts[0]} ${parts[parts.length - 1]}`;
+    };
     const worksToday = (sellerName) => {
-      if (!sched) return true; // sem horário, assume todos
-      const key = String(sellerName || '').toUpperCase().trim();
-      const c = sched.find(s => s.name.toUpperCase().trim() === key);
+      if (!sched) return true;
+      const full = String(sellerName || '').toUpperCase().trim();
+      const fl = firstLast(sellerName);
+      const c = sched.find(s => {
+        const sFull = s.name.toUpperCase().trim();
+        return sFull === full || firstLast(s.name) === fl;
+      });
       return c ? !!c.days[dayNum] : true;
     };
     const working = sellersPTS.filter(s => worksToday(s.name));
@@ -25108,8 +25118,20 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
     const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
     const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey];
     if (!Array.isArray(sched) || sched.length === 0) return all;
-    const allowed = new Set(sched.map(c => c.name.toUpperCase().trim()));
-    return all.filter(s => allowed.has(String(s.name || '').toUpperCase().trim()));
+    // v3.21.41: match flexível — primeiro+último nome (case-insensitive).
+    // Antes "RICARDO MIGUEL SILVA" (VENDEDOR_TOTAL) não batia com "RICARDO SILVA"
+    // (horário) e ficava de fora por engano.
+    const firstLast = (s) => {
+      const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+      if (parts.length < 2) return parts[0] || '';
+      return `${parts[0]} ${parts[parts.length - 1]}`;
+    };
+    const allowedFull = new Set(sched.map(c => c.name.toUpperCase().trim()));
+    const allowedFL = new Set(sched.map(c => firstLast(c.name)));
+    return all.filter(s => {
+      const full = String(s.name || '').toUpperCase().trim();
+      return allowedFull.has(full) || allowedFL.has(firstLast(s.name));
+    });
   }, [snap.sellers, snap.monthKey, myStoreRow?.name]);
 
   // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
