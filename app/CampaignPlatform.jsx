@@ -837,8 +837,11 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
             const fam1 = row[13] != null ? String(row[13]) : '';
             const fam2 = row[14] != null ? String(row[14]) : '';
             const seller = String(row[11] || '').trim();
-            const isSeg  = /^SEG[\s_]/i.test(desc);
-            const isPP   = /^PP[\s_]/i.test(desc);
+            // v3.21.38 fix: regex aceitava só SEG_/SEG  mas o ficheiro tem "SEG-EXT GAR TV…"
+            // — antes "SEG-EXT" caía em equips e aparecia listado como equipamento sem seguro
+            // (paradoxo: a própria apólice listada como equipamento "sem seguro"). Agora aceita SEG-, PP-, EXT-, etc.
+            const isSeg  = /^(SEG|EXT|GAR)[\s_-]/i.test(desc);
+            const isPP   = /^PP[\s_-]/i.test(desc);
             const isCard = /Cart[ãa]o.*Prote[çc][ãa]o/i.test(desc);
             const isInsurance = isSeg || isPP || isCard;
             if (!ticketMap.has(ticket)) {
@@ -876,6 +879,7 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
               if (!uninsuredBySeller[sellerKey]) {
                 uninsuredBySeller[sellerKey] = {
                   totalQty: 0, totalItems: 0, byFamily: {}, items: [],
+                  ticketsMap: new Map(),
                 };
               }
               const bs = uninsuredBySeller[sellerKey];
@@ -885,6 +889,16 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
                 ean: eq.ean, desc: eq.desc, family,
                 qty: eq.qty, ticket: ticketId, date: t.date,
               });
+              // v3.21.38: vista representativa por talão. Guarda todos os equips +
+              // segs do talão para o user ver o contexto completo.
+              if (!bs.ticketsMap.has(ticketId)) {
+                bs.ticketsMap.set(ticketId, {
+                  ticket: ticketId, date: t.date,
+                  equips: t.equips.map(e => ({ desc: e.desc, ean: e.ean, qty: e.qty, fam: _famFromDesc(e.desc, e.fam1) })),
+                  segs: t.segs.map(s => ({ desc: s.desc, ean: s.ean, qty: s.qty })),
+                  uncoveredCount: uncoveredCount,
+                });
+              }
             }
           }
           // Consolida items por seller (agregar por EAN) e ordena
@@ -905,6 +919,11 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
             }
             bs.items = Array.from(byEan.values()).sort((a, b) => b.qty - a.qty).slice(0, 50);
             bs.totalItems = bs.items.length;
+            // v3.21.38: converter Map em array ordenado por data desc
+            bs.tickets = Array.from(bs.ticketsMap.values())
+              .sort((a, b) => (b.date || 0) - (a.date || 0))
+              .slice(0, 80);
+            delete bs.ticketsMap;
           }
           for (const v of uninsuredMap.values()) {
             // Top vendedor (1)
@@ -1779,10 +1798,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.37';
+const APP_VERSION = '3.21.38';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T22:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T22:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1811,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.38', date: '2026-05-30', summary: 'Equipamentos sem seguro: (A) FIX CRÍTICO — regex /^SEG[\\s_]/ não detectava "SEG-EXT GAR TV…" (hífen ≠ espaço/underscore). Como resultado, as próprias APÓLICES (SEG-EXT, SEG-DDR, etc) eram classificadas como equipamentos e apareciam listadas como "equipamentos sem seguro" — paradoxal. Regex passa a /^(SEG|EXT|GAR)[\\s_-]/ e PP idem. (B) Nova vista "📦 Por Talão" no SellerExpand: cards com cada talão problemático, mostrando equipamentos (com ⚠ nos uncovered, · nos covered) e seguros (✓ verde) lado a lado. Permite ver o contexto representativo — quais equips entraram juntos no talão, quantos saíram com seguro, quantos não. Toggle entre "Por EAN" (vista antiga agregada) e "Por Talão" (nova).' },
   { version: '3.21.37', date: '2026-05-30', summary: 'TPAutoImportButton simplificado: agora é um picker de DATA (input type=date, default=refDay, min/max do mês). Todos os colaboradores PTS recebem 1 registo PP nesse dia único com os totais mensais. Removida a distribuição por horário (built-in/paste) — fica como referência interna mas não influencia a importação. Apaga apenas o registo existente do mesmo colaborador no mesmo dia (não o mês inteiro).' },
   { version: '3.21.36', date: '2026-05-30', summary: 'TPAutoImportButton: fix "0 criados". Antes filtrava candidatos por department começar por "PT" (muitos perfis não têm o campo), o que vazia o map de matching e fazia todos os sellers contarem como "sem perfil" e nada era criado. Agora: (A) sem filtro de department, (B) match indexa por display_name + email local-part + primeiro+último nome, (C) cria SEMPRE o registo PP — se houver perfil liga collaborator_id, senão só guarda collaborator_name como fallback. Resultado label "c/perfil" + "s/perfil" em vez de "matched + skipped".' },
   { version: '3.21.35', date: '2026-05-30', summary: 'Fix dias úteis restantes: a v3.21.31 introduziu override "fromDay = today.getDate()" que saltava os dias intermédios entre refDay+1 e today (ex: snap dia 28, today dia 30 → contava só dia 30, faltava dia 29 = 1 em vez de 2). Reverte para `fromDay = safeRef + 1` simples, que naturalmente inclui hoje porque today > refDay. Por dia em Maio Aveiro: 31 → 16 (31 unidades em falta / 2 dias = 16/dia, mais realista).' },
@@ -26612,6 +26632,7 @@ function SellersTable({ snap, sellersPTS, budget, workdays }) {
 // v3.21.16: Detalhe expandido de um vendedor — breakdown por categoria
 function SellerExpand({ seller, snap }) {
   const [showAllUn, setShowAllUn] = useState(false);
+  const [unMode, setUnMode] = useState('ticket'); // v3.21.38: 'ean' | 'ticket'
   const cats = [
     { key: 'tv',         label: 'TV' },
     { key: 'foto',       label: 'Foto' },
@@ -26681,7 +26702,80 @@ function SellerExpand({ seller, snap }) {
                 {fam} <strong style={{ color: T.orange, marginLeft: 4 }}>{n}</strong>
               </span>
             ))}
+            {/* v3.21.38: toggle vista */}
+            {myUn.tickets && myUn.tickets.length > 0 && (
+              <div style={{ display: 'inline-flex', gap: 2, background: T.bgEl, borderRadius: 6, padding: 2, border: `1px solid ${T.lineSoft}` }}>
+                {[['ticket','📦 Por Talão'],['ean','📋 Por EAN']].map(([k,l]) => (
+                  <button key={k} onClick={() => setUnMode(k)} style={{
+                    padding: '3px 9px', fontSize: 10, fontFamily: 'inherit',
+                    background: unMode === k ? T.orange : 'transparent',
+                    color: unMode === k ? '#fff' : T.inkSoft,
+                    border: 'none', borderRadius: 4, cursor: 'pointer',
+                  }}>{l}</button>
+                ))}
+              </div>
+            )}
           </div>
+          {unMode === 'ticket' && myUn.tickets && myUn.tickets.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(showAllUn ? myUn.tickets : myUn.tickets.slice(0, 8)).map((t, i) => {
+                const dateStr = t.date ? (() => {
+                  const d = new Date((Number(t.date) - 25569) * 86400 * 1000);
+                  return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('pt-PT', { day:'2-digit', month:'2-digit', timeZone:'Europe/Lisbon' });
+                })() : '—';
+                const totalEq = t.equips.reduce((s,e)=>s+(e.qty||0),0);
+                const covered = totalEq - t.uncoveredCount;
+                return (
+                  <div key={t.ticket} style={{ padding: 10, background: T.bgEl, border: `1px solid ${T.lineSoft}`, borderRadius: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8, flexWrap: 'wrap' }}>
+                      <span style={{ fontFamily: 'Geist Mono', fontSize: 11, color: T.ink, fontWeight: 600 }}>Talão #{t.ticket}</span>
+                      <span style={{ fontSize: 10, color: T.inkSoft }}>{dateStr}</span>
+                      <span style={{ flex: 1 }} />
+                      <span style={{ fontSize: 9, padding:'2px 7px', borderRadius: 999, background: `${T.orange}22`, color: T.orange, fontFamily:'Geist Mono', fontWeight:600 }}>
+                        {t.uncoveredCount} s/seguro
+                      </span>
+                      {covered > 0 && (
+                        <span style={{ fontSize: 9, padding:'2px 7px', borderRadius: 999, background: `${T.green}22`, color: T.green, fontFamily:'Geist Mono', fontWeight:600 }}>
+                          {covered} c/seguro
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display:'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Equipamentos ({t.equips.length})</div>
+                        {t.equips.map((e, j) => {
+                          const isUncov = j >= t.equips.length - t.uncoveredCount;
+                          return (
+                            <div key={j} style={{ fontSize: 10.5, padding: '3px 0', display:'flex', gap: 8, alignItems:'baseline', color: isUncov ? T.orange : T.inkSoft }}>
+                              <span style={{ width: 8 }}>{isUncov ? '⚠' : '·'}</span>
+                              <span style={{ flex: 1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={`${e.desc} · ${e.ean}`}>
+                                {e.desc.length > 50 ? e.desc.slice(0,48)+'…' : e.desc}
+                              </span>
+                              <span style={{ fontFamily: 'Geist Mono', fontSize: 10, fontWeight: 600 }}>×{e.qty}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>Seguros ({t.segs.length})</div>
+                        {t.segs.length === 0 ? (
+                          <div style={{ fontSize: 10, color: T.inkMute, fontStyle: 'italic' }}>Nenhum seguro neste talão</div>
+                        ) : t.segs.map((s, j) => (
+                          <div key={j} style={{ fontSize: 10.5, padding: '3px 0', display:'flex', gap: 8, alignItems:'baseline', color: T.green }}>
+                            <span style={{ width: 8 }}>✓</span>
+                            <span style={{ flex: 1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }} title={s.desc}>
+                              {s.desc.length > 50 ? s.desc.slice(0,48)+'…' : s.desc}
+                            </span>
+                            <span style={{ fontFamily: 'Geist Mono', fontSize: 10 }}>×{s.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
               <thead>
@@ -26708,16 +26802,21 @@ function SellerExpand({ seller, snap }) {
               </tbody>
             </table>
           </div>
-          {myUn.items.length > 15 && (
-            <button onClick={() => setShowAllUn(v => !v)}
-              style={{
-                marginTop: 8, padding: '5px 12px', fontSize: 10, fontFamily: 'inherit',
-                background: 'transparent', color: T.orange,
-                border: `1px solid ${T.orange}40`, borderRadius: 6, cursor: 'pointer',
-              }}>
-              {showAllUn ? `Mostrar só top 15` : `Ver todos (${myUn.items.length})`}
-            </button>
           )}
+          {(() => {
+            const list = unMode === 'ticket' ? (myUn.tickets || []) : myUn.items;
+            const lim = unMode === 'ticket' ? 8 : 15;
+            return list.length > lim && (
+              <button onClick={() => setShowAllUn(v => !v)}
+                style={{
+                  marginTop: 8, padding: '5px 12px', fontSize: 10, fontFamily: 'inherit',
+                  background: 'transparent', color: T.orange,
+                  border: `1px solid ${T.orange}40`, borderRadius: 6, cursor: 'pointer',
+                }}>
+                {showAllUn ? `Mostrar só top ${lim}` : `Ver todos (${list.length})`}
+              </button>
+            );
+          })()}
         </div>
       )}
     </div>
