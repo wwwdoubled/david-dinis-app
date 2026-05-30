@@ -3,6 +3,7 @@ import {
   normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
   _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
   _isWorkedCell, _matchSchedCollab, apportionLargestRemainder,
+  parsePermanenciasText, _zoneFixtureScore,
 } from '../app/lib/helpers.js';
 
 // v3.23.0: testes contra o código REAL (app/lib/helpers.js), não cópias.
@@ -140,5 +141,41 @@ describe('_acumulaLines', () => {
   });
   it('1 palavra → segunda linha vazia', () => {
     expect(_acumulaLines('só')).toEqual(['só', '']);
+  });
+});
+
+describe('_zoneFixtureScore (match zona ↔ móvel)', () => {
+  it('móvel inteiro contido no nome da zona pontua mais', () => {
+    expect(_zoneFixtureScore('MLS SOM (LADO SOM)', { label: 'MLS' })).toBeGreaterThan(0);
+    expect(_zoneFixtureScore('PML APPLE', { label: 'PML APPLE' })).toBeGreaterThanOrEqual(4);
+  });
+  it('sem tokens partilhados → 0', () => {
+    expect(_zoneFixtureScore('CORREDOR DA TV', { label: 'PML TELECOM' })).toBe(0);
+  });
+  it('ignora acentos e pontuação', () => {
+    expect(_zoneFixtureScore('Tríptico Som', { label: 'TRIPTICO' })).toBeGreaterThan(0);
+  });
+});
+
+describe('parsePermanenciasText (horário PDF colado)', () => {
+  const sample = [
+    'qui', '30', 'sex', '1-mai', 's�b', '2',
+    '1365', 'DAVID DINIS', '(2/8)8s', '140UA', 'FC', '100PA',
+    '5537', 'BEATRIZ PINTO', '(1/8)8s', 'FO', '110RA', 'Fer',
+  ].join('\n');
+  it('extrai dias e colaboradores', () => {
+    const r = parsePermanenciasText(sample);
+    expect(r).not.toBe(null);
+    expect(r.days.length).toBe(3);
+    expect(r.days[1]).toEqual({ dow: 'sex', day: 1, monthHint: 'mai' });
+    expect(r.collabs.length).toBe(2);
+    expect(r.collabs[0].nif).toBe('1365');
+    expect(r.collabs[0].name).toBe('DAVID DINIS');
+    expect(r.collabs[0].cells).toContain('140UA');
+  });
+  it('texto sem dias → null', () => {
+    expect(parsePermanenciasText('lixo qualquer')).toBe(null);
+    expect(parsePermanenciasText('')).toBe(null);
+    expect(parsePermanenciasText(null)).toBe(null);
   });
 });

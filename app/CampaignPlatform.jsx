@@ -65,6 +65,7 @@ import {
   normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
   _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
   _isWorkedCell, PT_NAME_ALIASES, _matchSchedCollab, apportionLargestRemainder,
+  parsePermanenciasText, _planTokens, _zoneFixtureScore,
 } from './lib/helpers';
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1936,10 +1937,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.3';
+const APP_VERSION = '3.23.4';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T07:10:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T07:35:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1949,6 +1950,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.4', date: '2026-05-31', summary: 'Mais cobertura de testes: parsePermanenciasText (parser do horário PDF colado), _planTokens e _zoneFixtureScore (match zona da campanha ↔ móvel da planta) extraídos para app/lib/helpers.js e testados. 30 testes vitest no total (era 25). Sem mudança de comportamento — refactor + rede de segurança que continua a preparar o terreno para o code-splitting.' },
   { version: '3.23.3', date: '2026-05-31', summary: 'Robustez: (A) FIX CI — package-lock.json estava dessincronizado (faltavam jsbarcode, vitest e deps), por isso "npm ci" falhava e o CI estava VERMELHO em cada push. Lock regenerado e em sync → CI passa (testes + build). (B) Error boundary POR VISTA (ViewBoundary): se uma secção crashar, mostra um fallback "Tentar de novo / Recarregar" só nessa área em vez de derrubar a app inteira (a boundary global de page.js era o único nível). Reinicia ao mudar de secção (key={view}). Todas as vistas (Dashboard, Campanhas, Vendas, Alterações, Stock, Inventário, Folhetos, PPs, Admin, etc.) ficam isoladas.' },
   { version: '3.23.2', date: '2026-05-31', summary: 'Performance: XLSX carregado dinamicamente. Antes import * as XLSX estava no bundle inicial (~400 kB descomprimido) embora só usado pós-upload/export. Agora singleton lazy getXLSX() (await import("xlsx")) carregado só quando há ficheiro. First Load JS: 461→419 kB (página 461→332 kB). Convertidos para async: parseExcelSmart (+3 callers), parseFnacSalesExcelMainThread, parsePlantaExcel, parsePenetrationExcel, parseCounterSalesExcel, import de devoluções; exports (Pedido GU, inventário, devoluções) com await getXLSX(). Sem mudança de comportamento. Fecha a Fase A (extração de helpers + testes + fix cross-sell + XLSX lazy).' },
   { version: '3.23.1', date: '2026-05-31', summary: 'Fix do heatmap cross-sell (vendas ao mostrador). BUG: cada colaborador mostrava a MESMA percentagem em todas as famílias — a fórmula da "taxa por família" (allocAttach/cell.prod) colapsava matematicamente para attachTotal/totalProdElig, constante por colaborador. Causa raiz: o ficheiro do mostrador não tem ID de talão, logo é impossível ligar um anexo (seguro/addon) à família do produto. CORREÇÃO honesta: a célula passa a mostrar o VOLUME real de produtos elegíveis vendidos por família (cor azul por intensidade) e adiciona-se uma coluna "TP global" com a taxa de anexação REAL de cada colaborador (verde/laranja/vermelho). Nota explicativa de que a taxa por família requer ID de talão (indisponível). Deixa de mostrar dados enganadores.' },
@@ -25021,61 +25023,7 @@ const BUILTIN_PT_SCHEDULES = {
 //     <NIF> \n <NAME> \n (X/Y)Zs \n cell1 \n cell2 \n ... cellN \n
 //   Os dias aparecem antes (qui 30, sex 1-mai, ...).
 // Retorna: { days:[{dow,day,monthHint}], collabs:[{nif,name,carga,cells:[]}] }
-function parsePermanenciasText(text) {
-  if (!text || typeof text !== 'string') return null;
-  const lines = text.split(/\r?\n/).map(s => s.trim());
-  // Detecta sequência de cabeçalhos de dias: alterna [dow][numero(-mes)?]
-  const dows = ['seg', 'ter', 'qua', 'qui', 'sex', 's�b', 'sab', 'dom'];
-  const days = [];
-  let i = 0;
-  for (; i < lines.length; i++) {
-    const a = lines[i].toLowerCase();
-    if (!dows.some(d => a === d)) continue;
-    const b = lines[i + 1] || '';
-    const mNum = b.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
-    if (!mNum) continue;
-    // Começa a apanhar a sequência de dias
-    while (i < lines.length) {
-      const dwl = lines[i].toLowerCase();
-      const dwIdx = dows.indexOf(dwl);
-      if (dwIdx < 0) break;
-      const dayLine = lines[i + 1];
-      const md = dayLine.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
-      if (!md) break;
-      days.push({ dow: dwl, day: Number(md[1]), monthHint: md[2] || null });
-      i += 2;
-    }
-    break;
-  }
-  if (days.length === 0) return null;
-  // A partir daqui, parse colaboradores
-  const collabs = [];
-  while (i < lines.length) {
-    // procura linha numérica de 4-7 dígitos = NIF interno FNAC
-    while (i < lines.length && !/^\d{4,7}$/.test(lines[i])) i++;
-    if (i >= lines.length) break;
-    const nif = lines[i++];
-    const name = lines[i++] || '';
-    if (!name || /^\d/.test(name)) continue;
-    // Próxima linha pode ser carga "(2/8)8s" ou directo cell
-    const cargaLine = lines[i] || '';
-    let carga = '';
-    if (/^\(\d+\/\d+\)/.test(cargaLine)) { carga = cargaLine; i++; }
-    // Apanha exactamente days.length células (ou até bater num novo NIF)
-    const cells = [];
-    let consumed = 0;
-    while (i < lines.length && consumed < days.length) {
-      const ln = lines[i];
-      // Para se aparecer um possível NIF novo seguido de nome textual
-      if (/^\d{4,7}$/.test(ln) && i + 1 < lines.length && /^[A-Z������]/.test(lines[i + 1])) break;
-      // Linhas vazias ainda contam como célula vazia
-      cells.push(ln || '');
-      i++; consumed++;
-    }
-    if (cells.length > 0) collabs.push({ nif, name: name.trim(), carga, cells });
-  }
-  return { days, collabs };
-}
+// parsePermanenciasText → app/lib/helpers.js (v3.23.4)
 
 // v3.21.31: retorna true se a célula representa um dia trabalhado.
 // FC = Descanso, FO = Folga, Fer = F�rias, Aniv = Aniversário, V = Vazio.
@@ -27523,19 +27471,7 @@ function StoreMapLocate({ floor, onLocate, placeholder = 'Localizar móvel (cód
 // Liga as zonas do período aos móveis da planta (match por nome) e pinta cada
 // móvel pelo estado dos slots. Localizador + selector de piso.
 // ─────────────────────────────────────────────────────────────────────────
-function _planTokens(s) {
-  return String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
-}
-// score do match zona↔móvel (0 = não bate)
-function _zoneFixtureScore(zoneName, fixture) {
-  const zt = _planTokens(zoneName);
-  const ft = _planTokens(fixture.label);
-  if (ft.length === 0 || zt.length === 0) return 0;
-  if (ft.every(t => zt.includes(t))) return ft.length + 2; // móvel inteiro contido na zona
-  const shared = ft.filter(t => t.length >= 3 && zt.includes(t));
-  return shared.length;
-}
+// _planTokens, _zoneFixtureScore → app/lib/helpers.js (v3.23.4)
 function CampaignMapView({ floors, currentStoreId, periodName }) {
   const [plans, setPlans] = useState(null);
   const [floorIdx, setFloorIdx] = useState(0);

@@ -160,3 +160,69 @@ export function apportionLargestRemainder(total, weights) {
   for (let k = 0; k < order.length && left > 0; k++) { out[order[k].i] += 1; left--; }
   return out;
 }
+
+// Parser do texto colado do PDF de Permanências FNAC.
+// Retorna { days:[{dow,day,monthHint}], collabs:[{nif,name,carga,cells:[]}] } ou null.
+export function parsePermanenciasText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const lines = text.split(/\r?\n/).map(s => s.trim());
+  const dows = ['seg', 'ter', 'qua', 'qui', 'sex', 's�b', 'sab', 'dom'];
+  const days = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const a = lines[i].toLowerCase();
+    if (!dows.some(d => a === d)) continue;
+    const b = lines[i + 1] || '';
+    const mNum = b.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
+    if (!mNum) continue;
+    while (i < lines.length) {
+      const dwl = lines[i].toLowerCase();
+      const dwIdx = dows.indexOf(dwl);
+      if (dwIdx < 0) break;
+      const dayLine = lines[i + 1];
+      const md = dayLine.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
+      if (!md) break;
+      days.push({ dow: dwl, day: Number(md[1]), monthHint: md[2] || null });
+      i += 2;
+    }
+    break;
+  }
+  if (days.length === 0) return null;
+  const collabs = [];
+  while (i < lines.length) {
+    while (i < lines.length && !/^\d{4,7}$/.test(lines[i])) i++;
+    if (i >= lines.length) break;
+    const nif = lines[i++];
+    const name = lines[i++] || '';
+    if (!name || /^\d/.test(name)) continue;
+    const cargaLine = lines[i] || '';
+    let carga = '';
+    if (/^\(\d+\/\d+\)/.test(cargaLine)) { carga = cargaLine; i++; }
+    const cells = [];
+    let consumed = 0;
+    while (i < lines.length && consumed < days.length) {
+      const ln = lines[i];
+      if (/^\d{4,7}$/.test(ln) && i + 1 < lines.length && /^[A-ZÀ-ɏ�]/.test(lines[i + 1])) break;
+      cells.push(ln || '');
+      i++; consumed++;
+    }
+    if (cells.length > 0) collabs.push({ nif, name: name.trim(), carga, cells });
+  }
+  return { days, collabs };
+}
+
+// Tokens normalizados (uppercase, sem acentos, só A-Z0-9) para matching.
+export function _planTokens(s) {
+  return String(s || '').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^A-Z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+// Score do match zona da campanha ↔ móvel da planta (0 = não bate).
+export function _zoneFixtureScore(zoneName, fixture) {
+  const zt = _planTokens(zoneName);
+  const ft = _planTokens(fixture.label);
+  if (ft.length === 0 || zt.length === 0) return 0;
+  if (ft.every(t => zt.includes(t))) return ft.length + 2; // móvel inteiro contido na zona
+  const shared = ft.filter(t => t.length >= 3 && zt.includes(t));
+  return shared.length;
+}
