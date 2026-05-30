@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.1';
+const APP_VERSION = '3.22.2';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T01:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T01:45:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.2', date: '2026-05-31', summary: 'Planta: TODOS os móveis visíveis + localizador. (A) StoreMapSVG: móveis sem cor do Excel (D6V, T1-T4, estantes numeradas…) passam a ter cor por departamento/produto (_deptColor: PTS=azul/roxo/verde por categoria, EDIT/livros=castanho, SERVICES=rosa). Labels visíveis em móveis a partir de 5px, texto branco/preto consoante o fundo, número mostrado quando não há label. Fundo do Excel atenuado para os móveis sobressaírem. (B) Novo StoreMapLocate: caixa de procura por código/número/nome/mobiliário → lista de resultados → clica para DESTACAR (anel amarelo a pulsar) e CENTRAR o móvel no mapa (scroll automático). (C) Admin → Planta da loja ganha o localizador acima do mapa + clicar num móvel destaca-o. Resolve "mais móveis no mapa e saber onde estão".' },
   { version: '3.22.1', date: '2026-05-31', summary: 'Planta: garantia dos DOIS pisos + upsert null-safe. O parser e o save já tratavam ambos os pisos (Excel PISO 1→app PISO 0, PISO 2→app PISO 1), mas o cloudUpsertFloorPlan usava onConflict que, com store_id=NULL, o Postgres trata como distinto → re-upload duplicava registos. Agora faz find-then-update/insert explícito (eq floor_name + eq/is store_id), garantindo 1 registo por piso por loja e re-uploads idempotentes. Selector de pisos no admin mostra ambos com contagem de móveis.' },
   { version: '3.22.0', date: '2026-05-31', summary: 'PLANTA INTERACTIVA DA LOJA — Fase 1. (A) Novo parser parsePlantaExcel: lê o Excel planograma (AVEIRO_PLANTA.xlsx) — folha NOMENCLATURA (371 móveis com dept/produto/mobiliário/piso) + folhas PISO 1/PISO 2 (grelha visual: cada célula mergeada/colorida = 1 móvel). Usa XLSX cellStyles para extrair cores de fundo + !merges para spans. A posição na grelha é a geometria — gera o mapa automaticamente, sem desenhar à mão. Mapeamento Excel→app: PISO 1→PISO 0 (térreo), PISO 2→PISO 1 (cima). (B) Migration store_floor_plans (grid_json jsonb por piso/loja, RLS read-authed/write-admin). cloudUpsertFloorPlan/cloudFetchFloorPlans/cloudDeleteFloorPlan. (C) Componente StoreMapSVG: renderiza a grelha com cores reais + móveis com labels + hover tooltip (dept/produto/mobiliário). Suporta modo overlay (cores por estado/vendas) para fases seguintes. (D) Admin → novo tab "Planta da loja": upload Excel → preview do mapa por piso → guardar na cloud. Aveiro: PISO 0 com 66 móveis, PISO 1 com 713 (242 com metadados). Próximas fases: vista Campanha no Mapa, heatmap de vendas, drag-drop.' },
   { version: '3.21.42', date: '2026-05-30', summary: 'Match colaborador ↔ horário com NIF + alias + first/last. Helper único _matchSchedCollab. Adicionado alias "RICARDO GABRIEL" (VENDEDOR_TOTAL) → "RICARDO SILVA" (horário). Filtro sellersPTS e worksToday partilham o mesmo helper.' },
@@ -27159,11 +27160,51 @@ function PenetrationDashboardCard({ currentStoreName, onOpen }) {
 function _fixtureKey(f) {
   return f.num != null ? ('n' + f.num) : ('l' + String(f.label || '').toUpperCase().trim());
 }
-function StoreMapSVG({ floor, mode = 'base', overlayMap = null, selectedKey = null, onFixtureClick = null, showLabels = true, maxHeight = 560 }) {
+// v3.22.2: cor por departamento (para móveis sem fill do Excel ficarem visíveis)
+function _deptColor(dept, produit) {
+  const d = String(dept || '').toUpperCase();
+  const p = String(produit || '').toUpperCase();
+  if (d === 'PTS') {
+    if (/TV/.test(p)) return '#2E6FB8';
+    if (/TELECOM|PHONE/.test(p)) return '#1F8FE8';
+    if (/GAMING/.test(p)) return '#7B4FC0';
+    if (/HOME/.test(p)) return '#C98A2B';
+    if (/SON|SOM|AUDIO/.test(p)) return '#2AA39A';
+    return '#3D7AB8';
+  }
+  if (d === 'EDIT') return '#9A8C6A';      // livros — castanho neutro
+  if (d === 'SERVICES') return '#C25A8A';  // serviços — rosa
+  if (d === 'MAGASIN') return '#8896A6';   // estrutura — cinza-azul
+  return '#9AA0A6';
+}
+// v3.22.2: StoreMapSVG melhorado — todos os móveis visíveis, destaque/foco
+// para localização, zoom out automático. highlightKeys: Set de keys a pulsar.
+// focusKey: key a centrar (faz scroll). onFixtureClick(f). overlayMap p/ estados.
+function StoreMapSVG({
+  floor, mode = 'base', overlayMap = null, selectedKey = null,
+  highlightKeys = null, focusKey = null,
+  onFixtureClick = null, showLabels = true, maxHeight = 620,
+}) {
   const [hover, setHover] = useState(null); // { f, mx, my }
   const wrapRef = useRef(null);
-  if (!floor || !floor.cols) return null;
+  const svgRef = useRef(null);
   const CELL = 10;
+
+  // Centra o móvel em foco (scroll dentro do contentor)
+  useEffect(() => {
+    if (!focusKey || !floor) return;
+    const f = (floor.fixtures || []).find(x => _fixtureKey(x) === focusKey);
+    const wrap = wrapRef.current, svg = svgRef.current;
+    if (!f || !wrap || !svg) return;
+    const W = floor.cols * CELL, H = floor.rows * CELL;
+    const rect = svg.getBoundingClientRect();
+    const sx = rect.width / W, sy = rect.height / H;
+    const cx = (f.c + f.cs / 2) * CELL * sx;
+    const cy = (f.r + f.rs / 2) * CELL * sy;
+    wrap.scrollTo({ left: cx - wrap.clientWidth / 2, top: cy - wrap.clientHeight / 2, behavior: 'smooth' });
+  }, [focusKey, floor]);
+
+  if (!floor || !floor.cols) return null;
   const W = floor.cols * CELL;
   const H = floor.rows * CELL;
   const palette = floor.palette || [];
@@ -27171,27 +27212,32 @@ function StoreMapSVG({ floor, mode = 'base', overlayMap = null, selectedKey = nu
   const handleMove = (e, f) => {
     const rect = wrapRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setHover({ f, mx: e.clientX - rect.left, my: e.clientY - rect.top });
+    setHover({ f, mx: e.clientX - rect.left + wrapRef.current.scrollLeft, my: e.clientY - rect.top + wrapRef.current.scrollTop });
   };
 
   return (
-    <div ref={wrapRef} style={{ position: 'relative', width: '100%', overflow: 'auto' }}>
-      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', maxHeight, display: 'block', background: T.bg, borderRadius: 8 }}>
+    <div ref={wrapRef} style={{ position: 'relative', width: '100%', maxHeight, overflow: 'auto', borderRadius: 8 }}>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: Math.min(W * 1.2, 900), height: 'auto', display: 'block', background: T.bg, borderRadius: 8 }}>
         {/* fundo colorido (visual fiel ao Excel) */}
         {(floor.cells || []).map(([r, c, rs, cs, pi], i) => (
           <rect key={'bg' + i} x={c * CELL} y={r * CELL} width={cs * CELL} height={rs * CELL}
-            fill={'#' + (palette[pi] || 'cccccc')} opacity={mode === 'overlay' ? 0.18 : 0.8} />
+            fill={'#' + (palette[pi] || 'cccccc')} opacity={mode === 'overlay' ? 0.12 : 0.5} />
         ))}
-        {/* móveis */}
+        {/* móveis — TODOS visíveis */}
         {(floor.fixtures || []).map((f, i) => {
           const key = _fixtureKey(f);
           const ov = overlayMap ? overlayMap.get(key) : null;
           const x = f.c * CELL, y = f.r * CELL, w = f.cs * CELL, h = f.rs * CELL;
-          const baseFill = f.fill ? '#' + f.fill : 'transparent';
-          const fill = mode === 'overlay' ? (ov?.color || 'rgba(120,120,120,0.10)') : baseFill;
+          // cor base: fill do Excel se houver, senão cor por departamento
+          const baseFill = f.fill ? '#' + f.fill : _deptColor(f.dept, f.produit);
+          const fill = mode === 'overlay' ? (ov?.color || 'rgba(140,140,140,0.16)') : baseFill;
           const isSel = selectedKey === key;
+          const isHL = highlightKeys && highlightKeys.has(key);
           const interactive = !!onFixtureClick;
-          const fontSize = Math.max(2.6, Math.min(w / Math.max(2, f.label.length) * 1.5, h * 0.6, 5));
+          const lbl = f.label || (f.num != null ? String(f.num) : '');
+          const fontSize = Math.max(2.4, Math.min(w / Math.max(2, lbl.length) * 1.7, h * 0.62, 5.5));
+          // texto: branco sobre cores escuras, preto sobre claras
+          const dark = f.fill ? !['FFFFFF', 'FFC000', 'FCE4D6', 'EEECE1'].includes(f.fill) : true;
           return (
             <g key={'fx' + i}
               style={{ cursor: interactive ? 'pointer' : 'default' }}
@@ -27199,18 +27245,26 @@ function StoreMapSVG({ floor, mode = 'base', overlayMap = null, selectedKey = nu
               onMouseEnter={(e) => handleMove(e, f)}
               onMouseMove={(e) => handleMove(e, f)}
               onMouseLeave={() => setHover(null)}>
-              <rect x={x} y={y} width={w} height={h}
+              <rect x={x + 0.2} y={y + 0.2} width={Math.max(0, w - 0.4)} height={Math.max(0, h - 0.4)}
+                rx={0.6}
                 fill={fill}
-                stroke={isSel ? T.accent : (ov?.stroke || 'rgba(0,0,0,0.18)')}
-                strokeWidth={isSel ? 1.2 : 0.3} />
+                fillOpacity={mode === 'overlay' && !ov ? 0.5 : 0.92}
+                stroke={isSel ? T.accent : (isHL ? T.yellow : (ov?.stroke || 'rgba(0,0,0,0.25)'))}
+                strokeWidth={isSel ? 1.4 : (isHL ? 1.2 : 0.3)} />
+              {isHL && (
+                <rect x={x - 0.8} y={y - 0.8} width={w + 1.6} height={h + 1.6} rx={1}
+                  fill="none" stroke={T.yellow} strokeWidth={0.8} opacity={0.9}>
+                  <animate attributeName="opacity" values="0.3;1;0.3" dur="1.1s" repeatCount="indefinite" />
+                </rect>
+              )}
               {ov?.badge && (
                 <circle cx={x + w - 1.6} cy={y + 1.6} r={1.4} fill={ov.badge} stroke="#fff" strokeWidth={0.25} />
               )}
-              {showLabels && f.label && w >= 8 && (
+              {showLabels && lbl && w >= 5 && (
                 <text x={x + w / 2} y={y + h / 2} fontSize={fontSize}
-                  fill={T.ink} textAnchor="middle" dominantBaseline="central"
-                  style={{ pointerEvents: 'none', userSelect: 'none' }}>
-                  {f.label.length > 16 ? f.label.slice(0, 15) + '…' : f.label}
+                  fill={dark ? '#fff' : '#111'} textAnchor="middle" dominantBaseline="central"
+                  style={{ pointerEvents: 'none', userSelect: 'none', fontWeight: 600 }}>
+                  {lbl.length > 14 ? lbl.slice(0, 13) + '…' : lbl}
                 </text>
               )}
             </g>
@@ -27219,17 +27273,72 @@ function StoreMapSVG({ floor, mode = 'base', overlayMap = null, selectedKey = nu
       </svg>
       {hover && (
         <div style={{
-          position: 'absolute', left: Math.min(hover.mx + 12, (wrapRef.current?.clientWidth || 400) - 180),
+          position: 'absolute',
+          left: Math.min(hover.mx + 12, (wrapRef.current?.scrollLeft || 0) + (wrapRef.current?.clientWidth || 400) - 190),
           top: Math.max(8, hover.my - 10), pointerEvents: 'none', zIndex: 20,
           background: T.ink, color: T.bg, padding: '6px 9px', borderRadius: 6,
-          fontSize: 11, maxWidth: 200, boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
+          fontSize: 11, maxWidth: 210, boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
         }}>
-          <div style={{ fontWeight: 600 }}>{hover.f.label}</div>
-          {hover.f.dept && <div style={{ opacity: 0.85, fontSize: 10 }}>{hover.f.dept} · {hover.f.produit}</div>}
+          <div style={{ fontWeight: 600 }}>{hover.f.label || ('Móvel ' + hover.f.num)}</div>
+          {hover.f.num != null && <div style={{ opacity: 0.7, fontSize: 10 }}>Nº {hover.f.num}</div>}
+          {hover.f.dept && <div style={{ opacity: 0.85, fontSize: 10 }}>{hover.f.dept}{hover.f.produit ? ' · ' + hover.f.produit : ''}</div>}
           {hover.f.mobilier && <div style={{ opacity: 0.7, fontSize: 10 }}>{hover.f.mobilier}</div>}
           {overlayMap?.get(_fixtureKey(hover.f))?.tooltip && (
-            <div style={{ marginTop: 4, fontSize: 10, opacity: 0.95 }}>{overlayMap.get(_fixtureKey(hover.f)).tooltip}</div>
+            <div style={{ marginTop: 4, fontSize: 10, opacity: 0.95, whiteSpace: 'pre-line' }}>{overlayMap.get(_fixtureKey(hover.f)).tooltip}</div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// v3.22.2: localizador de móveis — procura por código/número/nome/dept e
+// destaca no mapa. Reutilizável (admin + campanha).
+function StoreMapLocate({ floor, onLocate, placeholder = 'Localizar móvel (código, nº, nome)…' }) {
+  const [q, setQ] = useState('');
+  const matches = useMemo(() => {
+    const term = q.trim().toUpperCase();
+    if (!term || !floor) return [];
+    return (floor.fixtures || []).filter(f => {
+      const lbl = String(f.label || '').toUpperCase();
+      const num = f.num != null ? String(f.num) : '';
+      const mob = String(f.mobilier || '').toUpperCase();
+      const prod = String(f.produit || '').toUpperCase();
+      return lbl.includes(term) || num === term || mob.includes(term) || prod.includes(term);
+    }).slice(0, 30);
+  }, [q, floor]);
+
+  return (
+    <div style={{ position: 'relative', minWidth: 240, flex: 1, maxWidth: 380 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 10px', background: T.paper, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+        <Search size={13} style={{ color: T.inkMute }} />
+        <input value={q} onChange={e => setQ(e.target.value)} placeholder={placeholder}
+          style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: T.ink, fontSize: 12, fontFamily: 'inherit' }} />
+        {q && <button onClick={() => { setQ(''); onLocate?.(null, []); }} style={{ border: 'none', background: 'transparent', color: T.inkMute, cursor: 'pointer', padding: 0 }}><X size={13} /></button>}
+      </div>
+      {q && matches.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, zIndex: 30,
+          background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6, maxHeight: 260, overflowY: 'auto',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+        }}>
+          {matches.map((f, i) => (
+            <button key={i} onClick={() => onLocate?.(_fixtureKey(f), matches.map(_fixtureKey))}
+              style={{
+                display: 'flex', width: '100%', alignItems: 'center', gap: 8, padding: '7px 10px',
+                background: 'transparent', border: 'none', borderBottom: `1px solid ${T.lineSoft}`,
+                cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+              }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: f.fill ? '#' + f.fill : _deptColor(f.dept, f.produit), flexShrink: 0 }} />
+              <span style={{ fontSize: 12, color: T.ink, fontWeight: 600 }}>{f.label || ('Nº ' + f.num)}</span>
+              <span style={{ fontSize: 10, color: T.inkMute, marginLeft: 'auto' }}>{f.dept || ''}{f.mobilier ? ' · ' + f.mobilier : ''}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {q && matches.length === 0 && (
+        <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, fontSize: 11, color: T.inkMute, padding: '6px 10px', background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 6 }}>
+          Nenhum móvel encontrado.
         </div>
       )}
     </div>
@@ -27245,6 +27354,8 @@ function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) 
   const [activeFloorIdx, setActiveFloorIdx] = useState(0);
   const [busy, setBusy] = useState(null);         // 'parsing' | 'saving' | null
   const [msg, setMsg] = useState(null);
+  const [focusKey, setFocusKey] = useState(null);
+  const [highlightKeys, setHighlightKeys] = useState(null);
   const fileRef = useRef();
 
   const loadPlans = async () => {
@@ -27359,10 +27470,25 @@ function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) 
         </div>
       )}
 
-      {/* Map preview */}
+      {/* Localizador + map preview */}
       {activeFloor ? (
-        <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl }}>
-          <StoreMapSVG floor={activeFloor} mode="base" maxHeight={620} />
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <StoreMapLocate floor={activeFloor} onLocate={(fk, all) => { setFocusKey(fk); setHighlightKeys(fk ? new Set(all) : null); }} />
+            <span style={{ fontSize: 11, color: T.inkMute }}>
+              {(activeFloor.fixtures || []).length} móveis neste piso
+            </span>
+            {focusKey && (
+              <button onClick={() => { setFocusKey(null); setHighlightKeys(null); }} style={{
+                marginLeft: 'auto', padding: '4px 10px', fontSize: 11, fontFamily: 'inherit',
+                background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+              }}>limpar destaque</button>
+            )}
+          </div>
+          <StoreMapSVG floor={activeFloor} mode="base" maxHeight={640}
+            focusKey={focusKey} highlightKeys={highlightKeys}
+            selectedKey={focusKey}
+            onFixtureClick={(f) => { const k = _fixtureKey(f); setFocusKey(k); setHighlightKeys(new Set([k])); }} />
         </div>
       ) : (
         <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
