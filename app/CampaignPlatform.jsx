@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.34';
+const APP_VERSION = '3.21.35';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T20:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T21:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.35', date: '2026-05-30', summary: 'Fix dias úteis restantes: a v3.21.31 introduziu override "fromDay = today.getDate()" que saltava os dias intermédios entre refDay+1 e today (ex: snap dia 28, today dia 30 → contava só dia 30, faltava dia 29 = 1 em vez de 2). Reverte para `fromDay = safeRef + 1` simples, que naturalmente inclui hoje porque today > refDay. Por dia em Maio Aveiro: 31 → 16 (31 unidades em falta / 2 dias = 16/dia, mais realista).' },
   { version: '3.21.34', date: '2026-05-30', summary: 'Horários PTS Aveiro built-in: BUILTIN_PT_SCHEDULES com Maio 2026 + Junho 2026 (7 colaboradores cada: DAVID DINIS, BEATRIZ PINTO, RICARDO ALVES, BRUNO MESQUITA, TIAGO NOVAIS, RICARDO SILVA, JOSUE ALVES) extraídos dos PDFs de Permanências SISQUAL. TPAutoImportButton detecta auto: se snap.monthKey ∈ {2026-05, 2026-06} usa o horário built-in (badge verde "built-in") sem precisar de paste. Paste continua a funcionar como override para outros meses ou correcções.' },
   { version: '3.21.33', date: '2026-05-30', summary: 'Folhetos: (A) FIX — linha azul de selecção persistia no PNG/PDF exportado. renderSVGToBlob faz agora strip dos rects com stroke=#1F8FE8 no clone antes de serializar. (B) Specs no SVG passam a ser MULTILINHA (split por \\n) com tamanho ajustável via slider 2-12mm (data.specsSize, default 4mm). FlyerField "Specs" no editor agora é textarea (multiline). Permite usar specs como bloco rico — nome do produto + características — quando o título passa a ser o nome da campanha.' },
   { version: '3.21.32', date: '2026-05-30', summary: 'Folhetos com tipografia Gilroy (oficial FNAC). 6 pesos (Regular 400, Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900) servidos em public/fonts/gilroy/. (A) @font-face global no FlyerEditor para preview no browser. (B) Classes .ft-display / .ft-sans no SVG passam a usar Gilroy como primeira família (fallback Arial Black/Arial). (C) renderSVGToBlob agora embute as 6 OTFs como base64 dataURLs dentro do <defs><style> antes de serializar, porque o <img src=data:svg> usado no export PNG/PDF não vê fonts globais do documento. Cache _gilroyCSSCache para fetch uma única vez. Total ~330KB.' },
@@ -24620,10 +24621,11 @@ function _daysRemainingInMonth(monthKey, referenceDay = null) {
   const refIsExplicit = Number.isFinite(referenceDay) && referenceDay > 0;
   if (refIsExplicit) {
     const safeRef = Math.min(Math.max(1, referenceDay), daysInMonth);
-    // Restantes começam em refDay+1, mas se hoje > refDay no mesmo mês,
-    // hoje fica incluído (não saltamos hoje só porque o ficheiro é de ontem).
-    let fromDay = safeRef + 1;
-    if (sameMonth && today.getDate() > safeRef) fromDay = today.getDate();
+    // Restantes = dias úteis de (refDay+1) até ao fim do mês.
+    // Inclui automaticamente hoje porque today > refDay.
+    // v3.21.35: bug fix — antes o override `fromDay = today.getDate()` saltava
+    // os dias entre refDay+1 e today (ex: snap dia 28, today dia 30 → saltava 29).
+    const fromDay = safeRef + 1;
     const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
     return { days: remaining, total, elapsed: total - remaining, refDay: safeRef };
   }
