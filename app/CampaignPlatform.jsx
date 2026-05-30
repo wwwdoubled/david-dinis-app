@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.6';
+const APP_VERSION = '3.22.7';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T04:15:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T04:40:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.7', date: '2026-05-31', summary: 'Folhetos: fix gap dos cêntimos. O cálculo da largura do preço inteiro usava 0.62 em (Arial Black), mas a fonte agora é Gilroy (mais estreita) → os cêntimos (,98€) ficavam muito afastados do número. Fator ajustado para 0.56 + novos sliders de ajuste fino "↔ Cêntimos" (-30..15mm) e "↕ Cêntimos" (-15..15mm) no editor para posicionar a vírgula+cêntimos exactamente onde se quer. Campos centsDx/centsDy.' },
   { version: '3.22.6', date: '2026-05-31', summary: 'Folhetos: logo FNAC oficial + selo ACUMULA 1% reais (sem fundo). (A) Processei as imagens enviadas: logo FNAC (logos_FNAC_Oficial_2020.png, já transparente) → public/flyer-assets/fnac-logo.png; selo ACUMULA 1% (acumala 1.png, fundo rosa) → recorte do selo (y 10-128) + remoção do rosa por color-key (tol 70 + despill nas bordas) → public/flyer-assets/acumula-1.png transparente. (B) Helper _loadFlyerAssetDataUrl carrega como base64 (cache) — embebe no preview E no export PNG/PDF (o <img src=data:svg> não carrega refs externas, mesmo padrão das fonts Gilroy). (C) FlyerSVG: placeholders rect substituídos por <image> reais — logo FNAC no canto sup-direito (default ON em TODOS os folhetos, draggable) + selo ACUMULA 1% no canto inf-esquerdo (default ON) com a mensagem "O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente." em 2 linhas por baixo (editável). (D) defaultFlyerData: showLogoFnac/showAcumula1 true, showAccumulate (valor €) passa a OFF (alternativa opcional), removido showLogoFnacCard. Toggles actualizados no editor.' },
   { version: '3.22.5', date: '2026-05-31', summary: 'Planta: ZOOM/PAN + edição directa de móveis. (A) StoreMapSVG reescrito com zoom (roda do rato centrada no cursor), pan (arrastar o fundo) e botões +/−/ajustar — funciona em todas as vistas (admin + campanha). focusKey agora dá zoom e centra o móvel localizado. (B) Modo de edição no Admin → Planta da loja: botão "Editar móveis" → arrastar um móvel move-o (snap à grelha), pega no canto inferior-direito redimensiona, clica para seleccionar. Painel lateral edita nome/código, departamento, produto, mobiliário, posição (linha/coluna/altura/largura) e cor (hex). Botões Adicionar móvel / Apagar móvel / Guardar alterações (persiste em store_floor_plans via cloudUpsertFloorPlan) / Cancelar. Indicador "alterações por guardar". Permite acertar a planta quando há mudanças de layout sem voltar ao Excel.' },
   { version: '3.22.4', date: '2026-05-31', summary: 'PLANTA Fase 3 — Campanha no Mapa. Novo tab "🗺 Mapa" dentro da campanha (ao lado de Listagem/Plano/Saída): mostra a planta da loja com cada móvel pintado pelo ESTADO dos produtos da campanha — verde (tudo feito), laranja (pendente), vermelho (falta/mínima), anel amarelo (destaque/cartaz). Liga as zonas do período aos móveis da planta por nome (_zoneFixtureScore: móvel inteiro contido no nome da zona, ex: "MLS"→"MLS SOM", "PML APPLE"→"PML APPLE"). Selector de piso (PISO 0/PISO 1), localizador de móvel + localizador de PRODUTO (escreve EAN/nome → centra no móvel onde está). Hover num móvel lista os produtos lá colocados. Aviso das zonas com produtos que não casaram com nenhum móvel (nomes divergentes) — base para linking manual futuro. CampaignsView recebe currentStoreId.' },
@@ -19554,6 +19555,9 @@ function defaultFlyerData() {
     // v3.22.6: selo ACUMULA 1% + mensagem
     showAcumula1: true,
     acumulaMessage: 'O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente.',
+    // v3.22.7: ajuste fino da posição dos cêntimos (mm)
+    centsDx: 0,
+    centsDy: 0,
   };
 }
 
@@ -19924,6 +19928,21 @@ function FlyerEditor({ campaigns = [] }) {
             <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.4fr', gap: 6 }}>
               <FlyerField label="Preço (inteiro)" value={data.priceMain} onChange={v => update({ priceMain: v })} />
               <FlyerField label="Cêntimos" value={data.priceCents} onChange={v => update({ priceCents: v })} />
+            </div>
+            {/* v3.22.7: ajuste fino da posição dos cêntimos (vírgula + nºs) */}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 4 }}>
+              <span style={{ fontSize: 10, color: T.inkMute, minWidth: 96, fontFamily: 'Geist Mono' }}>↔ Cêntimos: {(data.centsDx || 0).toFixed(1)}mm</span>
+              <input type="range" min={-30} max={15} step={0.5}
+                value={data.centsDx || 0}
+                onChange={e => update({ centsDx: Number(e.target.value) })}
+                style={{ flex: 1 }} />
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 10, color: T.inkMute, minWidth: 96, fontFamily: 'Geist Mono' }}>↕ Cêntimos: {(data.centsDy || 0).toFixed(1)}mm</span>
+              <input type="range" min={-15} max={15} step={0.5}
+                value={data.centsDy || 0}
+                onChange={e => update({ centsDy: Number(e.target.value) })}
+                style={{ flex: 1 }} />
             </div>
 
             <FlyerToggle label="Mostrar desconto" checked={data.showDiscount} onChange={v => update({ showDiscount: v })} />
@@ -20356,12 +20375,15 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
 
       {/* Main price — biggest element. Anchored at priceY computed above. */}
       {data.priceMain && (() => {
-        // Arial Black numerals are ~0.62 em wide each; safer than 0.55
-        const integerW = (data.priceMain || '').length * priceSize * 0.62;
+        // v3.22.7: Gilroy numerais ~0.56 em (mais estreitos que Arial Black 0.62)
+        // → evita o gap grande até aos cêntimos. + ajuste fino centsDx/centsDy.
+        const integerW = (data.priceMain || '').length * priceSize * 0.56;
         const centsSize = priceSize * 0.42;
         const integerBaselineY = priceY + priceSize * 0.85;
         // Cents baseline aligns with top of the integer (cap-height area)
         const centsBaselineY = priceY + priceSize * 0.40;
+        const centsX = textX + integerW + 0.5 + (Number(data.centsDx) || 0);
+        const centsY = centsBaselineY + (Number(data.centsDy) || 0);
         return (
           <g {...elProps('price')}>
             <text
@@ -20374,8 +20396,8 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
             </text>
             {data.priceCents && (
               <text
-                x={textX + integerW + 1}
-                y={centsBaselineY}
+                x={centsX}
+                y={centsY}
                 className="ft-display"
                 fontSize={centsSize}
                 fill={palette.fg}
