@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.36';
+const APP_VERSION = '3.21.37';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T21:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T22:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.37', date: '2026-05-30', summary: 'TPAutoImportButton simplificado: agora é um picker de DATA (input type=date, default=refDay, min/max do mês). Todos os colaboradores PTS recebem 1 registo PP nesse dia único com os totais mensais. Removida a distribuição por horário (built-in/paste) — fica como referência interna mas não influencia a importação. Apaga apenas o registo existente do mesmo colaborador no mesmo dia (não o mês inteiro).' },
   { version: '3.21.36', date: '2026-05-30', summary: 'TPAutoImportButton: fix "0 criados". Antes filtrava candidatos por department começar por "PT" (muitos perfis não têm o campo), o que vazia o map de matching e fazia todos os sellers contarem como "sem perfil" e nada era criado. Agora: (A) sem filtro de department, (B) match indexa por display_name + email local-part + primeiro+último nome, (C) cria SEMPRE o registo PP — se houver perfil liga collaborator_id, senão só guarda collaborator_name como fallback. Resultado label "c/perfil" + "s/perfil" em vez de "matched + skipped".' },
   { version: '3.21.35', date: '2026-05-30', summary: 'Fix dias úteis restantes: a v3.21.31 introduziu override "fromDay = today.getDate()" que saltava os dias intermédios entre refDay+1 e today (ex: snap dia 28, today dia 30 → contava só dia 30, faltava dia 29 = 1 em vez de 2). Reverte para `fromDay = safeRef + 1` simples, que naturalmente inclui hoje porque today > refDay. Por dia em Maio Aveiro: 31 → 16 (31 unidades em falta / 2 dias = 16/dia, mais realista).' },
   { version: '3.21.34', date: '2026-05-30', summary: 'Horários PTS Aveiro built-in: BUILTIN_PT_SCHEDULES com Maio 2026 + Junho 2026 (7 colaboradores cada: DAVID DINIS, BEATRIZ PINTO, RICARDO ALVES, BRUNO MESQUITA, TIAGO NOVAIS, RICARDO SILVA, JOSUE ALVES) extraídos dos PDFs de Permanências SISQUAL. TPAutoImportButton detecta auto: se snap.monthKey ∈ {2026-05, 2026-06} usa o horário built-in (badge verde "built-in") sem precisar de paste. Paste continua a funcionar como override para outros meses ou correcções.' },
@@ -24797,6 +24798,17 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
   const [result, setResult] = useState(null);
   const [showSched, setShowSched] = useState(false);
   const [schedText, setSchedText] = useState('');
+  // v3.21.37: dia único escolhido pelo user (override de tudo o resto).
+  // Default: refDay (último dia com dados). User pode mudar para qualquer dia do mês.
+  const defaultSaleDate = useMemo(() => {
+    if (!snap?.monthKey) return '';
+    const [y, m] = snap.monthKey.split('-').map(Number);
+    const dim = new Date(y, m, 0).getDate();
+    const d = Math.min(Math.max(1, Number(referenceDay) || dim), dim);
+    return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  }, [snap?.monthKey, referenceDay]);
+  const [singleDay, setSingleDay] = useState(defaultSaleDate);
+  useEffect(() => { setSingleDay(defaultSaleDate); }, [defaultSaleDate]);
   // v3.21.34: usa built-in BUILTIN_PT_SCHEDULES quando snap.monthKey + loja
   // estiverem disponíveis. Texto colado pelo user faz override.
   const builtinSched = useMemo(() => {
@@ -24825,14 +24837,10 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
 
   const handleImport = async () => {
     if (!snap?.monthKey) { alert('Snapshot sem mês definido.'); return; }
+    if (!singleDay || !/^\d{4}-\d{2}-\d{2}$/.test(singleDay)) { alert('Escolhe uma data válida.'); return; }
     const [y, m] = snap.monthKey.split('-').map(Number);
     const dim = new Date(y, m, 0).getDate();
-    const refDay = Math.min(Math.max(1, Number(referenceDay) || dim), dim);
-    const useSched = !!parsedSched;
-    const modeLabel = useSched
-      ? `distribuído pelos dias trabalhados (horário ${parsedSched.days.length} dias × ${parsedSched.collabs.length} colaboradores)`
-      : `1 registo por colaborador em ${y}-${String(m).padStart(2,'0')}-${String(refDay).padStart(2,'0')}`;
-    if (!confirm(`Importar ${sellersPTS.length} colaboradores PTS para Diarização?\n\nModo: ${modeLabel}.\nRegistos existentes nas mesmas datas serão substituídos.`)) return;
+    if (!confirm(`Importar ${sellersPTS.length} colaboradores PTS para Diarização?\n\nTodos vão receber 1 registo no dia ${singleDay} com os totais do mês da TX Penetração.\nRegistos existentes para o mesmo colaborador nessa data serão substituídos.`)) return;
     setBusy(true);
     try {
       // v3.21.36: matching mais flexível — tenta nome completo, primeiro+último,
@@ -24852,13 +24860,6 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
       }
       const sess = await supabase.auth.getUser();
       const currentUserId = sess?.data?.user?.id || null;
-      // Map horário por nome normalizado
-      const schedByName = new Map();
-      if (useSched) {
-        for (const c of parsedSched.collabs) {
-          schedByName.set(String(c.name).toUpperCase().trim(), c);
-        }
-      }
       let created = 0, matched = 0, unlinked = 0, errors = [];
       for (const s of sellersPTS) {
         const key = norm(s.name);
@@ -24866,70 +24867,35 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
         const altKey = parts.length >= 2 ? `${parts[0]} ${parts[parts.length-1]}` : key;
         const profile = byName.get(key) || byName.get(altKey);
         if (profile) matched++; else unlinked++;
-        // Identifica dias trabalhados do colaborador no horário
-        let workedDays = [];
-        if (useSched && schedByName.has(key)) {
-          const sched = schedByName.get(key);
-          parsedSched.days.forEach((d, idx) => {
-            // Apanha só dias dentro do mês corrente (ignora hint de mês anterior/posterior).
-            // Se o monthHint do dia 1 indica "mai" no PDF de Maio, tratamos qualquer dia
-            // entre 1 e refDay como pertencente ao mês corrente.
-            if (d.day < 1 || d.day > dim) return;
-            // Apenas distribui até refDay (resto do mês ainda não tem dados)
-            if (d.day > refDay) return;
-            if (_isWorkedCell(sched.cells[idx])) workedDays.push(d.day);
-          });
-        }
-        if (workedDays.length === 0) {
-          // Fallback: 1 registo no refDay
-          workedDays = [refDay];
-        }
         const totalEquip = Math.round(s.vendas || 0);
         const totalPP = Math.round(s.seguros || 0);
-        const equipPerDay = totalEquip / workedDays.length;
-        const ppPerDay = totalPP / workedDays.length;
-        // Apaga registos anteriores deste colaborador no mês (para não duplicar)
-        const monthStart = `${y}-${String(m).padStart(2,'0')}-01`;
-        const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(dim).padStart(2,'0')}`;
+        // Apaga registo existente do mesmo colaborador no MESMO dia
         try {
           if (profile?.user_id) {
             await supabase.from('protection_plans').delete()
-              .eq('collaborator_id', profile.user_id)
-              .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+              .eq('collaborator_id', profile.user_id).eq('sale_date', singleDay);
           } else {
-            // fallback: apaga por nome (mesmo collaborator_name)
             await supabase.from('protection_plans').delete()
-              .eq('collaborator_name', s.name)
-              .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+              .eq('collaborator_name', s.name).eq('sale_date', singleDay);
           }
         } catch { /* ignore */ }
-        // Insere por dia (com arredondamento e ajuste do último para fechar o total)
-        let equipAcc = 0, ppAcc = 0;
-        for (let di = 0; di < workedDays.length; di++) {
-          const day = workedDays[di];
-          const isLast = di === workedDays.length - 1;
-          const eq = isLast ? totalEquip - equipAcc : Math.round(equipPerDay);
-          const pp = isLast ? totalPP - ppAcc : Math.round(ppPerDay);
-          equipAcc += eq; ppAcc += pp;
-          const saleDate = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-          const payload = {
-            sale_date: saleDate,
-            collaborator_id: profile?.user_id || null,
-            collaborator_email: profile?.email || null,
-            collaborator_name: profile?.display_name || s.name,
-            equipment_count: Math.max(0, eq),
-            pp_count: Math.max(0, pp),
-            value: null,
-            category: null,
-            notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${useSched ? ' · horário' : ''}${profile ? '' : ' · sem perfil'}`,
-            created_by: currentUserId,
-          };
-          const res = await cloudCreatePP(payload);
-          if (res?.ok) created++;
-          else errors.push(`${s.name} (${day}): ${res?.error || 'erro'}`);
-        }
+        const payload = {
+          sale_date: singleDay,
+          collaborator_id: profile?.user_id || null,
+          collaborator_email: profile?.email || null,
+          collaborator_name: profile?.display_name || s.name,
+          equipment_count: Math.max(0, totalEquip),
+          pp_count: Math.max(0, totalPP),
+          value: null,
+          category: null,
+          notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${profile ? '' : ' · sem perfil'}`,
+          created_by: currentUserId,
+        };
+        const res = await cloudCreatePP(payload);
+        if (res?.ok) created++;
+        else errors.push(`${s.name}: ${res?.error || 'erro'}`);
       }
-      setResult({ created, matched, unlinked, total: sellersPTS.length, errors: errors.slice(0, 5), mode: useSched ? 'horário' : 'mensal' });
+      setResult({ created, matched, unlinked, total: sellersPTS.length, errors: errors.slice(0, 5), day: singleDay });
     } catch (e) {
       alert('Erro inesperado: ' + (e?.message || e));
     } finally {
@@ -24951,57 +24917,38 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
         }}>
           <Upload size={13} /> {busy ? 'A importar…' : '📥 Importar para Diarização'}
         </button>
-        <div style={{ fontSize: 11, color: T.inkSoft, flex: 1, minWidth: 200 }}>
-          {parsedSched
-            ? <>Vai distribuir totais por <strong>dias trabalhados</strong> conforme horário {parsedSched.builtin ? <span style={{ color: T.green }}>built-in ({snap?.monthKey})</span> : 'colado'} — {parsedSched.collabs.length} colaboradores, {parsedSched.days.length} dias.</>
-            : <>Cria 1 registo PP por colaborador com os totais do mês. Cola horário em baixo para distribuir por dias trabalhados.</>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11, color: T.inkSoft }}>Dia:</span>
+          <input
+            type="date"
+            value={singleDay}
+            min={snap?.monthKey ? `${snap.monthKey}-01` : undefined}
+            max={snap?.monthKey ? (() => {
+              const [y, m] = snap.monthKey.split('-').map(Number);
+              const dim = new Date(y, m, 0).getDate();
+              return `${snap.monthKey}-${String(dim).padStart(2,'0')}`;
+            })() : undefined}
+            onChange={e => setSingleDay(e.target.value)}
+            style={{
+              padding: '6px 8px', background: T.paper, color: T.ink,
+              border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 12, fontFamily: 'inherit',
+            }}
+          />
         </div>
-        <button onClick={() => setShowSched(s => !s)} style={{
-          padding: '6px 10px', background: 'transparent', color: T.inkSoft,
-          border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit',
-        }}>
-          📅 Horário {showSched ? '▴' : '▾'}
-        </button>
+        <div style={{ fontSize: 11, color: T.inkSoft, flex: 1, minWidth: 200 }}>
+          Cria 1 registo PP por colaborador no dia escolhido com os totais mensais da TX Penetração.
+        </div>
         {result && (
           <div style={{
             fontSize: 11, padding: '6px 10px', borderRadius: 4,
             background: result.errors.length > 0 ? `${T.orange}22` : `${T.green}22`,
             color: T.ink, border: `1px solid ${result.errors.length > 0 ? T.orange : T.green}`,
           }}>
-            ✓ {result.created} criados · {result.matched} c/perfil · {result.unlinked} s/perfil · modo: {result.mode}
+            ✓ {result.created} criados em {result.day} · {result.matched} c/perfil · {result.unlinked} s/perfil
             {result.errors.length > 0 && ` · ${result.errors.length} erros`}
           </div>
         )}
       </div>
-      {showSched && (
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.line}` }}>
-          <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 6 }}>
-            Cola aqui o texto extraído do PDF de permanências (Ctrl+A → Ctrl+C no PDF aberto, depois Ctrl+V aqui).
-            Parser detecta automaticamente colaboradores e dias trabalhados (qualquer turno que não seja FC/FO/Fer/Aniv/V).
-          </div>
-          <textarea
-            value={schedText}
-            onChange={e => setSchedText(e.target.value)}
-            placeholder="qui&#10;30&#10;sex&#10;1-mai&#10;...&#10;1365&#10;DAVID DINIS&#10;(2/8)8s&#10;140UA&#10;120SA&#10;..."
-            rows={6}
-            style={{
-              width: '100%', padding: '8px 10px', fontSize: 11, fontFamily: 'Geist Mono, monospace',
-              background: T.paper, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4,
-              outline: 'none', resize: 'vertical',
-            }}
-          />
-          {parsedSched && (
-            <div style={{ marginTop: 8, fontSize: 11, color: T.green }}>
-              ✓ Parseado: {parsedSched.days.length} dias · {parsedSched.collabs.length} colaboradores.
-              {parsedSched.collabs.slice(0, 3).map(c => {
-                const worked = c.cells.filter(_isWorkedCell).length;
-                return <span key={c.nif} style={{ marginLeft: 8, color: T.inkSoft }}>{c.name.split(' ')[0]} ({worked}d)</span>;
-              })}
-              {parsedSched.collabs.length > 3 && <span style={{ marginLeft: 8, color: T.inkMute }}>…</span>}
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
