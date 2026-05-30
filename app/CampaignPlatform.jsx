@@ -12,8 +12,14 @@ import {
   Bell, Calendar, CalendarDays, Inbox, AlertTriangle, ClipboardList, ScanLine, Camera, Database, Zap,
   KeyRound, EyeOff, Copy, FileDown, Printer, PackageOpen, ChevronDown
 } from 'lucide-react';
-import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
+// v3.23.2: XLSX carregado dinamicamente (só quando há upload/export) — tira
+// ~400 kB do bundle inicial. Singleton em cache após o 1º load.
+let _XLSX = null;
+async function getXLSX() {
+  if (!_XLSX) _XLSX = await import('xlsx');
+  return _XLSX;
+}
 // v3.23.0: helpers puros extraídos (testáveis em tests/helpers.test.js)
 import {
   normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
@@ -212,7 +218,8 @@ function findHeaderRow(matrix, expectedHeaders = []) {
   return 0;
 }
 
-function parseExcelSmart(arrayBuffer, expectedHeaders = []) {
+async function parseExcelSmart(arrayBuffer, expectedHeaders = []) {
+  const XLSX = await getXLSX();
   const wb = XLSX.read(arrayBuffer, { cellDates: true });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   // Read as 2D array first (no header inference)
@@ -288,8 +295,9 @@ function parseFnacSalesExcel(file, onProgress) {
 function parseFnacSalesExcelMainThread(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
+        const XLSX = await getXLSX();
         const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
         const sheetName = wb.SheetNames.find(n => /vendas/i.test(n)) || wb.SheetNames[0];
         if (!sheetName) return reject(new Error('Sem sheet no ficheiro'));
@@ -449,8 +457,9 @@ const PLANTA_FLOOR_MAP = { 'PISO 1': 'PISO 0', 'PISO 2': 'PISO 1' };
 function parsePlantaExcel(file, onProgress) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
+        const XLSX = await getXLSX();
         onProgress?.({ stage: 'parse', message: 'A ler planta…' });
         const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellStyles: true });
 
@@ -547,8 +556,9 @@ function parsePenetrationExcel(file, onProgress, opts = {}) {
   const sellerStoreFilter = (opts.sellerStoreFilter || 'AVEIRO').toUpperCase();
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
+        const XLSX = await getXLSX();
         onProgress?.({ stage: 'parse', message: 'A ler ficheiro…' });
         // Truque chave: sheets:['RESUMO','VENDEDOR_TOTAL'] reduz dramaticamente
         // a memória — só carrega estas duas sheets. Ficheiro tem 25 sheets, ~96MB.
@@ -1255,8 +1265,9 @@ function toIsoDate(ddmmyyyy) {
 function parseCounterSalesExcel(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
+        const XLSX = await getXLSX();
         const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
         const sheetName = wb.SheetNames.find(n => /vendas/i.test(n)) || wb.SheetNames[0];
         if (!sheetName) return reject(new Error('Sem sheet no ficheiro'));
@@ -1885,10 +1896,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.1';
+const APP_VERSION = '3.23.2';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T06:10:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T06:40:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1909,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.2', date: '2026-05-31', summary: 'Performance: XLSX carregado dinamicamente. Antes import * as XLSX estava no bundle inicial (~400 kB descomprimido) embora só usado pós-upload/export. Agora singleton lazy getXLSX() (await import("xlsx")) carregado só quando há ficheiro. First Load JS: 461→419 kB (página 461→332 kB). Convertidos para async: parseExcelSmart (+3 callers), parseFnacSalesExcelMainThread, parsePlantaExcel, parsePenetrationExcel, parseCounterSalesExcel, import de devoluções; exports (Pedido GU, inventário, devoluções) com await getXLSX(). Sem mudança de comportamento. Fecha a Fase A (extração de helpers + testes + fix cross-sell + XLSX lazy).' },
   { version: '3.23.1', date: '2026-05-31', summary: 'Fix do heatmap cross-sell (vendas ao mostrador). BUG: cada colaborador mostrava a MESMA percentagem em todas as famílias — a fórmula da "taxa por família" (allocAttach/cell.prod) colapsava matematicamente para attachTotal/totalProdElig, constante por colaborador. Causa raiz: o ficheiro do mostrador não tem ID de talão, logo é impossível ligar um anexo (seguro/addon) à família do produto. CORREÇÃO honesta: a célula passa a mostrar o VOLUME real de produtos elegíveis vendidos por família (cor azul por intensidade) e adiciona-se uma coluna "TP global" com a taxa de anexação REAL de cada colaborador (verde/laranja/vermelho). Nota explicativa de que a taxa por família requer ID de talão (indisponível). Deixa de mostrar dados enganadores.' },
   { version: '3.23.0', date: '2026-05-31', summary: 'Fase A (qualidade): helpers puros extraídos para app/lib/helpers.js + testes REAIS. Antes tests/helpers.test.js testava CÓPIAS locais dos helpers (não o código real). Agora normalizeEAN, _workingDaysInMonth, _daysRemainingInMonth, _dayFromSerial/_ymdFromSerial, _hoursFromCarga, _catFromTipo, _acumulaLines, _isWorkedCell, _matchSchedCollab/PT_NAME_ALIASES e o novo apportionLargestRemainder (extraído da diarização) vivem num módulo testável e são importados pelo CampaignPlatform. 25 testes vitest cobrem os bugs corrigidos ao longo das v3.21-3.22 (dias úteis inclui hoje, apportionment 16/[40,40,40,20]→[5,5,4,2], alias Ricardo Gabriel→Ricardo Silva, _isWorkedCell folgas, colisão normalizeEAN documentada). Sem mudança de comportamento na app — só refactor + rede de segurança.' },
   { version: '3.22.8', date: '2026-05-31', summary: 'Folhetos: fix do redimensionar do logo FNAC + selo 1%. (A) O scale dos elementos era à volta da origem (0,0) do SVG → elementos no lado direito (logo) "voavam" para a direita ao aumentar (parecia que demorava/não crescia). elProps aceita agora uma âncora e o scale acontece à volta do canto do próprio elemento (translate(a) scale translate(-a)) → cresce no sítio. Aplicado ao logo FNAC e ao selo ACUMULA 1%. (B) Performance: logo FNAC redimensionado de 887×884 para 360×359 (6× menos píxeis a rasterizar por render) → aumentar fica fluido.' },
@@ -11906,7 +11918,7 @@ function CampaignsView({
 
     try {
       const expected = ['EAN', 'Descrição/Título', 'Des_Fam1', 'PVP Base FNAC', 'PVP Campanha'];
-      ({ headers, rows } = parseExcelSmart(buf, expected));
+      ({ headers, rows } = await parseExcelSmart(buf, expected));
       key = campaignKeyFromFilename(file.name);
       if (!rows || rows.length === 0) {
         setUploadStatus({ kind: 'error', message: 'O Excel parece estar vazio ou os cabeçalhos não foram reconhecidos.' });
@@ -17545,7 +17557,8 @@ function PedidoGUView({ floors, activeCampaign, productByEan, stockRowsPO2, stoc
     setZoneTargets({ ...zoneTargets, [zoneId]: n });
   };
 
-  const exportXLSX = () => {
+  const exportXLSX = async () => {
+    const XLSX = await getXLSX();
     const wb = XLSX.utils.book_new();
     // Sheet 1: aggregated (EAN, Descrição, Unidades) — the user's main request
     const ws1 = XLSX.utils.json_to_sheet(aggregated.map(r => ({
@@ -18157,7 +18170,7 @@ function ChangesView({ campaigns, periods, stockRowsPO2, stockRowsPO3, stockMapP
 
   const handleFile = async (file) => {
     const buf = await file.arrayBuffer();
-    const { headers, rows } = parseExcelSmart(buf, ['EAN', 'Descrição/Título', 'Des_Fam1', 'PVP Base FNAC', 'PVP Campanha']);
+    const { headers, rows } = await parseExcelSmart(buf, ['EAN', 'Descrição/Título', 'Des_Fam1', 'PVP Base FNAC', 'PVP Campanha']);
     const snap = { filename: file.name, uploaded: new Date(), headers, rows, itemCount: rows.length };
     setUploadedSnapshot(snap);
     if (user && supabase) cloudSavePriceSnapshot(user.id, snap).catch(() => {});
@@ -19007,7 +19020,7 @@ function StockView({
     let rows;
     try {
       const buf = await file.arrayBuffer();
-      const parsed = parseExcelSmart(buf, ['EAN', 'Stock', 'Descrição']);
+      const parsed = await parseExcelSmart(buf, ['EAN', 'Stock', 'Descrição']);
       rows = parsed.rows;
       if (!rows || rows.length === 0) {
         setUploadStatus({ kind: 'error', message: 'O ficheiro de stock parece vazio ou os cabeçalhos não foram reconhecidos.', store });
@@ -21451,8 +21464,9 @@ function InventoryView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, c
   // Export to Excel (.xlsx) — one row per scan = 1 unit counted.
   // Sheet 1: Histórico (every scan as its own line, 1 unit each — for audit trail)
   // Sheet 2: Resumo (aggregated by EAN with total units counted — for inventory balance)
-  const exportXLSX = () => {
+  const exportXLSX = async () => {
     if (scanned.length === 0) return;
+    const XLSX = await getXLSX();
     // Sheet 1: full history, oldest first, 1 unit per line
     const histRows = [...scanned].reverse().map(s => ({
       EAN: s.ean,
@@ -22831,6 +22845,7 @@ function DevolucoesView({ user, userDepartment }) {
     if (!file) return;
     e.target.value = '';
     try {
+      const XLSX = await getXLSX();
       const data = await file.arrayBuffer();
       const wb = XLSX.read(data, { type: 'array' });
       const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -23026,8 +23041,9 @@ function DevolucaoDetail({ devolucao, user, onClose }) {
   };
 
   // Export Excel com qty_found
-  const handleExport = () => {
+  const handleExport = async () => {
     if (!items?.length) return;
+    const XLSX = await getXLSX();
     const rows = items.map(it => ({
       EAN: it.ean,
       'Descrição': it.description || '',
