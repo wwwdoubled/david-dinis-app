@@ -1798,10 +1798,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.38';
+const APP_VERSION = '3.21.39';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T22:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T23:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1811,6 +1811,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.39', date: '2026-05-30', summary: 'Diarização redefinida como PLANEAMENTO: o botão deixa de copiar totais históricos e passa a calcular o objectivo de seguros para o dia escolhido e distribuir por colaboradores PTS que trabalham nesse dia (horário built-in) proporcionalmente à carga horária. Modo "ritmo normal" = target/dias úteis totais. Modo "recuperar atraso" (quando real < targetYtd) = missing/dias úteis restantes. Preview live de quotas individuais (h × share% → PP) antes do click. pp_count guarda a quota planeada, equipment_count fica a 0. Botão renomeado "Diarizar dia".' },
   { version: '3.21.38', date: '2026-05-30', summary: 'Equipamentos sem seguro: (A) FIX CRÍTICO — regex /^SEG[\\s_]/ não detectava "SEG-EXT GAR TV…" (hífen ≠ espaço/underscore). Como resultado, as próprias APÓLICES (SEG-EXT, SEG-DDR, etc) eram classificadas como equipamentos e apareciam listadas como "equipamentos sem seguro" — paradoxal. Regex passa a /^(SEG|EXT|GAR)[\\s_-]/ e PP idem. (B) Nova vista "📦 Por Talão" no SellerExpand: cards com cada talão problemático, mostrando equipamentos (com ⚠ nos uncovered, · nos covered) e seguros (✓ verde) lado a lado. Permite ver o contexto representativo — quais equips entraram juntos no talão, quantos saíram com seguro, quantos não. Toggle entre "Por EAN" (vista antiga agregada) e "Por Talão" (nova).' },
   { version: '3.21.37', date: '2026-05-30', summary: 'TPAutoImportButton simplificado: agora é um picker de DATA (input type=date, default=refDay, min/max do mês). Todos os colaboradores PTS recebem 1 registo PP nesse dia único com os totais mensais. Removida a distribuição por horário (built-in/paste) — fica como referência interna mas não influencia a importação. Apaga apenas o registo existente do mesmo colaborador no mesmo dia (não o mês inteiro).' },
   { version: '3.21.36', date: '2026-05-30', summary: 'TPAutoImportButton: fix "0 criados". Antes filtrava candidatos por department começar por "PT" (muitos perfis não têm o campo), o que vazia o map de matching e fazia todos os sellers contarem como "sem perfil" e nada era criado. Agora: (A) sem filtro de department, (B) match indexa por display_name + email local-part + primeiro+último nome, (C) cria SEMPRE o registo PP — se houver perfil liga collaborator_id, senão só guarda collaborator_name como fallback. Resultado label "c/perfil" + "s/perfil" em vez de "matched + skipped".' },
@@ -24813,7 +24814,7 @@ function _isWorkedCell(cell) {
 // Modo simples: 1 PP por seller em sale_date=refDay (totais mensais).
 // Modo horário (se schedule fornecido): N PPs por seller distribuídos pelos
 // dias trabalhados, proporcionalmente. Match seller.name ↔ profile case-insensitive.
-function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
+function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow, budget, workdays }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [showSched, setShowSched] = useState(false);
@@ -24855,12 +24856,53 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
     return pasted || builtinSched;
   }, [schedText, builtinSched]);
 
+  // v3.21.39: planeamento — calcula objectivo de seguros do dia e distribui
+  // pelos colaboradores que estão a trabalhar nesse dia, proporcional à carga.
+  const planning = useMemo(() => {
+    if (!singleDay || !snap?.monthKey || !budget) return null;
+    const dayNum = Number(singleDay.split('-')[2]);
+    // Quem trabalha nesse dia? Usa BUILTIN_PT_SCHEDULES.
+    const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
+    const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey] || null;
+    const worksToday = (sellerName) => {
+      if (!sched) return true; // sem horário, assume todos
+      const key = String(sellerName || '').toUpperCase().trim();
+      const c = sched.find(s => s.name.toUpperCase().trim() === key);
+      return c ? !!c.days[dayNum] : true;
+    };
+    const working = sellersPTS.filter(s => worksToday(s.name));
+    const totalHours = working.reduce((sum, s) => sum + _hoursFromCarga(s.carga), 0);
+    // Objectivo do dia (seguros). Se atrás (real < targetYtd), imputa a falta;
+    // caso contrário, ritmo normal target / dias úteis totais.
+    const target = Number(budget.target) || 0;
+    const real = Number(budget.real) || 0;
+    const targetYtd = Number(budget.targetYtd) || 0;
+    const remainingDays = workdays?.days || 1;
+    const totalDays = workdays?.total || 26;
+    const missing = Math.max(0, target - real);
+    const isBehind = targetYtd > 0 && real < targetYtd;
+    const dailyTarget = isBehind
+      ? Math.ceil(missing / Math.max(1, remainingDays))
+      : Math.ceil(target / Math.max(1, totalDays));
+    const lines = working.map(s => {
+      const h = _hoursFromCarga(s.carga);
+      const share = totalHours > 0 ? h / totalHours : 1 / Math.max(1, working.length);
+      const pp = Math.round(dailyTarget * share);
+      return { seller: s, hours: h, share, pp };
+    });
+    // Ajuste do último para fechar exactamente o dailyTarget
+    if (lines.length > 0) {
+      const sum = lines.reduce((a, b) => a + b.pp, 0);
+      lines[lines.length - 1].pp += (dailyTarget - sum);
+    }
+    return { working, lines, dailyTarget, isBehind, missing, remainingDays, totalDays };
+  }, [singleDay, snap?.monthKey, myStoreRow?.name, sellersPTS, budget, workdays]);
+
   const handleImport = async () => {
     if (!snap?.monthKey) { alert('Snapshot sem mês definido.'); return; }
     if (!singleDay || !/^\d{4}-\d{2}-\d{2}$/.test(singleDay)) { alert('Escolhe uma data válida.'); return; }
-    const [y, m] = snap.monthKey.split('-').map(Number);
-    const dim = new Date(y, m, 0).getDate();
-    if (!confirm(`Importar ${sellersPTS.length} colaboradores PTS para Diarização?\n\nTodos vão receber 1 registo no dia ${singleDay} com os totais do mês da TX Penetração.\nRegistos existentes para o mesmo colaborador nessa data serão substituídos.`)) return;
+    if (!planning || planning.lines.length === 0) { alert('Nenhum colaborador trabalha no dia escolhido.'); return; }
+    if (!confirm(`Diarizar ${planning.lines.length} colaboradores no dia ${singleDay}?\n\nObjectivo do dia: ${planning.dailyTarget} seguros ${planning.isBehind ? '(a recuperar atraso)' : '(ritmo normal)'}.\nQuotas distribuídas por carga horária.`)) return;
     setBusy(true);
     try {
       // v3.21.36: matching mais flexível — tenta nome completo, primeiro+último,
@@ -24881,14 +24923,13 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
       const sess = await supabase.auth.getUser();
       const currentUserId = sess?.data?.user?.id || null;
       let created = 0, matched = 0, unlinked = 0, errors = [];
-      for (const s of sellersPTS) {
+      for (const line of planning.lines) {
+        const s = line.seller;
         const key = norm(s.name);
         const parts = key.split(' ').filter(Boolean);
         const altKey = parts.length >= 2 ? `${parts[0]} ${parts[parts.length-1]}` : key;
         const profile = byName.get(key) || byName.get(altKey);
         if (profile) matched++; else unlinked++;
-        const totalEquip = Math.round(s.vendas || 0);
-        const totalPP = Math.round(s.seguros || 0);
         // Apaga registo existente do mesmo colaborador no MESMO dia
         try {
           if (profile?.user_id) {
@@ -24904,18 +24945,18 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           collaborator_id: profile?.user_id || null,
           collaborator_email: profile?.email || null,
           collaborator_name: profile?.display_name || s.name,
-          equipment_count: Math.max(0, totalEquip),
-          pp_count: Math.max(0, totalPP),
+          equipment_count: 0,
+          pp_count: Math.max(0, line.pp),
           value: null,
           category: null,
-          notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${profile ? '' : ' · sem perfil'}`,
+          notes: `Diarização ${snap.monthKey} · ${line.hours}h · ${(line.share*100).toFixed(0)}% · ${planning.isBehind ? 'recuperar atraso' : 'ritmo normal'}`,
           created_by: currentUserId,
         };
         const res = await cloudCreatePP(payload);
         if (res?.ok) created++;
         else errors.push(`${s.name}: ${res?.error || 'erro'}`);
       }
-      setResult({ created, matched, unlinked, total: sellersPTS.length, errors: errors.slice(0, 5), day: singleDay });
+      setResult({ created, matched, unlinked, total: planning.lines.length, errors: errors.slice(0, 5), day: singleDay, target: planning.dailyTarget, behind: planning.isBehind });
     } catch (e) {
       alert('Erro inesperado: ' + (e?.message || e));
     } finally {
@@ -24935,7 +24976,7 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           border: 'none', borderRadius: 6, fontSize: 12,
           cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
         }}>
-          <Upload size={13} /> {busy ? 'A importar…' : '📥 Importar para Diarização'}
+          <Upload size={13} /> {busy ? 'A diarizar…' : '📥 Diarizar dia'}
         </button>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontSize: 11, color: T.inkSoft }}>Dia:</span>
@@ -24956,7 +24997,9 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           />
         </div>
         <div style={{ fontSize: 11, color: T.inkSoft, flex: 1, minWidth: 200 }}>
-          Cria 1 registo PP por colaborador no dia escolhido com os totais mensais da TX Penetração.
+          {planning ? (
+            <>Objectivo do dia: <strong style={{ color: T.ink }}>{planning.dailyTarget} seguros</strong> {planning.isBehind ? <span style={{ color: T.orange }}>(recuperar {planning.missing} em {planning.remainingDays}d)</span> : <span style={{ color: T.green }}>(ritmo normal)</span>} · <strong>{planning.lines.length}</strong> colaboradores a trabalhar.</>
+          ) : 'Escolhe um dia para calcular a diarização.'}
         </div>
         {result && (
           <div style={{
@@ -24964,11 +25007,33 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
             background: result.errors.length > 0 ? `${T.orange}22` : `${T.green}22`,
             color: T.ink, border: `1px solid ${result.errors.length > 0 ? T.orange : T.green}`,
           }}>
-            ✓ {result.created} criados em {result.day} · {result.matched} c/perfil · {result.unlinked} s/perfil
+            ✓ {result.created} diarizados em {result.day} · objectivo {result.target} {result.behind ? '(atraso)' : ''}
             {result.errors.length > 0 && ` · ${result.errors.length} erros`}
           </div>
         )}
       </div>
+      {/* v3.21.39: preview da distribuição */}
+      {planning && planning.lines.length > 0 && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.line}` }}>
+          <div style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
+            Distribuição prevista ({singleDay})
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 6 }}>
+            {planning.lines.map(line => (
+              <div key={line.seller.name} style={{
+                padding: '6px 10px', background: T.bgEl, border: `1px solid ${T.lineSoft}`, borderRadius: 4,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+              }}>
+                <span style={{ fontSize: 11, color: T.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {line.seller.name.split(' ').slice(0,2).join(' ')}
+                </span>
+                <span style={{ fontSize: 9, color: T.inkMute, fontFamily: 'Geist Mono' }}>{line.hours}h</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: T.accent, fontFamily: 'Geist Mono' }}>{line.pp}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -25600,7 +25665,7 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
       {sub === 'team' && (<>
       {/* v3.21.31: Importar para Diarização (Planos de Proteção) */}
       {sellersPTS.length > 0 && (
-        <TPAutoImportButton sellersPTS={sellersPTS} snap={snap} referenceDay={referenceDay} myStoreRow={myStoreRow} />
+        <TPAutoImportButton sellersPTS={sellersPTS} snap={snap} referenceDay={referenceDay} myStoreRow={myStoreRow} budget={budget} workdays={workdays} />
       )}
       {/* v3.21.16: Equipa PTS — agregados topo */}
       {sellersPTS.length > 0 && (
