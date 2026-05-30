@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.4';
+const APP_VERSION = '3.22.5';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T02:45:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T03:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.5', date: '2026-05-31', summary: 'Planta: ZOOM/PAN + edição directa de móveis. (A) StoreMapSVG reescrito com zoom (roda do rato centrada no cursor), pan (arrastar o fundo) e botões +/−/ajustar — funciona em todas as vistas (admin + campanha). focusKey agora dá zoom e centra o móvel localizado. (B) Modo de edição no Admin → Planta da loja: botão "Editar móveis" → arrastar um móvel move-o (snap à grelha), pega no canto inferior-direito redimensiona, clica para seleccionar. Painel lateral edita nome/código, departamento, produto, mobiliário, posição (linha/coluna/altura/largura) e cor (hex). Botões Adicionar móvel / Apagar móvel / Guardar alterações (persiste em store_floor_plans via cloudUpsertFloorPlan) / Cancelar. Indicador "alterações por guardar". Permite acertar a planta quando há mudanças de layout sem voltar ao Excel.' },
   { version: '3.22.4', date: '2026-05-31', summary: 'PLANTA Fase 3 — Campanha no Mapa. Novo tab "🗺 Mapa" dentro da campanha (ao lado de Listagem/Plano/Saída): mostra a planta da loja com cada móvel pintado pelo ESTADO dos produtos da campanha — verde (tudo feito), laranja (pendente), vermelho (falta/mínima), anel amarelo (destaque/cartaz). Liga as zonas do período aos móveis da planta por nome (_zoneFixtureScore: móvel inteiro contido no nome da zona, ex: "MLS"→"MLS SOM", "PML APPLE"→"PML APPLE"). Selector de piso (PISO 0/PISO 1), localizador de móvel + localizador de PRODUTO (escreve EAN/nome → centra no móvel onde está). Hover num móvel lista os produtos lá colocados. Aviso das zonas com produtos que não casaram com nenhum móvel (nomes divergentes) — base para linking manual futuro. CampaignsView recebe currentStoreId.' },
   { version: '3.22.3', date: '2026-05-31', summary: 'Fix diarização: distribuição justa por horas (método do maior resto / Hamilton). Antes era Math.round + "o último colaborador fica com o resto" — os full-time (40h) arredondavam a quota para cima e despejavam o resto negativo no part-time (ex: 16 seguros = 5+5+5 deixava só 1 para o de 20h). Agora cada um leva o floor da quota exacta e o que falta para fechar o objectivo vai para os maiores restos fraccionários. Exemplo 16 seguros / 40+40+40+20h: passa de [5,5,5,1] para [5,5,4,2] — Ricardo Gabriel (20h) recebe 2 (quota justa) em vez de 1.' },
   { version: '3.22.2', date: '2026-05-31', summary: 'Planta: TODOS os móveis visíveis + localizador. (A) StoreMapSVG: móveis sem cor do Excel (D6V, T1-T4, estantes numeradas…) passam a ter cor por departamento/produto (_deptColor: PTS=azul/roxo/verde por categoria, EDIT/livros=castanho, SERVICES=rosa). Labels visíveis em móveis a partir de 5px, texto branco/preto consoante o fundo, número mostrado quando não há label. Fundo do Excel atenuado para os móveis sobressaírem. (B) Novo StoreMapLocate: caixa de procura por código/número/nome/mobiliário → lista de resultados → clica para DESTACAR (anel amarelo a pulsar) e CENTRAR o móvel no mapa (scroll automático). (C) Admin → Planta da loja ganha o localizador acima do mapa + clicar num móvel destaca-o. Resolve "mais móveis no mapa e saber onde estão".' },
@@ -27192,104 +27193,193 @@ function _deptColor(dept, produit) {
   if (d === 'MAGASIN') return '#8896A6';   // estrutura — cinza-azul
   return '#9AA0A6';
 }
-// v3.22.2: StoreMapSVG melhorado — todos os móveis visíveis, destaque/foco
-// para localização, zoom out automático. highlightKeys: Set de keys a pulsar.
-// focusKey: key a centrar (faz scroll). onFixtureClick(f). overlayMap p/ estados.
+// v3.22.5: StoreMapSVG com zoom/pan + edição directa de móveis.
+// Zoom: roda do rato (centra no cursor), botões +/−/ajustar. Pan: arrastar fundo.
+// Edição (editable=true): arrastar móvel = mover; pega no canto = redimensionar;
+// click = seleccionar. Callbacks onMoveFixture/onResizeFixture/onSelectFixture(idx,...).
 function StoreMapSVG({
   floor, mode = 'base', overlayMap = null, selectedKey = null,
   highlightKeys = null, focusKey = null,
   onFixtureClick = null, showLabels = true, maxHeight = 620,
+  editable = false, selectedIdx = null,
+  onMoveFixture = null, onResizeFixture = null, onSelectFixture = null,
 }) {
-  const [hover, setHover] = useState(null); // { f, mx, my }
+  const [hover, setHover] = useState(null);   // { f, mx, my }
+  const [view, setView] = useState({ s: 1, tx: 0, ty: 0 }); // zoom + pan
   const wrapRef = useRef(null);
   const svgRef = useRef(null);
+  const dragRef = useRef(null);               // pan/move/resize em curso
   const CELL = 10;
+  const W = (floor?.cols || 1) * CELL;
+  const H = (floor?.rows || 1) * CELL;
 
-  // Centra o móvel em foco (scroll dentro do contentor)
+  // converte evento → coordenadas viewBox (antes da transform do <g>)
+  const toVB = (e) => {
+    const svg = svgRef.current; if (!svg) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const ctm = svg.getScreenCTM(); if (!ctm) return { x: 0, y: 0 };
+    const p = pt.matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  };
+  // viewBox → grid (cels) tendo em conta a transform actual
+  const toGrid = (vb) => ({ gx: (vb.x - view.tx) / view.s / CELL, gy: (vb.y - view.ty) / view.s / CELL });
+
+  // Centra (e dá zoom) no móvel em foco
   useEffect(() => {
     if (!focusKey || !floor) return;
     const f = (floor.fixtures || []).find(x => _fixtureKey(x) === focusKey);
-    const wrap = wrapRef.current, svg = svgRef.current;
-    if (!f || !wrap || !svg) return;
-    const W = floor.cols * CELL, H = floor.rows * CELL;
-    const rect = svg.getBoundingClientRect();
-    const sx = rect.width / W, sy = rect.height / H;
-    const cx = (f.c + f.cs / 2) * CELL * sx;
-    const cy = (f.r + f.rs / 2) * CELL * sy;
-    wrap.scrollTo({ left: cx - wrap.clientWidth / 2, top: cy - wrap.clientHeight / 2, behavior: 'smooth' });
+    if (!f) return;
+    const s = Math.min(4, Math.max(1.6, 28 / Math.max(f.cs, f.rs, 3)));
+    const cx = (f.c + f.cs / 2) * CELL, cy = (f.r + f.rs / 2) * CELL;
+    setView({ s, tx: W / 2 - cx * s, ty: H / 2 - cy * s });
   }, [focusKey, floor]);
 
-  if (!floor || !floor.cols) return null;
-  const W = floor.cols * CELL;
-  const H = floor.rows * CELL;
-  const palette = floor.palette || [];
+  const clampView = (v) => {
+    const s = Math.min(6, Math.max(0.6, v.s));
+    return { s, tx: v.tx, ty: v.ty };
+  };
+  const zoomAt = (vb, factor) => {
+    setView(prev => {
+      const s2 = Math.min(6, Math.max(0.6, prev.s * factor));
+      const k = s2 / prev.s;
+      return { s: s2, tx: vb.x - (vb.x - prev.tx) * k, ty: vb.y - (vb.y - prev.ty) * k };
+    });
+  };
+  const onWheel = (e) => { e.preventDefault(); zoomAt(toVB(e), e.deltaY < 0 ? 1.15 : 1 / 1.15); };
+  const fit = () => setView({ s: 1, tx: 0, ty: 0 });
+  const zoomBtn = (f) => setView(prev => clampView({ s: prev.s * f, tx: prev.tx, ty: prev.ty }));
 
-  const handleMove = (e, f) => {
-    const rect = wrapRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    setHover({ f, mx: e.clientX - rect.left + wrapRef.current.scrollLeft, my: e.clientY - rect.top + wrapRef.current.scrollTop });
+  // Pan no fundo
+  const onBgDown = (e) => {
+    if (e.target.dataset?.fx != null) return; // clicou num móvel
+    const vb = toVB(e);
+    dragRef.current = { kind: 'pan', startVB: vb, startView: { ...view } };
+    const move = (ev) => {
+      const d = dragRef.current; if (!d) return;
+      const cur = toVBraw(ev);
+      setView({ s: d.startView.s, tx: d.startView.tx + (cur.x - d.startVB.x), ty: d.startView.ty + (cur.y - d.startVB.y) });
+    };
+    const up = () => { dragRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+  };
+  // toVB que não depende de closure stale (usa svgRef directo)
+  const toVBraw = (e) => {
+    const svg = svgRef.current; if (!svg) return { x: 0, y: 0 };
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const ctm = svg.getScreenCTM(); if (!ctm) return { x: 0, y: 0 };
+    const p = pt.matrixTransform(ctm.inverse()); return { x: p.x, y: p.y };
+  };
+
+  // Mover/redimensionar móvel (edição)
+  const startFixtureDrag = (e, idx, f, kind) => {
+    e.stopPropagation();
+    if (!editable) { if (onFixtureClick) onFixtureClick(f); return; }
+    onSelectFixture?.(idx);
+    const startVB = toVBraw(e);
+    const startGrid = { gx: (startVB.x - view.tx) / view.s / CELL, gy: (startVB.y - view.ty) / view.s / CELL };
+    const orig = { r: f.r, c: f.c, rs: f.rs, cs: f.cs };
+    dragRef.current = { kind, idx, startGrid, orig, viewSnap: { ...view } };
+    const move = (ev) => {
+      const d = dragRef.current; if (!d) return;
+      const vb = toVBraw(ev);
+      const gx = (vb.x - d.viewSnap.tx) / d.viewSnap.s / CELL;
+      const gy = (vb.y - d.viewSnap.ty) / d.viewSnap.s / CELL;
+      const ddc = Math.round(gx - d.startGrid.gx);
+      const ddr = Math.round(gy - d.startGrid.gy);
+      if (d.kind === 'move' && onMoveFixture) {
+        onMoveFixture(d.idx, Math.max(0, d.orig.r + ddr), Math.max(0, d.orig.c + ddc));
+      } else if (d.kind === 'resize' && onResizeFixture) {
+        onResizeFixture(d.idx, Math.max(1, d.orig.rs + ddr), Math.max(1, d.orig.cs + ddc));
+      }
+    };
+    const up = () => { dragRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+  };
+
+  if (!floor || !floor.cols) return null;
+  const palette = floor.palette || [];
+  const handleHover = (e, f) => {
+    const rect = wrapRef.current?.getBoundingClientRect(); if (!rect) return;
+    setHover({ f, mx: e.clientX - rect.left, my: e.clientY - rect.top });
   };
 
   return (
-    <div ref={wrapRef} style={{ position: 'relative', width: '100%', maxHeight, overflow: 'auto', borderRadius: 8 }}>
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', minWidth: Math.min(W * 1.2, 900), height: 'auto', display: 'block', background: T.bg, borderRadius: 8 }}>
-        {/* fundo colorido (visual fiel ao Excel) */}
-        {(floor.cells || []).map(([r, c, rs, cs, pi], i) => (
-          <rect key={'bg' + i} x={c * CELL} y={r * CELL} width={cs * CELL} height={rs * CELL}
-            fill={'#' + (palette[pi] || 'cccccc')} opacity={mode === 'overlay' ? 0.12 : 0.5} />
+    <div ref={wrapRef} style={{ position: 'relative', width: '100%', maxHeight, overflow: 'hidden', borderRadius: 8, background: T.bg }}>
+      {/* controlos de zoom */}
+      <div className="no-print" style={{ position: 'absolute', right: 8, top: 8, zIndex: 15, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {[['+', () => zoomBtn(1.3)], ['−', () => zoomBtn(1 / 1.3)], ['⤢', fit]].map(([l, fn], i) => (
+          <button key={i} onClick={fn} title={l === '⤢' ? 'Ajustar' : 'Zoom'} style={{
+            width: 28, height: 28, borderRadius: 6, border: `1px solid ${T.line}`,
+            background: T.bgEl, color: T.ink, fontSize: 15, cursor: 'pointer', lineHeight: 1,
+          }}>{l}</button>
         ))}
-        {/* móveis — TODOS visíveis */}
-        {(floor.fixtures || []).map((f, i) => {
-          const key = _fixtureKey(f);
-          const ov = overlayMap ? overlayMap.get(key) : null;
-          const x = f.c * CELL, y = f.r * CELL, w = f.cs * CELL, h = f.rs * CELL;
-          // cor base: fill do Excel se houver, senão cor por departamento
-          const baseFill = f.fill ? '#' + f.fill : _deptColor(f.dept, f.produit);
-          const fill = mode === 'overlay' ? (ov?.color || 'rgba(140,140,140,0.16)') : baseFill;
-          const isSel = selectedKey === key;
-          const isHL = highlightKeys && highlightKeys.has(key);
-          const interactive = !!onFixtureClick;
-          const lbl = f.label || (f.num != null ? String(f.num) : '');
-          const fontSize = Math.max(2.4, Math.min(w / Math.max(2, lbl.length) * 1.7, h * 0.62, 5.5));
-          // texto: branco sobre cores escuras, preto sobre claras
-          const dark = f.fill ? !['FFFFFF', 'FFC000', 'FCE4D6', 'EEECE1'].includes(f.fill) : true;
-          return (
-            <g key={'fx' + i}
-              style={{ cursor: interactive ? 'pointer' : 'default' }}
-              onClick={interactive ? () => onFixtureClick(f) : undefined}
-              onMouseEnter={(e) => handleMove(e, f)}
-              onMouseMove={(e) => handleMove(e, f)}
-              onMouseLeave={() => setHover(null)}>
-              <rect x={x + 0.2} y={y + 0.2} width={Math.max(0, w - 0.4)} height={Math.max(0, h - 0.4)}
-                rx={0.6}
-                fill={fill}
-                fillOpacity={mode === 'overlay' && !ov ? 0.5 : 0.92}
-                stroke={isSel ? T.accent : (isHL ? T.yellow : (ov?.stroke || 'rgba(0,0,0,0.25)'))}
-                strokeWidth={isSel ? 1.4 : (isHL ? 1.2 : 0.3)} />
-              {isHL && (
-                <rect x={x - 0.8} y={y - 0.8} width={w + 1.6} height={h + 1.6} rx={1}
-                  fill="none" stroke={T.yellow} strokeWidth={0.8} opacity={0.9}>
-                  <animate attributeName="opacity" values="0.3;1;0.3" dur="1.1s" repeatCount="indefinite" />
-                </rect>
-              )}
-              {ov?.badge && (
-                <circle cx={x + w - 1.6} cy={y + 1.6} r={1.4} fill={ov.badge} stroke="#fff" strokeWidth={0.25} />
-              )}
-              {showLabels && lbl && w >= 5 && (
-                <text x={x + w / 2} y={y + h / 2} fontSize={fontSize}
-                  fill={dark ? '#fff' : '#111'} textAnchor="middle" dominantBaseline="central"
-                  style={{ pointerEvents: 'none', userSelect: 'none', fontWeight: 600 }}>
-                  {lbl.length > 14 ? lbl.slice(0, 13) + '…' : lbl}
-                </text>
-              )}
-            </g>
-          );
-        })}
+      </div>
+      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} onWheel={onWheel} onMouseDown={onBgDown}
+        style={{ width: '100%', height: 'auto', maxHeight, display: 'block', cursor: editable ? 'default' : 'grab', touchAction: 'none' }}>
+        <g transform={`translate(${view.tx} ${view.ty}) scale(${view.s})`}>
+          {/* fundo colorido */}
+          {(floor.cells || []).map(([r, c, rs, cs, pi], i) => (
+            <rect key={'bg' + i} x={c * CELL} y={r * CELL} width={cs * CELL} height={rs * CELL}
+              fill={'#' + (palette[pi] || 'cccccc')} opacity={mode === 'overlay' ? 0.12 : 0.5} pointerEvents="none" />
+          ))}
+          {/* móveis */}
+          {(floor.fixtures || []).map((f, i) => {
+            const key = _fixtureKey(f);
+            const ov = overlayMap ? overlayMap.get(key) : null;
+            const x = f.c * CELL, y = f.r * CELL, w = f.cs * CELL, h = f.rs * CELL;
+            const baseFill = f.fill ? '#' + f.fill : _deptColor(f.dept, f.produit);
+            const fill = mode === 'overlay' ? (ov?.color || 'rgba(140,140,140,0.16)') : baseFill;
+            const isSel = editable ? selectedIdx === i : selectedKey === key;
+            const isHL = highlightKeys && highlightKeys.has(key);
+            const interactive = editable || !!onFixtureClick;
+            const lbl = f.label || (f.num != null ? String(f.num) : '');
+            const fontSize = Math.max(2.4, Math.min(w / Math.max(2, lbl.length) * 1.7, h * 0.62, 5.5));
+            const dark = f.fill ? !['FFFFFF', 'FFC000', 'FCE4D6', 'EEECE1'].includes(f.fill) : true;
+            return (
+              <g key={'fx' + i}
+                style={{ cursor: editable ? 'move' : (interactive ? 'pointer' : 'default') }}
+                onMouseDown={(e) => editable ? startFixtureDrag(e, i, f, 'move') : undefined}
+                onClick={!editable && onFixtureClick ? (e) => { e.stopPropagation(); onFixtureClick(f); } : undefined}
+                onMouseEnter={(e) => handleHover(e, f)}
+                onMouseMove={(e) => handleHover(e, f)}
+                onMouseLeave={() => setHover(null)}>
+                <rect data-fx={i} x={x + 0.2} y={y + 0.2} width={Math.max(0, w - 0.4)} height={Math.max(0, h - 0.4)}
+                  rx={0.6} fill={fill}
+                  fillOpacity={mode === 'overlay' && !ov ? 0.5 : 0.92}
+                  stroke={isSel ? T.accent : (isHL ? T.yellow : (ov?.stroke || 'rgba(0,0,0,0.25)'))}
+                  strokeWidth={isSel ? 1.4 : (isHL ? 1.2 : 0.3)} />
+                {isHL && (
+                  <rect x={x - 0.8} y={y - 0.8} width={w + 1.6} height={h + 1.6} rx={1}
+                    fill="none" stroke={T.yellow} strokeWidth={0.8} opacity={0.9} pointerEvents="none">
+                    <animate attributeName="opacity" values="0.3;1;0.3" dur="1.1s" repeatCount="indefinite" />
+                  </rect>
+                )}
+                {ov?.badge && (
+                  <circle cx={x + w - 1.6} cy={y + 1.6} r={1.4} fill={ov.badge} stroke="#fff" strokeWidth={0.25} pointerEvents="none" />
+                )}
+                {showLabels && lbl && w >= 5 && (
+                  <text x={x + w / 2} y={y + h / 2} fontSize={fontSize}
+                    fill={dark ? '#fff' : '#111'} textAnchor="middle" dominantBaseline="central"
+                    style={{ pointerEvents: 'none', userSelect: 'none', fontWeight: 600 }}>
+                    {lbl.length > 14 ? lbl.slice(0, 13) + '…' : lbl}
+                  </text>
+                )}
+                {/* pega de redimensionar (edição + seleccionado) */}
+                {editable && isSel && (
+                  <rect x={x + w - 1.6} y={y + h - 1.6} width={2} height={2} rx={0.3}
+                    fill={T.accent} stroke="#fff" strokeWidth={0.2}
+                    style={{ cursor: 'nwse-resize' }}
+                    onMouseDown={(e) => startFixtureDrag(e, i, f, 'resize')} />
+                )}
+              </g>
+            );
+          })}
+        </g>
       </svg>
-      {hover && (
+      {hover && !dragRef.current && (
         <div style={{
           position: 'absolute',
-          left: Math.min(hover.mx + 12, (wrapRef.current?.scrollLeft || 0) + (wrapRef.current?.clientWidth || 400) - 190),
+          left: Math.min(hover.mx + 12, (wrapRef.current?.clientWidth || 400) - 200),
           top: Math.max(8, hover.my - 10), pointerEvents: 'none', zIndex: 20,
           background: T.ink, color: T.bg, padding: '6px 9px', borderRadius: 6,
           fontSize: 11, maxWidth: 210, boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
@@ -27554,6 +27644,11 @@ function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) 
   const [msg, setMsg] = useState(null);
   const [focusKey, setFocusKey] = useState(null);
   const [highlightKeys, setHighlightKeys] = useState(null);
+  // v3.22.5: edição directa de móveis
+  const [editMode, setEditMode] = useState(false);
+  const [editFloors, setEditFloors] = useState(null); // cópia editável de previewFloors
+  const [selIdx, setSelIdx] = useState(null);
+  const [dirty, setDirty] = useState(false);
   const fileRef = useRef();
 
   const loadPlans = async () => {
@@ -27605,7 +27700,53 @@ function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) 
   const previewFloors = parsed
     ? parsed.floors
     : (plans || []).map(r => ({ ...r.grid_json, name: r.floor_name, _row: r }));
-  const activeFloor = previewFloors[activeFloorIdx] || null;
+  const activeFloor = (editMode && editFloors ? editFloors : previewFloors)[activeFloorIdx] || null;
+
+  // ── Edição de móveis ──
+  const enterEdit = () => {
+    // deep clone dos pisos do preview para editar
+    const clone = previewFloors.map(f => ({
+      ...f,
+      fixtures: (f.fixtures || []).map(fx => ({ ...fx })),
+    }));
+    setEditFloors(clone); setEditMode(true); setSelIdx(null); setDirty(false);
+  };
+  const cancelEdit = () => { setEditMode(false); setEditFloors(null); setSelIdx(null); setDirty(false); };
+  const mutateFixtures = (fn) => {
+    setEditFloors(prev => {
+      if (!prev) return prev;
+      const next = prev.map((f, fi) => fi === activeFloorIdx ? { ...f, fixtures: fn(f.fixtures.map(x => ({ ...x }))) } : f);
+      return next;
+    });
+    setDirty(true);
+  };
+  const moveFixture = (idx, r, c) => mutateFixtures(fx => { if (fx[idx]) { fx[idx].r = r; fx[idx].c = c; } return fx; });
+  const resizeFixture = (idx, rs, cs) => mutateFixtures(fx => { if (fx[idx]) { fx[idx].rs = rs; fx[idx].cs = cs; } return fx; });
+  const patchFixture = (idx, patch) => mutateFixtures(fx => { if (fx[idx]) Object.assign(fx[idx], patch); return fx; });
+  const deleteFixture = (idx) => { mutateFixtures(fx => fx.filter((_, i) => i !== idx)); setSelIdx(null); };
+  const addFixture = () => {
+    mutateFixtures(fx => {
+      fx.push({ r: Math.round((activeFloor?.rows || 20) / 2), c: Math.round((activeFloor?.cols || 20) / 2), rs: 2, cs: 4, label: 'NOVO', fill: null, num: null, dept: 'PTS', produit: '', mobilier: '' });
+      return fx;
+    });
+    setSelIdx((activeFloor?.fixtures?.length || 0));
+  };
+  const saveEdits = async () => {
+    if (!editFloors) return;
+    setBusy('saving'); setMsg(null);
+    let ok = 0, fail = 0;
+    for (const f of editFloors) {
+      const grid = { cols: f.cols, rows: f.rows, palette: f.palette, cells: f.cells, fixtures: f.fixtures, srcName: f.srcName };
+      const res = await cloudUpsertFloorPlan({
+        storeId: currentStoreId, floorName: f.name, gridJson: grid,
+        cols: f.cols, rows: f.rows, sourceFilename: f.source_filename || 'editado', createdBy: currentUserId,
+      });
+      if (res.ok) ok++; else { fail++; setMsg('Erro a guardar ' + f.name + ': ' + res.error); }
+    }
+    setBusy(null);
+    if (fail === 0) { setMsg(`✓ alterações guardadas (${ok} pisos)`); setEditMode(false); setEditFloors(null); setSelIdx(null); setDirty(false); loadPlans(); }
+  };
+  const selFixture = (editMode && activeFloor && selIdx != null) ? activeFloor.fixtures[selIdx] : null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -27668,25 +27809,100 @@ function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) 
         </div>
       )}
 
-      {/* Localizador + map preview */}
-      {activeFloor ? (
-        <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <StoreMapLocate floor={activeFloor} onLocate={(fk, all) => { setFocusKey(fk); setHighlightKeys(fk ? new Set(all) : null); }} />
-            <span style={{ fontSize: 11, color: T.inkMute }}>
-              {(activeFloor.fixtures || []).length} móveis neste piso
-            </span>
-            {focusKey && (
-              <button onClick={() => { setFocusKey(null); setHighlightKeys(null); }} style={{
-                marginLeft: 'auto', padding: '4px 10px', fontSize: 11, fontFamily: 'inherit',
+      {/* Toolbar de edição */}
+      {activeFloor && !parsed && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          {!editMode ? (
+            <button onClick={enterEdit} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', fontSize: 12, fontFamily: 'inherit',
+              background: T.bgEl, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+            }}><Pencil size={12} /> Editar móveis</button>
+          ) : (
+            <>
+              <button onClick={addFixture} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', fontSize: 12, fontFamily: 'inherit',
+                background: T.bgEl, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+              }}><Plus size={12} /> Adicionar móvel</button>
+              <button onClick={saveEdits} disabled={!dirty || busy === 'saving'} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '7px 12px', fontSize: 12, fontFamily: 'inherit',
+                background: dirty ? T.green : T.bgEl, color: dirty ? '#fff' : T.inkMute,
+                border: 'none', borderRadius: 6, cursor: dirty ? 'pointer' : 'default', opacity: busy === 'saving' ? 0.6 : 1,
+              }}><Check size={12} /> {busy === 'saving' ? 'A guardar…' : 'Guardar alterações'}</button>
+              <button onClick={cancelEdit} style={{
+                padding: '7px 12px', fontSize: 12, fontFamily: 'inherit',
                 background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
-              }}>limpar destaque</button>
-            )}
+              }}>Cancelar</button>
+              {dirty && <span style={{ fontSize: 11, color: T.orange }}>● alterações por guardar</span>}
+              <span style={{ fontSize: 11, color: T.inkMute, marginLeft: 'auto' }}>arrasta para mover · pega no canto para redimensionar · clica para editar</span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Localizador + map preview (+ painel de edição) */}
+      {activeFloor ? (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 320, border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <StoreMapLocate floor={activeFloor} onLocate={(fk, all) => { setFocusKey(fk); setHighlightKeys(fk ? new Set(all) : null); }} />
+              <span style={{ fontSize: 11, color: T.inkMute }}>
+                {(activeFloor.fixtures || []).length} móveis neste piso
+              </span>
+              {focusKey && (
+                <button onClick={() => { setFocusKey(null); setHighlightKeys(null); }} style={{
+                  marginLeft: 'auto', padding: '4px 10px', fontSize: 11, fontFamily: 'inherit',
+                  background: 'transparent', color: T.inkSoft, border: `1px solid ${T.line}`, borderRadius: 6, cursor: 'pointer',
+                }}>limpar destaque</button>
+              )}
+            </div>
+            <StoreMapSVG floor={activeFloor} mode="base" maxHeight={640}
+              focusKey={focusKey} highlightKeys={highlightKeys}
+              selectedKey={editMode ? null : focusKey}
+              editable={editMode} selectedIdx={selIdx}
+              onMoveFixture={moveFixture} onResizeFixture={resizeFixture} onSelectFixture={setSelIdx}
+              onFixtureClick={editMode ? null : (f) => { const k = _fixtureKey(f); setFocusKey(k); setHighlightKeys(new Set([k])); }} />
           </div>
-          <StoreMapSVG floor={activeFloor} mode="base" maxHeight={640}
-            focusKey={focusKey} highlightKeys={highlightKeys}
-            selectedKey={focusKey}
-            onFixtureClick={(f) => { const k = _fixtureKey(f); setFocusKey(k); setHighlightKeys(new Set([k])); }} />
+
+          {/* Painel do móvel seleccionado (edição) */}
+          {editMode && selFixture && (
+            <div style={{ width: 240, flexShrink: 0, border: `1px solid ${T.line}`, borderRadius: 10, padding: 14, background: T.bgEl, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: T.ink, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Móvel seleccionado</div>
+              {[
+                ['Nome / código', 'label', 'text'],
+                ['Departamento', 'dept', 'text'],
+                ['Produto', 'produit', 'text'],
+                ['Mobiliário', 'mobilier', 'text'],
+              ].map(([lbl, field]) => (
+                <label key={field} style={{ display: 'block' }}>
+                  <div style={{ fontSize: 9, color: T.inkMute, marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'Geist Mono' }}>{lbl}</div>
+                  <input value={selFixture[field] || ''} onChange={e => patchFixture(selIdx, { [field]: e.target.value })}
+                    style={{ width: '100%', padding: '6px 8px', fontSize: 12, background: T.paper, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4, outline: 'none', fontFamily: 'inherit' }} />
+                </label>
+              ))}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                {[['Linha', 'r'], ['Coluna', 'c'], ['Altura', 'rs'], ['Largura', 'cs']].map(([lbl, field]) => (
+                  <label key={field}>
+                    <div style={{ fontSize: 9, color: T.inkMute, marginBottom: 3, fontFamily: 'Geist Mono' }}>{lbl}</div>
+                    <input type="number" value={selFixture[field] ?? 0} min={field === 'rs' || field === 'cs' ? 1 : 0}
+                      onChange={e => patchFixture(selIdx, { [field]: Math.max(field === 'rs' || field === 'cs' ? 1 : 0, Number(e.target.value) || 0) })}
+                      style={{ width: '100%', padding: '5px 6px', fontSize: 12, background: T.paper, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4, outline: 'none', fontFamily: 'Geist Mono' }} />
+                  </label>
+                ))}
+              </div>
+              <label style={{ display: 'block' }}>
+                <div style={{ fontSize: 9, color: T.inkMute, marginBottom: 3, fontFamily: 'Geist Mono' }}>COR (hex, opcional)</div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <input value={selFixture.fill || ''} placeholder="ex: 00B0F0" onChange={e => patchFixture(selIdx, { fill: e.target.value.replace('#', '').toUpperCase() || null })}
+                    style={{ flex: 1, padding: '6px 8px', fontSize: 12, background: T.paper, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4, outline: 'none', fontFamily: 'Geist Mono' }} />
+                  <span style={{ width: 22, height: 22, borderRadius: 4, border: `1px solid ${T.line}`, background: selFixture.fill ? '#' + selFixture.fill : _deptColor(selFixture.dept, selFixture.produit) }} />
+                </div>
+              </label>
+              <button onClick={() => deleteFixture(selIdx)} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '7px 12px', marginTop: 4,
+                background: 'transparent', color: T.red || '#c92a2a', border: `1px solid ${T.red || '#c92a2a'}40`, borderRadius: 6, cursor: 'pointer', fontSize: 12, fontFamily: 'inherit',
+              }}><Trash2 size={12} /> Apagar móvel</button>
+            </div>
+          )}
         </div>
       ) : (
         <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
