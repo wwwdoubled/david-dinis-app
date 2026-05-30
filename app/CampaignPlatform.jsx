@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.5';
+const APP_VERSION = '3.22.6';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T03:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T04:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.6', date: '2026-05-31', summary: 'Folhetos: logo FNAC oficial + selo ACUMULA 1% reais (sem fundo). (A) Processei as imagens enviadas: logo FNAC (logos_FNAC_Oficial_2020.png, já transparente) → public/flyer-assets/fnac-logo.png; selo ACUMULA 1% (acumala 1.png, fundo rosa) → recorte do selo (y 10-128) + remoção do rosa por color-key (tol 70 + despill nas bordas) → public/flyer-assets/acumula-1.png transparente. (B) Helper _loadFlyerAssetDataUrl carrega como base64 (cache) — embebe no preview E no export PNG/PDF (o <img src=data:svg> não carrega refs externas, mesmo padrão das fonts Gilroy). (C) FlyerSVG: placeholders rect substituídos por <image> reais — logo FNAC no canto sup-direito (default ON em TODOS os folhetos, draggable) + selo ACUMULA 1% no canto inf-esquerdo (default ON) com a mensagem "O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente." em 2 linhas por baixo (editável). (D) defaultFlyerData: showLogoFnac/showAcumula1 true, showAccumulate (valor €) passa a OFF (alternativa opcional), removido showLogoFnacCard. Toggles actualizados no editor.' },
   { version: '3.22.5', date: '2026-05-31', summary: 'Planta: ZOOM/PAN + edição directa de móveis. (A) StoreMapSVG reescrito com zoom (roda do rato centrada no cursor), pan (arrastar o fundo) e botões +/−/ajustar — funciona em todas as vistas (admin + campanha). focusKey agora dá zoom e centra o móvel localizado. (B) Modo de edição no Admin → Planta da loja: botão "Editar móveis" → arrastar um móvel move-o (snap à grelha), pega no canto inferior-direito redimensiona, clica para seleccionar. Painel lateral edita nome/código, departamento, produto, mobiliário, posição (linha/coluna/altura/largura) e cor (hex). Botões Adicionar móvel / Apagar móvel / Guardar alterações (persiste em store_floor_plans via cloudUpsertFloorPlan) / Cancelar. Indicador "alterações por guardar". Permite acertar a planta quando há mudanças de layout sem voltar ao Excel.' },
   { version: '3.22.4', date: '2026-05-31', summary: 'PLANTA Fase 3 — Campanha no Mapa. Novo tab "🗺 Mapa" dentro da campanha (ao lado de Listagem/Plano/Saída): mostra a planta da loja com cada móvel pintado pelo ESTADO dos produtos da campanha — verde (tudo feito), laranja (pendente), vermelho (falta/mínima), anel amarelo (destaque/cartaz). Liga as zonas do período aos móveis da planta por nome (_zoneFixtureScore: móvel inteiro contido no nome da zona, ex: "MLS"→"MLS SOM", "PML APPLE"→"PML APPLE"). Selector de piso (PISO 0/PISO 1), localizador de móvel + localizador de PRODUTO (escreve EAN/nome → centra no móvel onde está). Hover num móvel lista os produtos lá colocados. Aviso das zonas com produtos que não casaram com nenhum móvel (nomes divergentes) — base para linking manual futuro. CampaignsView recebe currentStoreId.' },
   { version: '3.22.3', date: '2026-05-31', summary: 'Fix diarização: distribuição justa por horas (método do maior resto / Hamilton). Antes era Math.round + "o último colaborador fica com o resto" — os full-time (40h) arredondavam a quota para cima e despejavam o resto negativo no part-time (ex: 16 seguros = 5+5+5 deixava só 1 para o de 20h). Agora cada um leva o floor da quota exacta e o que falta para fechar o objectivo vai para os maiores restos fraccionários. Exemplo 16 seguros / 40+40+40+20h: passa de [5,5,5,1] para [5,5,4,2] — Ricardo Gabriel (20h) recebe 2 (quota justa) em vez de 1.' },
@@ -19542,15 +19543,17 @@ function defaultFlyerData() {
     accumulateSub: 'EM CARTÃO FNAC',
     footnote: '*PVP Recomendado é o preço sugerido pelo fornecedor/marca.',
     showLogo: true,
-    showAccumulate: true,
+    showAccumulate: false,   // v3.22.6: substituído pelo selo ACUMULA 1%
     showDiscount: true,
     // v3.21.31
     titleBold: true,
     specsBold: false,
-    showLogoFnac: false,
-    showLogoFnacCard: false,
+    showLogoFnac: true,      // v3.22.6: logo FNAC em todos os folhetos por defeito
     // v3.21.33
     specsSize: 4,
+    // v3.22.6: selo ACUMULA 1% + mensagem
+    showAcumula1: true,
+    acumulaMessage: 'O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente.',
   };
 }
 
@@ -19566,6 +19569,16 @@ function FlyerEditor({ campaigns = [] }) {
   // Per-element layout overrides: { [id]: { dx, dy, scale } } — dx/dy in mm, scale 0.4..2.5
   const [layoutOverrides, setLayoutOverrides] = useState({});
   const [selectedEl, setSelectedEl] = useState(null); // selected element id for editing
+  // v3.22.6: assets FNAC (logo + selo ACUMULA 1%) como data URLs base64
+  const [fnacAssets, setFnacAssets] = useState({ logo: null, acumula: null });
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      _loadFlyerAssetDataUrl('/flyer-assets/fnac-logo.png'),
+      _loadFlyerAssetDataUrl('/flyer-assets/acumula-1.png'),
+    ]).then(([logo, acumula]) => { if (alive) setFnacAssets({ logo, acumula }); });
+    return () => { alive = false; };
+  }, []);
   const svgRef = useRef();
   const fileInputRef = useRef();
 
@@ -19746,6 +19759,7 @@ function FlyerEditor({ campaigns = [] }) {
             selectedEl={selectedEl}
             onSelectEl={setSelectedEl}
             onDragEl={(id, dxMm, dyMm) => setOverride(id, { dx: dxMm, dy: dyMm })}
+            fnacAssets={fnacAssets}
           />
         </div>
 
@@ -19920,7 +19934,14 @@ function FlyerEditor({ campaigns = [] }) {
               </div>
             )}
 
-            <FlyerToggle label="Mostrar acumula em cartão" checked={data.showAccumulate} onChange={v => update({ showAccumulate: v })} />
+            {/* v3.22.6: Selo ACUMULA 1% (oficial FNAC) + mensagem */}
+            <FlyerToggle label="Selo ACUMULA 1% (cartão FNAC)" checked={!!data.showAcumula1} onChange={v => update({ showAcumula1: v })} />
+            {data.showAcumula1 && (
+              <FlyerField label="Mensagem do selo" multiline small value={data.acumulaMessage} onChange={v => update({ acumulaMessage: v })} />
+            )}
+
+            {/* Acumula em valor € (alternativa programática, opcional) */}
+            <FlyerToggle label="Acumula em valor € (em vez do selo)" checked={data.showAccumulate} onChange={v => update({ showAccumulate: v })} />
             {data.showAccumulate && (
               <>
                 <FlyerField label="Texto cartão" value={data.accumulateLabel} onChange={v => update({ accumulateLabel: v })} />
@@ -19931,12 +19952,11 @@ function FlyerEditor({ campaigns = [] }) {
               </>
             )}
 
-            <FlyerToggle label="Mostrar logo FNAC" checked={data.showLogo} onChange={v => update({ showLogo: v })} />
-            {/* v3.21.31 — negrito + logos placeholder */}
+            <FlyerToggle label="Mostrar logo FNAC (rodapé)" checked={data.showLogo} onChange={v => update({ showLogo: v })} />
+            <FlyerToggle label="Logo FNAC oficial (canto)" checked={!!data.showLogoFnac} onChange={v => update({ showLogoFnac: v })} />
+            {/* v3.21.31 — negrito */}
             <FlyerToggle label="Título a negrito" checked={data.titleBold !== false} onChange={v => update({ titleBold: v })} />
             <FlyerToggle label="Specs a negrito" checked={!!data.specsBold} onChange={v => update({ specsBold: v })} />
-            <FlyerToggle label="Logo FNAC (canto)" checked={!!data.showLogoFnac} onChange={v => update({ showLogoFnac: v })} />
-            <FlyerToggle label="Logo Cartão FNAC" checked={!!data.showLogoFnacCard} onChange={v => update({ showLogoFnacCard: v })} />
 
             <FlyerField label="Rodapé legal" multiline value={data.footnote} onChange={v => update({ footnote: v })} small />
           </Section>
@@ -20009,7 +20029,14 @@ function FlyerToggle({ label, checked, onChange }) {
 // ─────────────────────────────────────────────────────────────────────────
 // FlyerSVG — adaptive layout that re-arranges blocks based on aspect ratio
 // ─────────────────────────────────────────────────────────────────────────
-function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imageOpacity, displayWidth, displayHeight, layoutOverrides = {}, selectedEl = null, onSelectEl, onDragEl }) {
+// v3.22.6: parte a mensagem do selo em 2 linhas equilibradas
+function _acumulaLines(msg) {
+  const words = String(msg || '').trim().split(/\s+/);
+  if (words.length <= 1) return [words[0] || '', ''];
+  const mid = Math.ceil(words.length / 2);
+  return [words.slice(0, mid).join(' '), words.slice(mid).join(' ')];
+}
+function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imageOpacity, displayWidth, displayHeight, layoutOverrides = {}, selectedEl = null, onSelectEl, onDragEl, fnacAssets = {} }) {
   // Helper: returns a <g transform> wrapper for an element + click/drag handlers
   const ov = (id) => layoutOverrides[id] || { dx: 0, dy: 0, scale: 1 };
   // Drag tracking per session — uses screen pixels → mm conversion via viewBox
@@ -20141,28 +20168,37 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         />
       )}
 
-      {/* Logos FNAC / Cartão FNAC — placeholders v3.21.31 (substituir por <image href> quando user enviar PNG/SVG) */}
-      {data.showLogoFnac && (() => {
-        const lw = isSmall ? 10 : 16, lh = isSmall ? 3.5 : 5;
+      {/* v3.22.6: Logo FNAC oficial (todos os folhetos) — canto superior direito */}
+      {data.showLogoFnac && fnacAssets.logo && (() => {
+        const lw = isSmall ? 9 : 15;            // largura mm
+        const lh = lw * (884 / 887);            // rácio da imagem (~quadrada)
         const lx = W - padding - lw, ly = padding;
         return (
           <g {...elProps('logoFnac')}>
-            <rect x={lx} y={ly} width={lw} height={lh} fill="#e1a000" rx={0.5} />
-            <text x={lx + lw / 2} y={ly + lh * 0.72} fontSize={lh * 0.7} fontWeight={900}
-                  fill="#000" textAnchor="middle" fontFamily="Arial Black, Arial, sans-serif">FNAC</text>
+            <image href={fnacAssets.logo} x={lx} y={ly} width={lw} height={lh}
+              preserveAspectRatio="xMidYMid meet" />
             {selRing('logoFnac', lx, ly, lw, lh)}
           </g>
         );
       })()}
-      {data.showLogoFnacCard && (() => {
-        const lw = isSmall ? 14 : 22, lh = isSmall ? 4 : 6;
-        const lx = padding, ly = padding;
+      {/* v3.22.6: Selo ACUMULA 1% (cartões, sem fundo) + mensagem por baixo */}
+      {data.showAcumula1 && fnacAssets.acumula && !isSmall && (() => {
+        const sw = isWide ? 16 : 26;            // largura mm
+        const sh = sw * (115 / 295);            // rácio do selo recortado
+        const sx = padding, sy = H - padding - sh - (data.acumulaMessage ? 5 : 0);
+        const msgW = isWide ? sw * 1.6 : sw + 14;
         return (
-          <g {...elProps('logoFnacCard')}>
-            <rect x={lx} y={ly} width={lw} height={lh} fill="#000" rx={0.8} />
-            <text x={lx + lw / 2} y={ly + lh * 0.7} fontSize={lh * 0.55} fontWeight={900}
-                  fill="#e1a000" textAnchor="middle" fontFamily="Arial Black, Arial, sans-serif">CARTÃO FNAC</text>
-            {selRing('logoFnacCard', lx, ly, lw, lh)}
+          <g {...elProps('acumula1')}>
+            <image href={fnacAssets.acumula} x={sx} y={sy} width={sw} height={sh}
+              preserveAspectRatio="xMidYMid meet" />
+            {data.acumulaMessage && (
+              <text x={sx} y={sy + sh + 3} className="ft-sans"
+                fontSize={isWide ? 1.8 : 2.1} fill={palette.fg} opacity="0.9">
+                <tspan x={sx} dy="0">{_acumulaLines(data.acumulaMessage)[0]}</tspan>
+                <tspan x={sx} dy={isWide ? 2.2 : 2.6}>{_acumulaLines(data.acumulaMessage)[1]}</tspan>
+              </text>
+            )}
+            {selRing('acumula1', sx - 0.5, sy - 0.5, Math.max(sw, msgW) + 1, sh + (data.acumulaMessage ? 7 : 1))}
           </g>
         );
       })()}
@@ -20574,6 +20610,28 @@ function ProductImportDialog({ products, onPick, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────
 // SVG → PNG/PDF utilities
 // ─────────────────────────────────────────────────────────────────────────
+
+// v3.22.6: assets dos folhetos (logo FNAC, selo ACUMULA 1%) como data URLs
+// base64 — para embeberem no preview E no export PNG/PDF (o <img src=data:svg>
+// não carrega referências externas). Cache por caminho.
+const _flyerAssetCache = {};
+async function _loadFlyerAssetDataUrl(path) {
+  if (_flyerAssetCache[path]) return _flyerAssetCache[path];
+  try {
+    const r = await fetch(path);
+    if (!r.ok) throw new Error('fetch ' + path);
+    const buf = await r.arrayBuffer();
+    let bin = '';
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    const url = `data:image/png;base64,${btoa(bin)}`;
+    _flyerAssetCache[path] = url;
+    return url;
+  } catch (e) {
+    console.warn('Flyer asset load failed:', path, e);
+    return null;
+  }
+}
 
 // v3.21.32: cache do CSS Gilroy com OTFs embebidas em base64.
 // Necessário porque <img src="data:svg"> não vê fonts globais do documento.
