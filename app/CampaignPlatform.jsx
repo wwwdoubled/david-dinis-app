@@ -456,6 +456,111 @@ function _ymdFromSerial(serial) {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// v3.22.0: Planta interactiva — parse do Excel planograma (AVEIRO_PLANTA.xlsx)
+// Lê NOMENCLATURA (metadados por móvel) + folhas PISO 1/PISO 2 (grelha visual:
+// cada célula mergeada/colorida = um móvel). A posição na grelha É a geometria.
+// Mapeamento Excel→app: "PISO 1"→"PISO 0" (térreo), "PISO 2"→"PISO 1" (cima).
+// ─────────────────────────────────────────────────────────────────────────
+const PLANTA_FLOOR_MAP = { 'PISO 1': 'PISO 0', 'PISO 2': 'PISO 1' };
+
+function parsePlantaExcel(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        onProgress?.({ stage: 'parse', message: 'A ler planta…' });
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellStyles: true });
+
+        // 1) NOMENCLATURA → metadados por número de móvel
+        const meta = {};
+        const nomName = (wb.SheetNames || []).find(n => /NOMENCLATURA/i.test(n));
+        if (nomName) {
+          const nom = XLSX.utils.sheet_to_json(wb.Sheets[nomName], { header: 1, defval: null, blankrows: true });
+          for (let i = 1; i < nom.length; i++) {
+            const row = nom[i]; if (!row) continue;
+            const num = row[0]; if (num == null) continue;
+            const key = String(num).trim();
+            meta[key] = {
+              dept: row[1] || '', produit: row[2] || '', section: row[3] || '',
+              mobilier: row[5] || '', floor: row[6] || '',
+            };
+          }
+        }
+
+        // 2) Cada folha PISO N → grelha de móveis
+        const parseFloor = (sheetName) => {
+          const ws = wb.Sheets[sheetName];
+          if (!ws || !ws['!ref']) return null;
+          const ref = XLSX.utils.decode_range(ws['!ref']);
+          const rows = ref.e.r + 1, cols = ref.e.c + 1;
+          const merges = ws['!merges'] || [];
+          const mergeTL = {}; const covered = new Set();
+          for (const m of merges) {
+            mergeTL[m.s.r + '_' + m.s.c] = { rs: m.e.r - m.s.r + 1, cs: m.e.c - m.s.c + 1 };
+            for (let r = m.s.r; r <= m.e.r; r++)
+              for (let c = m.s.c; c <= m.e.c; c++)
+                if (r !== m.s.r || c !== m.s.c) covered.add(r + '_' + c);
+          }
+          const palette = []; const palIdx = {};
+          const pidx = (hex) => {
+            if (!hex) return -1;
+            if (!(hex in palIdx)) { palIdx[hex] = palette.length; palette.push(hex); }
+            return palIdx[hex];
+          };
+          const cells = []; const fixtures = [];
+          for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+              if (covered.has(r + '_' + c)) continue;
+              const cell = ws[XLSX.utils.encode_cell({ r, c })];
+              if (!cell) continue;
+              let fill = '';
+              try {
+                const f = cell.s && cell.s.fgColor && cell.s.fgColor.rgb;
+                if (f && typeof f === 'string') fill = (f.length === 8 ? f.slice(2) : f);
+              } catch { /* no style */ }
+              if (fill === 'FFFFFF') fill = '';
+              const v = cell.v != null ? String(cell.v).trim() : '';
+              const span = mergeTL[r + '_' + c] || { rs: 1, cs: 1 };
+              if (fill) cells.push([r, c, span.rs, span.cs, pidx(fill)]);
+              if (v) {
+                const numMatch = /^\d+(\s*bis)?$/i.test(v);
+                const num = numMatch ? v.replace(/\s*bis/i, '').trim() : null;
+                const m = (num && meta[num]) ? meta[num] : null;
+                fixtures.push({
+                  r, c, rs: span.rs, cs: span.cs, label: v, fill: fill || null,
+                  num: num ? Number(num) : null,
+                  dept: m ? m.dept : null, produit: m ? m.produit : null, mobilier: m ? m.mobilier : null,
+                });
+              }
+            }
+          }
+          return {
+            name: PLANTA_FLOOR_MAP[sheetName.trim()] || sheetName.trim(),
+            srcName: sheetName.trim(),
+            cols, rows, palette, cells, fixtures,
+          };
+        };
+
+        const floors = [];
+        for (const sn of (wb.SheetNames || [])) {
+          if (/^PISO\s/i.test(sn.trim())) {
+            const f = parseFloor(sn);
+            if (f) floors.push(f);
+          }
+        }
+        if (floors.length === 0) { reject(new Error('Nenhuma folha "PISO N" encontrada na planta.')); return; }
+        onProgress?.({ stage: 'done', message: `${floors.length} pisos lidos` });
+        resolve({ floors, filename: file.name, parsedAt: new Date().toISOString() });
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error('Erro ao ler ficheiro'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 function parsePenetrationExcel(file, onProgress, opts = {}) {
   const sellerStoreFilter = (opts.sellerStoreFilter || 'AVEIRO').toUpperCase();
   return new Promise((resolve, reject) => {
@@ -1798,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.42';
+const APP_VERSION = '3.22.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T23:45:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T00:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1811,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.0', date: '2026-05-31', summary: 'PLANTA INTERACTIVA DA LOJA — Fase 1. (A) Novo parser parsePlantaExcel: lê o Excel planograma (AVEIRO_PLANTA.xlsx) — folha NOMENCLATURA (371 móveis com dept/produto/mobiliário/piso) + folhas PISO 1/PISO 2 (grelha visual: cada célula mergeada/colorida = 1 móvel). Usa XLSX cellStyles para extrair cores de fundo + !merges para spans. A posição na grelha é a geometria — gera o mapa automaticamente, sem desenhar à mão. Mapeamento Excel→app: PISO 1→PISO 0 (térreo), PISO 2→PISO 1 (cima). (B) Migration store_floor_plans (grid_json jsonb por piso/loja, RLS read-authed/write-admin). cloudUpsertFloorPlan/cloudFetchFloorPlans/cloudDeleteFloorPlan. (C) Componente StoreMapSVG: renderiza a grelha com cores reais + móveis com labels + hover tooltip (dept/produto/mobiliário). Suporta modo overlay (cores por estado/vendas) para fases seguintes. (D) Admin → novo tab "Planta da loja": upload Excel → preview do mapa por piso → guardar na cloud. Aveiro: PISO 0 com 66 móveis, PISO 1 com 713 (242 com metadados). Próximas fases: vista Campanha no Mapa, heatmap de vendas, drag-drop.' },
   { version: '3.21.42', date: '2026-05-30', summary: 'Match colaborador ↔ horário com NIF + alias + first/last. Helper único _matchSchedCollab. Adicionado alias "RICARDO GABRIEL" (VENDEDOR_TOTAL) → "RICARDO SILVA" (horário). Filtro sellersPTS e worksToday partilham o mesmo helper.' },
   { version: '3.21.41', date: '2026-05-30', summary: 'Fix v3.21.40: match name flexível (primeiro+último). "RICARDO MIGUEL SILVA" do VENDEDOR_TOTAL agora bate com "RICARDO SILVA" do horário. Aplica-se ao filtro sellersPTS + worksToday do TPAutoImportButton.' },
   { version: '3.21.40', date: '2026-05-30', summary: 'Equipa PTS: filtra sellersPTS por horário built-in. Colaboradores que estão em VENDEDOR_TOTAL mas não constam do horário (ex: Luis Morais — saído do quadro mas ainda no histórico FNAC) ficam fora da tabela, agregados, insights e diarização. Sem horário built-in para o mês, mantém comportamento antigo.' },
@@ -2378,6 +2484,41 @@ async function cloudDeleteFloor(id) {
   if (!supabase) return { ok: false };
   // FK on_delete cascade apaga as zonas automaticamente
   const { error } = await supabase.from('store_floors').delete().eq('id', id);
+  return { ok: !error, error: error?.message };
+}
+
+// v3.22.0: planta interactiva — persiste a grelha parseada por piso
+async function cloudUpsertFloorPlan({ storeId, floorName, gridJson, cols, rows, sourceFilename, createdBy }) {
+  if (!supabase) return { ok: false, error: 'no supabase' };
+  const payload = {
+    store_id: storeId || null,
+    floor_name: floorName,
+    grid_json: gridJson,
+    cols: cols ?? null,
+    rows: rows ?? null,
+    source_filename: sourceFilename || null,
+    created_by: createdBy || null,
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await supabase
+    .from('store_floor_plans')
+    .upsert(payload, { onConflict: 'store_id,floor_name' })
+    .select().single();
+  return { ok: !error, data, error: error?.message };
+}
+
+async function cloudFetchFloorPlans(storeId) {
+  if (!supabase) return [];
+  let q = supabase.from('store_floor_plans').select('*');
+  if (storeId) q = q.eq('store_id', storeId);
+  const { data, error } = await q.order('floor_name', { ascending: true });
+  if (error) { console.warn('fetch floor plans:', error.message); return []; }
+  return data || [];
+}
+
+async function cloudDeleteFloorPlan(id) {
+  if (!supabase) return { ok: false };
+  const { error } = await supabase.from('store_floor_plans').delete().eq('id', id);
   return { ok: !error, error: error?.message };
 }
 
@@ -26998,6 +27139,230 @@ function PenetrationDashboardCard({ currentStoreName, onOpen }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// v3.22.0: StoreMapSVG — renderiza a planta de um piso (grelha planograma)
+// floor = { cols, rows, palette:[hex…], cells:[[r,c,rs,cs,palIdx]…],
+//           fixtures:[{r,c,rs,cs,label,fill,num,dept,produit,mobilier}…] }
+// mode: 'base' (cores do Excel) | 'overlay' (cores via overlayMap)
+// overlayMap: Map<fixtureKey, { color, badge?, tooltip? }>
+// ─────────────────────────────────────────────────────────────────────────
+function _fixtureKey(f) {
+  return f.num != null ? ('n' + f.num) : ('l' + String(f.label || '').toUpperCase().trim());
+}
+function StoreMapSVG({ floor, mode = 'base', overlayMap = null, selectedKey = null, onFixtureClick = null, showLabels = true, maxHeight = 560 }) {
+  const [hover, setHover] = useState(null); // { f, mx, my }
+  const wrapRef = useRef(null);
+  if (!floor || !floor.cols) return null;
+  const CELL = 10;
+  const W = floor.cols * CELL;
+  const H = floor.rows * CELL;
+  const palette = floor.palette || [];
+
+  const handleMove = (e, f) => {
+    const rect = wrapRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setHover({ f, mx: e.clientX - rect.left, my: e.clientY - rect.top });
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', width: '100%', overflow: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', maxHeight, display: 'block', background: T.bg, borderRadius: 8 }}>
+        {/* fundo colorido (visual fiel ao Excel) */}
+        {(floor.cells || []).map(([r, c, rs, cs, pi], i) => (
+          <rect key={'bg' + i} x={c * CELL} y={r * CELL} width={cs * CELL} height={rs * CELL}
+            fill={'#' + (palette[pi] || 'cccccc')} opacity={mode === 'overlay' ? 0.18 : 0.8} />
+        ))}
+        {/* móveis */}
+        {(floor.fixtures || []).map((f, i) => {
+          const key = _fixtureKey(f);
+          const ov = overlayMap ? overlayMap.get(key) : null;
+          const x = f.c * CELL, y = f.r * CELL, w = f.cs * CELL, h = f.rs * CELL;
+          const baseFill = f.fill ? '#' + f.fill : 'transparent';
+          const fill = mode === 'overlay' ? (ov?.color || 'rgba(120,120,120,0.10)') : baseFill;
+          const isSel = selectedKey === key;
+          const interactive = !!onFixtureClick;
+          const fontSize = Math.max(2.6, Math.min(w / Math.max(2, f.label.length) * 1.5, h * 0.6, 5));
+          return (
+            <g key={'fx' + i}
+              style={{ cursor: interactive ? 'pointer' : 'default' }}
+              onClick={interactive ? () => onFixtureClick(f) : undefined}
+              onMouseEnter={(e) => handleMove(e, f)}
+              onMouseMove={(e) => handleMove(e, f)}
+              onMouseLeave={() => setHover(null)}>
+              <rect x={x} y={y} width={w} height={h}
+                fill={fill}
+                stroke={isSel ? T.accent : (ov?.stroke || 'rgba(0,0,0,0.18)')}
+                strokeWidth={isSel ? 1.2 : 0.3} />
+              {ov?.badge && (
+                <circle cx={x + w - 1.6} cy={y + 1.6} r={1.4} fill={ov.badge} stroke="#fff" strokeWidth={0.25} />
+              )}
+              {showLabels && f.label && w >= 8 && (
+                <text x={x + w / 2} y={y + h / 2} fontSize={fontSize}
+                  fill={T.ink} textAnchor="middle" dominantBaseline="central"
+                  style={{ pointerEvents: 'none', userSelect: 'none' }}>
+                  {f.label.length > 16 ? f.label.slice(0, 15) + '…' : f.label}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+      {hover && (
+        <div style={{
+          position: 'absolute', left: Math.min(hover.mx + 12, (wrapRef.current?.clientWidth || 400) - 180),
+          top: Math.max(8, hover.my - 10), pointerEvents: 'none', zIndex: 20,
+          background: T.ink, color: T.bg, padding: '6px 9px', borderRadius: 6,
+          fontSize: 11, maxWidth: 200, boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
+        }}>
+          <div style={{ fontWeight: 600 }}>{hover.f.label}</div>
+          {hover.f.dept && <div style={{ opacity: 0.85, fontSize: 10 }}>{hover.f.dept} · {hover.f.produit}</div>}
+          {hover.f.mobilier && <div style={{ opacity: 0.7, fontSize: 10 }}>{hover.f.mobilier}</div>}
+          {overlayMap?.get(_fixtureKey(hover.f))?.tooltip && (
+            <div style={{ marginTop: 4, fontSize: 10, opacity: 0.95 }}>{overlayMap.get(_fixtureKey(hover.f)).tooltip}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v3.22.0: AdminStorePlanTab — upload do Excel planograma + preview + guardar
+// ─────────────────────────────────────────────────────────────────────────
+function AdminStorePlanTab({ currentUserId, currentStoreId, currentStoreName }) {
+  const [plans, setPlans] = useState(null);       // rows da cloud
+  const [parsed, setParsed] = useState(null);     // resultado do parse (antes de guardar)
+  const [activeFloorIdx, setActiveFloorIdx] = useState(0);
+  const [busy, setBusy] = useState(null);         // 'parsing' | 'saving' | null
+  const [msg, setMsg] = useState(null);
+  const fileRef = useRef();
+
+  const loadPlans = async () => {
+    const rows = await cloudFetchFloorPlans(currentStoreId);
+    setPlans(rows);
+  };
+  useEffect(() => { loadPlans(); /* eslint-disable-next-line */ }, [currentStoreId]);
+
+  const handleFile = async (file) => {
+    if (!file) return;
+    setBusy('parsing'); setMsg(null); setParsed(null);
+    try {
+      const res = await parsePlantaExcel(file, (p) => setMsg(p.message));
+      setParsed(res);
+      setActiveFloorIdx(0);
+      setMsg(`${res.floors.length} pisos · ${res.floors.reduce((s, f) => s + f.fixtures.length, 0)} móveis lidos`);
+    } catch (e) {
+      setMsg('Erro: ' + (e?.message || e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!parsed) return;
+    setBusy('saving'); setMsg(null);
+    let ok = 0, fail = 0;
+    for (const f of parsed.floors) {
+      const grid = { cols: f.cols, rows: f.rows, palette: f.palette, cells: f.cells, fixtures: f.fixtures, srcName: f.srcName };
+      const res = await cloudUpsertFloorPlan({
+        storeId: currentStoreId, floorName: f.name, gridJson: grid,
+        cols: f.cols, rows: f.rows, sourceFilename: parsed.filename, createdBy: currentUserId,
+      });
+      if (res.ok) ok++; else { fail++; setMsg('Erro a guardar ' + f.name + ': ' + res.error); }
+    }
+    if (fail === 0) setMsg(`✓ ${ok} pisos guardados`);
+    setBusy(null);
+    setParsed(null);
+    loadPlans();
+  };
+
+  const handleDelete = async (row) => {
+    if (!confirm(`Apagar planta do piso "${row.floor_name}"?`)) return;
+    await cloudDeleteFloorPlan(row.id);
+    loadPlans();
+  };
+
+  // Floor a mostrar no preview: do parse (pré-save) ou da cloud (já guardado)
+  const previewFloors = parsed
+    ? parsed.floors
+    : (plans || []).map(r => ({ ...r.grid_json, name: r.floor_name, _row: r }));
+  const activeFloor = previewFloors[activeFloorIdx] || null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div>
+        <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 4 }}>
+          🗺 Planta da loja · {currentStoreName || 'loja actual'}
+        </div>
+        <div style={{ fontSize: 12, color: T.inkSoft }}>
+          Sobe o Excel planograma (ex: <code>AVEIRO_PLANTA 2023.xlsx</code>). Lê NOMENCLATURA + folhas PISO 1/PISO 2 e gera o mapa interactivo automaticamente.
+          Mapeamento: Excel PISO 1 → <strong>PISO 0</strong>, Excel PISO 2 → <strong>PISO 1</strong>.
+        </div>
+      </div>
+
+      {/* Upload + actions */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
+          onChange={e => handleFile(e.target.files?.[0])} />
+        <button onClick={() => fileRef.current?.click()} disabled={!!busy} style={{
+          display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+          background: T.ink, color: T.bg, border: 'none', borderRadius: 6, fontSize: 12,
+          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+        }}>
+          <Upload size={13} /> {busy === 'parsing' ? 'A ler…' : 'Carregar Excel da planta'}
+        </button>
+        {parsed && (
+          <button onClick={handleSave} disabled={busy === 'saving'} style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+            background: T.green, color: '#fff', border: 'none', borderRadius: 6, fontSize: 12,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>
+            <Check size={13} /> Guardar {parsed.floors.length} pisos
+          </button>
+        )}
+        {msg && <span style={{ fontSize: 11, color: T.inkSoft }}>{msg}</span>}
+      </div>
+
+      {/* Floor selector */}
+      {previewFloors.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          {previewFloors.map((f, i) => (
+            <button key={f.name + i} onClick={() => setActiveFloorIdx(i)} style={{
+              padding: '6px 12px', fontSize: 12, fontFamily: 'inherit', borderRadius: 6,
+              background: activeFloorIdx === i ? T.accent : T.bgEl,
+              color: activeFloorIdx === i ? '#fff' : T.inkSoft,
+              border: `1px solid ${activeFloorIdx === i ? T.accent : T.line}`, cursor: 'pointer',
+            }}>
+              {f.name} <span style={{ opacity: 0.7, fontSize: 10 }}>({(f.fixtures || []).length})</span>
+            </button>
+          ))}
+          {parsed && <span style={{ fontSize: 10, color: T.orange, marginLeft: 6 }}>pré-visualização (não guardado)</span>}
+          {!parsed && activeFloor?._row && (
+            <button onClick={() => handleDelete(activeFloor._row)} style={{
+              marginLeft: 'auto', padding: '5px 10px', fontSize: 11, fontFamily: 'inherit',
+              background: 'transparent', color: T.red || '#c92a2a',
+              border: `1px solid ${T.red || '#c92a2a'}40`, borderRadius: 6, cursor: 'pointer',
+            }}>
+              <Trash2 size={11} style={{ verticalAlign: 'middle' }} /> Apagar piso
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Map preview */}
+      {activeFloor ? (
+        <div style={{ border: `1px solid ${T.line}`, borderRadius: 10, padding: 10, background: T.bgEl }}>
+          <StoreMapSVG floor={activeFloor} mode="base" maxHeight={620} />
+        </div>
+      ) : (
+        <div style={{ padding: 40, textAlign: 'center', color: T.inkMute, fontSize: 13, border: `1px dashed ${T.line}`, borderRadius: 10 }}>
+          {plans === null ? 'A carregar…' : 'Sem planta carregada. Sobe o Excel para começar.'}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // AdminView — administration panel (only visible to admins)
 // Tabs: Utilizadores | Atividade | Configuração | Estatísticas
 // ─────────────────────────────────────────────────────────────────────────
@@ -27026,6 +27391,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
           { id: 'architecture', label: 'Arquitetura', icon: GitCompareArrows },
           { id: 'cloud', label: 'Cloud', icon: Database },
           { id: 'layout', label: 'Layout da loja', icon: Layers },
+          { id: 'plan', label: 'Planta da loja', icon: MapPin },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
           { id: 'emails', label: 'Emails', icon: Inbox },
           // v3.20.12: 'sales' voltou ao sidebar (admin-only); removido daqui
@@ -27055,6 +27421,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'architecture' && <AdminArchitectureTab />}
       {tab === 'stores' && <AdminStoresTab currentUserId={user?.id} />}
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} currentStoreId={currentStoreId} currentStoreName={currentStoreName} />}
+      {tab === 'plan' && <AdminStorePlanTab currentUserId={user?.id} currentStoreId={currentStoreId} currentStoreName={currentStoreName} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
       {tab === 'emails' && <AdminEmailsTab currentUserId={user?.id} />}
       {tab === 'config' && <AdminConfigTab uiConfig={uiConfig} setUIConfig={setUIConfig} currentUserId={user?.id} />}
