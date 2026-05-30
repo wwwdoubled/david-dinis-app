@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.33';
+const APP_VERSION = '3.21.34';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T19:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T20:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.34', date: '2026-05-30', summary: 'Horários PTS Aveiro built-in: BUILTIN_PT_SCHEDULES com Maio 2026 + Junho 2026 (7 colaboradores cada: DAVID DINIS, BEATRIZ PINTO, RICARDO ALVES, BRUNO MESQUITA, TIAGO NOVAIS, RICARDO SILVA, JOSUE ALVES) extraídos dos PDFs de Permanências SISQUAL. TPAutoImportButton detecta auto: se snap.monthKey ∈ {2026-05, 2026-06} usa o horário built-in (badge verde "built-in") sem precisar de paste. Paste continua a funcionar como override para outros meses ou correcções.' },
   { version: '3.21.33', date: '2026-05-30', summary: 'Folhetos: (A) FIX — linha azul de selecção persistia no PNG/PDF exportado. renderSVGToBlob faz agora strip dos rects com stroke=#1F8FE8 no clone antes de serializar. (B) Specs no SVG passam a ser MULTILINHA (split por \\n) com tamanho ajustável via slider 2-12mm (data.specsSize, default 4mm). FlyerField "Specs" no editor agora é textarea (multiline). Permite usar specs como bloco rico — nome do produto + características — quando o título passa a ser o nome da campanha.' },
   { version: '3.21.32', date: '2026-05-30', summary: 'Folhetos com tipografia Gilroy (oficial FNAC). 6 pesos (Regular 400, Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900) servidos em public/fonts/gilroy/. (A) @font-face global no FlyerEditor para preview no browser. (B) Classes .ft-display / .ft-sans no SVG passam a usar Gilroy como primeira família (fallback Arial Black/Arial). (C) renderSVGToBlob agora embute as 6 OTFs como base64 dataURLs dentro do <defs><style> antes de serializar, porque o <img src=data:svg> usado no export PNG/PDF não vê fonts globais do documento. Cache _gilroyCSSCache para fetch uma única vez. Total ~330KB.' },
   { version: '3.21.31', date: '2026-05-30', summary: 'Lote v3.21.31. (A) _daysRemainingInMonth inclui hoje no cálculo de dias úteis restantes — path com refDay: se today > refDay no mesmo mês, fromDay = today.getDate() (não refDay+1); path legacy: fromDay = todayDay (não +1). Aveiro com refDay=27 e today=30 passa de 0 para 1 dia útil. (B) Editor de Folhetos: removido tracejado azul de selecção (selRing), agora linha sólida fina (strokeWidth=0.3). (B2) Folhetos: toggles novos — "Título a negrito" (default ON), "Specs a negrito", "Logo FNAC (canto)", "Logo Cartão FNAC". Logos como placeholders SVG (rect+texto) — substituir por <image href> quando user enviar PNG/SVG definitivo. (B3) TPAutoImportButton: botão "📥 Importar para Diarização" no tab Equipa PTS. Para cada seller PTS, cria 1 registo PP em sale_date=refDay com equipment_count=seller.vendas, pp_count=seller.seguros; match por nome (case-insensitive) com profiles PTS via fetchAllProfiles; substitui registos prévios na mesma data; mostra resumo (criados/matched/sem-perfil/erros). (B4) Horário do mês: drawer "📅 Horário" no mesmo botão para colar texto do PDF de Permanências FNAC. Parser parsePermanenciasText detecta sequência de dias (qui 30, sex 1-mai, …) + linhas de colaborador (NIF/Nome/carga/N células). _isWorkedCell ignora FC/FO/Fer/Aniv/V. Quando horário válido está colado, a importação muda de modo: distribui equipment_count/pp_count por TODOS os dias trabalhados até refDay (proporcional, com fix do último dia para fechar o total exacto). Apaga registos prévios do mês inteiro para evitar duplicados. Resultado mostra modo (mensal vs horário). (C) NOVA tab "Arquitetura" no Admin com diagrama completo da app para apresentação: stack tecnológica (Frontend/Cloud/PWA/Deploy), SVG layered (Browser→Next.js→Supabase→Externos), 8 cards de módulos (Dashboard, Campanhas, Análises, PPs, Folhetos, Histórico, Inventário, Admin), lista de 23 tabelas BD, edge functions, roles, pipeline de email em 12 passos, 8 KPIs live da BD (lojas/users/admins/campanhas/períodos/snapshots/activity/emails). Botões Imprimir (window.print) + PDF (jsPDF + html2canvas multi-página) com @media print que esconde chrome.' },
@@ -24685,6 +24686,32 @@ function _famFromDesc(desc, codFam) {
   return 'Outras';
 }
 
+// v3.21.34: horários PTS Aveiro built-in (Maio + Junho 2026), extraídos do
+// PDF de Permanências. true = dia trabalhado, false = folga/férias/descanso/V.
+// Match com sellers da TX Penetração feito por nome (uppercase trim).
+const BUILTIN_PT_SCHEDULES = {
+  AVEIRO: {
+    '2026-05': [
+      { nif:'1365',  name:'DAVID DINIS',    days:{1:true,2:true,3:true,4:false,5:true,6:true,7:true,8:true,9:false,10:false,11:false,12:true,13:true,14:true,15:false,16:true,17:true,18:true,19:false,20:false,21:true,22:true,23:true,24:true,25:false,26:false,27:true,28:true,29:true,30:true,31:true}},
+      { nif:'5537',  name:'BEATRIZ PINTO',  days:{1:false,2:false,3:false,4:false,5:false,6:false,7:false,8:false,9:false,10:false,11:true,12:true,13:true,14:true,15:true,16:false,17:false,18:true,19:true,20:true,21:false,22:true,23:true,24:true,25:true,26:false,27:false,28:true,29:true,30:true,31:true}},
+      { nif:'5627',  name:'RICARDO ALVES',  days:{1:true,2:false,3:false,4:true,5:true,6:true,7:false,8:true,9:true,10:false,11:true,12:true,13:false,14:false,15:true,16:true,17:true,18:true,19:false,20:true,21:true,22:true,23:false,24:true,25:false,26:true,27:true,28:true,29:true,30:false,31:false}},
+      { nif:'3684',  name:'BRUNO MESQUITA', days:{1:false,2:false,3:true,4:true,5:true,6:true,7:true,8:false,9:false,10:true,11:true,12:true,13:true,14:true,15:false,16:false,17:true,18:true,19:true,20:true,21:true,22:false,23:false,24:true,25:true,26:true,27:true,28:true,29:false,30:false,31:true}},
+      { nif:'55617', name:'TIAGO NOVAIS',   days:{1:false,2:true,3:true,4:true,5:true,6:false,7:false,8:true,9:true,10:true,11:true,12:false,13:false,14:true,15:true,16:true,17:false,18:false,19:true,20:true,21:true,22:true,23:true,24:false,25:true,26:true,27:true,28:false,29:true,30:true,31:true}},
+      { nif:'58988', name:'RICARDO SILVA',  days:{1:true,2:true,3:true,4:true,5:false,6:false,7:true,8:true,9:true,10:true,11:false,12:false,13:true,14:true,15:true,16:true,17:true,18:false,19:true,20:true,21:true,22:true,23:false,24:false,25:true,26:true,27:true,28:true,29:false,30:true,31:true}},
+      { nif:'59008', name:'JOSUE ALVES',    days:{1:true,2:false,3:false,4:true,5:true,6:true,7:true,8:false,9:true,10:true,11:true,12:true,13:false,14:false,15:true,16:false,17:true,18:true,19:false,20:false,21:true,22:true,23:true,24:true,25:false,26:true,27:true,28:true,29:true,30:false,31:false}},
+    ],
+    '2026-06': [
+      { nif:'1365',  name:'DAVID DINIS',    days:{1:false,2:true,3:true,4:true,5:true,6:false,7:false,8:true,9:true,10:true,11:false,12:true,13:true,14:true,15:true,16:true,17:false,18:false,19:true,20:true,21:true,22:true,23:false,24:false,25:true,26:true,27:true,28:true,29:false,30:true}},
+      { nif:'5537',  name:'BEATRIZ PINTO',  days:{1:false,2:false,3:true,4:true,5:true,6:true,7:true,8:false,9:true,10:true,11:true,12:true,13:false,14:false,15:true,16:true,17:true,18:true,19:false,20:true,21:true,22:true,23:true,24:false,25:false,26:true,27:true,28:true,29:true,30:false}},
+      { nif:'5627',  name:'RICARDO ALVES',  days:{1:true,2:true,3:true,4:true,5:false,6:true,7:true,8:true,9:true,10:true,11:false,12:false,13:true,14:true,15:true,16:false,17:false,18:false,19:false,20:false,21:false,22:false,23:false,24:false,25:false,26:false,27:false,28:false,29:true,30:true}},
+      { nif:'3684',  name:'BRUNO MESQUITA', days:{1:true,2:true,3:true,4:true,5:false,6:false,7:true,8:true,9:true,10:true,11:true,12:false,13:false,14:true,15:true,16:true,17:true,18:false,19:false,20:true,21:true,22:true,23:true,24:true,25:true,26:false,27:false,28:true,29:true,30:true}},
+      { nif:'55617', name:'TIAGO NOVAIS',   days:{1:true,2:false,3:false,4:false,5:false,6:false,7:false,8:false,9:false,10:false,11:false,12:false,13:false,14:false,15:false,16:false,17:false,18:false,19:false,20:false,21:false,22:true,23:true,24:true,25:true,26:false,27:true,28:true,29:true,30:true}},
+      { nif:'58988', name:'RICARDO SILVA',  days:{1:true,2:false,3:true,4:false,5:true,6:true,7:true,8:true,9:false,10:false,11:true,12:true,13:true,14:true,15:false,16:true,17:true,18:true,19:true,20:false,21:false,22:true,23:true,24:true,25:false,26:true,27:true,28:true,29:false,30:false}},
+      { nif:'59008', name:'JOSUE ALVES',    days:{1:true,2:true,3:false,4:true,5:true,6:true,7:true,8:true,9:false,10:false,11:true,12:true,13:true,14:true,15:false,16:false,17:true,18:true,19:true,20:true,21:true,22:false,23:true,24:true,25:true,26:true,27:false,28:false,29:true,30:true}},
+    ],
+  },
+};
+
 // v3.21.31: parser do horário PDF colado como texto.
 // Formato esperado (Junho_C_Permanencias / 05_Maio_CPermanencias):
 //   Cabeçalho com Hor�rio: ...
@@ -24767,7 +24794,31 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
   const [result, setResult] = useState(null);
   const [showSched, setShowSched] = useState(false);
   const [schedText, setSchedText] = useState('');
-  const parsedSched = useMemo(() => schedText.trim() ? parsePermanenciasText(schedText) : null, [schedText]);
+  // v3.21.34: usa built-in BUILTIN_PT_SCHEDULES quando snap.monthKey + loja
+  // estiverem disponíveis. Texto colado pelo user faz override.
+  const builtinSched = useMemo(() => {
+    if (!snap?.monthKey) return null;
+    const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
+    const byStore = BUILTIN_PT_SCHEDULES[storeKey];
+    if (!byStore) return null;
+    const list = byStore[snap.monthKey];
+    if (!Array.isArray(list) || list.length === 0) return null;
+    // Converte para o formato {days, collabs:[{nif,name,cells}]}, onde cells é
+    // um array indexado por dia (1..31) com 'X' = trabalha, '' = folga.
+    const collabs = list.map(c => {
+      const cells = [];
+      for (let d = 1; d <= 31; d++) cells.push(c.days[d] ? '100PA' : 'FC');
+      return { nif: c.nif, name: c.name, cells };
+    });
+    // dias 1..31 (sentinela: idx==day porque o handleImport usa parsedSched.days[idx].day)
+    const days = [];
+    for (let d = 1; d <= 31; d++) days.push({ day: d, dow: '', monthHint: null });
+    return { days, collabs, builtin: true };
+  }, [snap?.monthKey, myStoreRow?.name]);
+  const parsedSched = useMemo(() => {
+    const pasted = schedText.trim() ? parsePermanenciasText(schedText) : null;
+    return pasted || builtinSched;
+  }, [schedText, builtinSched]);
 
   const handleImport = async () => {
     if (!snap?.monthKey) { alert('Snapshot sem mês definido.'); return; }
@@ -24883,7 +24934,7 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
         </button>
         <div style={{ fontSize: 11, color: T.inkSoft, flex: 1, minWidth: 200 }}>
           {parsedSched
-            ? <>Vai distribuir totais por <strong>dias trabalhados</strong> conforme horário colado ({parsedSched.collabs.length} colaboradores, {parsedSched.days.length} dias).</>
+            ? <>Vai distribuir totais por <strong>dias trabalhados</strong> conforme horário {parsedSched.builtin ? <span style={{ color: T.green }}>built-in ({snap?.monthKey})</span> : 'colado'} — {parsedSched.collabs.length} colaboradores, {parsedSched.days.length} dias.</>
             : <>Cria 1 registo PP por colaborador com os totais do mês. Cola horário em baixo para distribuir por dias trabalhados.</>}
         </div>
         <button onClick={() => setShowSched(s => !s)} style={{
