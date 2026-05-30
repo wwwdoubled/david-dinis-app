@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.0';
+const APP_VERSION = '3.22.1';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T00:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T01:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.1', date: '2026-05-31', summary: 'Planta: garantia dos DOIS pisos + upsert null-safe. O parser e o save já tratavam ambos os pisos (Excel PISO 1→app PISO 0, PISO 2→app PISO 1), mas o cloudUpsertFloorPlan usava onConflict que, com store_id=NULL, o Postgres trata como distinto → re-upload duplicava registos. Agora faz find-then-update/insert explícito (eq floor_name + eq/is store_id), garantindo 1 registo por piso por loja e re-uploads idempotentes. Selector de pisos no admin mostra ambos com contagem de móveis.' },
   { version: '3.22.0', date: '2026-05-31', summary: 'PLANTA INTERACTIVA DA LOJA — Fase 1. (A) Novo parser parsePlantaExcel: lê o Excel planograma (AVEIRO_PLANTA.xlsx) — folha NOMENCLATURA (371 móveis com dept/produto/mobiliário/piso) + folhas PISO 1/PISO 2 (grelha visual: cada célula mergeada/colorida = 1 móvel). Usa XLSX cellStyles para extrair cores de fundo + !merges para spans. A posição na grelha é a geometria — gera o mapa automaticamente, sem desenhar à mão. Mapeamento Excel→app: PISO 1→PISO 0 (térreo), PISO 2→PISO 1 (cima). (B) Migration store_floor_plans (grid_json jsonb por piso/loja, RLS read-authed/write-admin). cloudUpsertFloorPlan/cloudFetchFloorPlans/cloudDeleteFloorPlan. (C) Componente StoreMapSVG: renderiza a grelha com cores reais + móveis com labels + hover tooltip (dept/produto/mobiliário). Suporta modo overlay (cores por estado/vendas) para fases seguintes. (D) Admin → novo tab "Planta da loja": upload Excel → preview do mapa por piso → guardar na cloud. Aveiro: PISO 0 com 66 móveis, PISO 1 com 713 (242 com metadados). Próximas fases: vista Campanha no Mapa, heatmap de vendas, drag-drop.' },
   { version: '3.21.42', date: '2026-05-30', summary: 'Match colaborador ↔ horário com NIF + alias + first/last. Helper único _matchSchedCollab. Adicionado alias "RICARDO GABRIEL" (VENDEDOR_TOTAL) → "RICARDO SILVA" (horário). Filtro sellersPTS e worksToday partilham o mesmo helper.' },
   { version: '3.21.41', date: '2026-05-30', summary: 'Fix v3.21.40: match name flexível (primeiro+último). "RICARDO MIGUEL SILVA" do VENDEDOR_TOTAL agora bate com "RICARDO SILVA" do horário. Aplica-se ao filtro sellersPTS + worksToday do TPAutoImportButton.' },
@@ -2487,7 +2488,9 @@ async function cloudDeleteFloor(id) {
   return { ok: !error, error: error?.message };
 }
 
-// v3.22.0: planta interactiva — persiste a grelha parseada por piso
+// v3.22.0: planta interactiva — persiste a grelha parseada por piso.
+// Null-safe: find-then-update/insert (não usa onConflict porque o Postgres
+// trata store_id=NULL como distinto em constraints unique → re-upload duplicaria).
 async function cloudUpsertFloorPlan({ storeId, floorName, gridJson, cols, rows, sourceFilename, createdBy }) {
   if (!supabase) return { ok: false, error: 'no supabase' };
   const payload = {
@@ -2497,12 +2500,20 @@ async function cloudUpsertFloorPlan({ storeId, floorName, gridJson, cols, rows, 
     cols: cols ?? null,
     rows: rows ?? null,
     source_filename: sourceFilename || null,
-    created_by: createdBy || null,
     updated_at: new Date().toISOString(),
   };
+  // procura registo existente para esta loja+piso
+  let q = supabase.from('store_floor_plans').select('id').eq('floor_name', floorName);
+  q = storeId ? q.eq('store_id', storeId) : q.is('store_id', null);
+  const { data: existing } = await q.maybeSingle();
+  if (existing?.id) {
+    const { data, error } = await supabase
+      .from('store_floor_plans').update(payload).eq('id', existing.id).select().single();
+    return { ok: !error, data, error: error?.message };
+  }
   const { data, error } = await supabase
     .from('store_floor_plans')
-    .upsert(payload, { onConflict: 'store_id,floor_name' })
+    .insert({ ...payload, created_by: createdBy || null })
     .select().single();
   return { ok: !error, data, error: error?.message };
 }
