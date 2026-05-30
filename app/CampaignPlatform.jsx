@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.7';
+const APP_VERSION = '3.22.8';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T04:40:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T05:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.8', date: '2026-05-31', summary: 'Folhetos: fix do redimensionar do logo FNAC + selo 1%. (A) O scale dos elementos era à volta da origem (0,0) do SVG → elementos no lado direito (logo) "voavam" para a direita ao aumentar (parecia que demorava/não crescia). elProps aceita agora uma âncora e o scale acontece à volta do canto do próprio elemento (translate(a) scale translate(-a)) → cresce no sítio. Aplicado ao logo FNAC e ao selo ACUMULA 1%. (B) Performance: logo FNAC redimensionado de 887×884 para 360×359 (6× menos píxeis a rasterizar por render) → aumentar fica fluido.' },
   { version: '3.22.7', date: '2026-05-31', summary: 'Folhetos: fix gap dos cêntimos. O cálculo da largura do preço inteiro usava 0.62 em (Arial Black), mas a fonte agora é Gilroy (mais estreita) → os cêntimos (,98€) ficavam muito afastados do número. Fator ajustado para 0.56 + novos sliders de ajuste fino "↔ Cêntimos" (-30..15mm) e "↕ Cêntimos" (-15..15mm) no editor para posicionar a vírgula+cêntimos exactamente onde se quer. Campos centsDx/centsDy.' },
   { version: '3.22.6', date: '2026-05-31', summary: 'Folhetos: logo FNAC oficial + selo ACUMULA 1% reais (sem fundo). (A) Processei as imagens enviadas: logo FNAC (logos_FNAC_Oficial_2020.png, já transparente) → public/flyer-assets/fnac-logo.png; selo ACUMULA 1% (acumala 1.png, fundo rosa) → recorte do selo (y 10-128) + remoção do rosa por color-key (tol 70 + despill nas bordas) → public/flyer-assets/acumula-1.png transparente. (B) Helper _loadFlyerAssetDataUrl carrega como base64 (cache) — embebe no preview E no export PNG/PDF (o <img src=data:svg> não carrega refs externas, mesmo padrão das fonts Gilroy). (C) FlyerSVG: placeholders rect substituídos por <image> reais — logo FNAC no canto sup-direito (default ON em TODOS os folhetos, draggable) + selo ACUMULA 1% no canto inf-esquerdo (default ON) com a mensagem "O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente." em 2 linhas por baixo (editável). (D) defaultFlyerData: showLogoFnac/showAcumula1 true, showAccumulate (valor €) passa a OFF (alternativa opcional), removido showLogoFnacCard. Toggles actualizados no editor.' },
   { version: '3.22.5', date: '2026-05-31', summary: 'Planta: ZOOM/PAN + edição directa de móveis. (A) StoreMapSVG reescrito com zoom (roda do rato centrada no cursor), pan (arrastar o fundo) e botões +/−/ajustar — funciona em todas as vistas (admin + campanha). focusKey agora dá zoom e centra o móvel localizado. (B) Modo de edição no Admin → Planta da loja: botão "Editar móveis" → arrastar um móvel move-o (snap à grelha), pega no canto inferior-direito redimensiona, clica para seleccionar. Painel lateral edita nome/código, departamento, produto, mobiliário, posição (linha/coluna/altura/largura) e cor (hex). Botões Adicionar móvel / Apagar móvel / Guardar alterações (persiste em store_floor_plans via cloudUpsertFloorPlan) / Cancelar. Indicador "alterações por guardar". Permite acertar a planta quando há mudanças de layout sem voltar ao Excel.' },
@@ -20060,11 +20061,17 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
   const ov = (id) => layoutOverrides[id] || { dx: 0, dy: 0, scale: 1 };
   // Drag tracking per session — uses screen pixels → mm conversion via viewBox
   const dragStateRef = useRef(null);
-  const elProps = (id) => {
+  const elProps = (id, anchor = null) => {
     const o = ov(id);
     const isSel = selectedEl === id;
+    // v3.22.8: quando há âncora, o scale acontece à volta desse ponto (canto do
+    // elemento) em vez da origem (0,0) — assim aumentar não "atira" o elemento
+    // para a direita. Sem âncora, comportamento antigo (origem).
+    const transform = anchor
+      ? `translate(${o.dx} ${o.dy}) translate(${anchor.x} ${anchor.y}) scale(${o.scale}) translate(${-anchor.x} ${-anchor.y})`
+      : `translate(${o.dx} ${o.dy}) scale(${o.scale})`;
     return {
-      transform: `translate(${o.dx} ${o.dy}) scale(${o.scale})`,
+      transform,
       'data-el': id,
       style: { cursor: isSel ? 'grabbing' : 'grab', outline: 'none' },
       onMouseDown: (e) => {
@@ -20193,7 +20200,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         const lh = lw * (884 / 887);            // rácio da imagem (~quadrada)
         const lx = W - padding - lw, ly = padding;
         return (
-          <g {...elProps('logoFnac')}>
+          <g {...elProps('logoFnac', { x: lx, y: ly })}>
             <image href={fnacAssets.logo} x={lx} y={ly} width={lw} height={lh}
               preserveAspectRatio="xMidYMid meet" />
             {selRing('logoFnac', lx, ly, lw, lh)}
@@ -20207,7 +20214,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         const sx = padding, sy = H - padding - sh - (data.acumulaMessage ? 5 : 0);
         const msgW = isWide ? sw * 1.6 : sw + 14;
         return (
-          <g {...elProps('acumula1')}>
+          <g {...elProps('acumula1', { x: sx, y: sy })}>
             <image href={fnacAssets.acumula} x={sx} y={sy} width={sw} height={sh}
               preserveAspectRatio="xMidYMid meet" />
             {data.acumulaMessage && (
