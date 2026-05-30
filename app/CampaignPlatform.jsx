@@ -1798,10 +1798,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.41';
+const APP_VERSION = '3.21.42';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T23:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T23:45:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1811,6 +1811,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.42', date: '2026-05-30', summary: 'Match colaborador ↔ horário com NIF + alias + first/last. Helper único _matchSchedCollab. Adicionado alias "RICARDO GABRIEL" (VENDEDOR_TOTAL) → "RICARDO SILVA" (horário). Filtro sellersPTS e worksToday partilham o mesmo helper.' },
   { version: '3.21.41', date: '2026-05-30', summary: 'Fix v3.21.40: match name flexível (primeiro+último). "RICARDO MIGUEL SILVA" do VENDEDOR_TOTAL agora bate com "RICARDO SILVA" do horário. Aplica-se ao filtro sellersPTS + worksToday do TPAutoImportButton.' },
   { version: '3.21.40', date: '2026-05-30', summary: 'Equipa PTS: filtra sellersPTS por horário built-in. Colaboradores que estão em VENDEDOR_TOTAL mas não constam do horário (ex: Luis Morais — saído do quadro mas ainda no histórico FNAC) ficam fora da tabela, agregados, insights e diarização. Sem horário built-in para o mês, mantém comportamento antigo.' },
   { version: '3.21.39', date: '2026-05-30', summary: 'Diarização redefinida como PLANEAMENTO: o botão deixa de copiar totais históricos e passa a calcular o objectivo de seguros para o dia escolhido e distribuir por colaboradores PTS que trabalham nesse dia (horário built-in) proporcionalmente à carga horária. Modo "ritmo normal" = target/dias úteis totais. Modo "recuperar atraso" (quando real < targetYtd) = missing/dias úteis restantes. Preview live de quotas individuais (h × share% → PP) antes do click. pp_count guarda a quota planeada, equipment_count fica a 0. Botão renomeado "Diarizar dia".' },
@@ -24713,6 +24714,35 @@ function _famFromDesc(desc, codFam) {
   return 'Outras';
 }
 
+// v3.21.42: aliases para nomes que diferem entre VENDEDOR_TOTAL e horário.
+// Key = nome no VENDEDOR_TOTAL (uppercase) → value = nome no horário (uppercase).
+const PT_NAME_ALIASES = {
+  'RICARDO GABRIEL': 'RICARDO SILVA',
+};
+
+// Match colaborador seller ↔ horário. Tenta: NIF exacto, alias explícito,
+// nome completo, primeiro+último.
+function _matchSchedCollab(seller, sched) {
+  if (!sched || !seller) return null;
+  const nif = String(seller.nif || '').trim();
+  const full = String(seller.name || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  const aliased = PT_NAME_ALIASES[full] || null;
+  const firstLast = (s) => {
+    const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+    if (parts.length < 2) return parts[0] || '';
+    return `${parts[0]} ${parts[parts.length - 1]}`;
+  };
+  const fl = firstLast(full);
+  for (const c of sched) {
+    if (nif && String(c.nif || '').trim() === nif) return c;
+    const cFull = String(c.name || '').toUpperCase().trim();
+    if (cFull === full) return c;
+    if (aliased && cFull === aliased) return c;
+    if (firstLast(c.name) === fl) return c;
+  }
+  return null;
+}
+
 // v3.21.34: horários PTS Aveiro built-in (Maio + Junho 2026), extraídos do
 // PDF de Permanências. true = dia trabalhado, false = folga/férias/descanso/V.
 // Match com sellers da TX Penetração feito por nome (uppercase trim).
@@ -24866,22 +24896,12 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow, budget
     // Quem trabalha nesse dia? Usa BUILTIN_PT_SCHEDULES.
     const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
     const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey] || null;
-    const firstLast = (s) => {
-      const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-      if (parts.length < 2) return parts[0] || '';
-      return `${parts[0]} ${parts[parts.length - 1]}`;
-    };
-    const worksToday = (sellerName) => {
+    const worksToday = (seller) => {
       if (!sched) return true;
-      const full = String(sellerName || '').toUpperCase().trim();
-      const fl = firstLast(sellerName);
-      const c = sched.find(s => {
-        const sFull = s.name.toUpperCase().trim();
-        return sFull === full || firstLast(s.name) === fl;
-      });
+      const c = _matchSchedCollab(seller, sched);
       return c ? !!c.days[dayNum] : true;
     };
-    const working = sellersPTS.filter(s => worksToday(s.name));
+    const working = sellersPTS.filter(s => worksToday(s));
     const totalHours = working.reduce((sum, s) => sum + _hoursFromCarga(s.carga), 0);
     // Objectivo do dia (seguros). Se atrás (real < targetYtd), imputa a falta;
     // caso contrário, ritmo normal target / dias úteis totais.
@@ -25118,20 +25138,7 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
     const storeKey = (myStoreRow?.name || '').toUpperCase().trim();
     const sched = BUILTIN_PT_SCHEDULES[storeKey]?.[snap.monthKey];
     if (!Array.isArray(sched) || sched.length === 0) return all;
-    // v3.21.41: match flexível — primeiro+último nome (case-insensitive).
-    // Antes "RICARDO MIGUEL SILVA" (VENDEDOR_TOTAL) não batia com "RICARDO SILVA"
-    // (horário) e ficava de fora por engano.
-    const firstLast = (s) => {
-      const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-      if (parts.length < 2) return parts[0] || '';
-      return `${parts[0]} ${parts[parts.length - 1]}`;
-    };
-    const allowedFull = new Set(sched.map(c => c.name.toUpperCase().trim()));
-    const allowedFL = new Set(sched.map(c => firstLast(c.name)));
-    return all.filter(s => {
-      const full = String(s.name || '').toUpperCase().trim();
-      return allowedFull.has(full) || allowedFL.has(firstLast(s.name));
-    });
+    return all.filter(s => _matchSchedCollab(s, sched));
   }, [snap.sellers, snap.monthKey, myStoreRow?.name]);
 
   // v3.21.13: Insights automáticos — analisa onde estamos pior/melhor e
