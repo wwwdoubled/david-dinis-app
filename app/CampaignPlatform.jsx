@@ -1782,7 +1782,7 @@ function debounce(fn, ms = 600) {
 const APP_VERSION = '3.21.32';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-29T04:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T19:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
