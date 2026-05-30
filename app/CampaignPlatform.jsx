@@ -14,6 +14,12 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { createClient } from '@supabase/supabase-js';
+// v3.23.0: helpers puros extraídos (testáveis em tests/helpers.test.js)
+import {
+  normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
+  _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
+  _isWorkedCell, PT_NAME_ALIASES, _matchSchedCollab, apportionLargestRemainder,
+} from './lib/helpers';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Supabase client — singleton
@@ -430,31 +436,7 @@ function _ddrFromFilename(name) {
 }
 
 // v3.21.23: helpers para BD N / BD N-1
-function _catFromTipo(tipo) {
-  const m = String(tipo || '').toUpperCase();
-  if (m.includes('SMARTWATCH')) return 'smartwatch';
-  if (m.includes('TELECOM'))    return 'telecom';
-  if (m.includes('HARDWARE'))   return 'hardware';
-  if (m.includes('FOTO'))       return 'foto';
-  if (m.includes('RESTART'))    return 'restart';
-  if (m.includes('GAMING'))     return 'gaming';
-  if (m.includes('DRONE'))      return 'drone';
-  if (m.includes('MOB'))        return 'mob';
-  if (/\bTV\b/.test(m))         return 'tv';
-  return 'other';
-}
-function _dayFromSerial(serial) {
-  const ms = (Number(serial) - 25569) * 86400 * 1000;
-  const d = new Date(ms);
-  return isNaN(d.getTime()) ? 0 : d.getUTCDate();
-}
-// v3.21.28: ano + mês + dia a partir de Excel serial
-function _ymdFromSerial(serial) {
-  const ms = (Number(serial) - 25569) * 86400 * 1000;
-  const d = new Date(ms);
-  if (isNaN(d.getTime())) return null;
-  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
-}
+// _catFromTipo, _dayFromSerial, _ymdFromSerial → app/lib/helpers.js (v3.23.0)
 
 // ─────────────────────────────────────────────────────────────────────────
 // v3.22.0: Planta interactiva — parse do Excel planograma (AVEIRO_PLANTA.xlsx)
@@ -1903,10 +1885,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.8';
+const APP_VERSION = '3.23.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T05:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T05:45:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1898,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.0', date: '2026-05-31', summary: 'Fase A (qualidade): helpers puros extraídos para app/lib/helpers.js + testes REAIS. Antes tests/helpers.test.js testava CÓPIAS locais dos helpers (não o código real). Agora normalizeEAN, _workingDaysInMonth, _daysRemainingInMonth, _dayFromSerial/_ymdFromSerial, _hoursFromCarga, _catFromTipo, _acumulaLines, _isWorkedCell, _matchSchedCollab/PT_NAME_ALIASES e o novo apportionLargestRemainder (extraído da diarização) vivem num módulo testável e são importados pelo CampaignPlatform. 25 testes vitest cobrem os bugs corrigidos ao longo das v3.21-3.22 (dias úteis inclui hoje, apportionment 16/[40,40,40,20]→[5,5,4,2], alias Ricardo Gabriel→Ricardo Silva, _isWorkedCell folgas, colisão normalizeEAN documentada). Sem mudança de comportamento na app — só refactor + rede de segurança.' },
   { version: '3.22.8', date: '2026-05-31', summary: 'Folhetos: fix do redimensionar do logo FNAC + selo 1%. (A) O scale dos elementos era à volta da origem (0,0) do SVG → elementos no lado direito (logo) "voavam" para a direita ao aumentar (parecia que demorava/não crescia). elProps aceita agora uma âncora e o scale acontece à volta do canto do próprio elemento (translate(a) scale translate(-a)) → cresce no sítio. Aplicado ao logo FNAC e ao selo ACUMULA 1%. (B) Performance: logo FNAC redimensionado de 887×884 para 360×359 (6× menos píxeis a rasterizar por render) → aumentar fica fluido.' },
   { version: '3.22.7', date: '2026-05-31', summary: 'Folhetos: fix gap dos cêntimos. O cálculo da largura do preço inteiro usava 0.62 em (Arial Black), mas a fonte agora é Gilroy (mais estreita) → os cêntimos (,98€) ficavam muito afastados do número. Fator ajustado para 0.56 + novos sliders de ajuste fino "↔ Cêntimos" (-30..15mm) e "↕ Cêntimos" (-15..15mm) no editor para posicionar a vírgula+cêntimos exactamente onde se quer. Campos centsDx/centsDy.' },
   { version: '3.22.6', date: '2026-05-31', summary: 'Folhetos: logo FNAC oficial + selo ACUMULA 1% reais (sem fundo). (A) Processei as imagens enviadas: logo FNAC (logos_FNAC_Oficial_2020.png, já transparente) → public/flyer-assets/fnac-logo.png; selo ACUMULA 1% (acumala 1.png, fundo rosa) → recorte do selo (y 10-128) + remoção do rosa por color-key (tol 70 + despill nas bordas) → public/flyer-assets/acumula-1.png transparente. (B) Helper _loadFlyerAssetDataUrl carrega como base64 (cache) — embebe no preview E no export PNG/PDF (o <img src=data:svg> não carrega refs externas, mesmo padrão das fonts Gilroy). (C) FlyerSVG: placeholders rect substituídos por <image> reais — logo FNAC no canto sup-direito (default ON em TODOS os folhetos, draggable) + selo ACUMULA 1% no canto inf-esquerdo (default ON) com a mensagem "O artigo selecionado acumula 1% em Cartão FNAC. Limitado ao stock existente." em 2 linhas por baixo (editável). (D) defaultFlyerData: showLogoFnac/showAcumula1 true, showAccumulate (valor €) passa a OFF (alternativa opcional), removido showLogoFnacCard. Toggles actualizados no editor.' },
@@ -13619,19 +13602,7 @@ function detectColumns(headers) {
 }
 
 // Normalize an EAN value for comparison (handles number vs string, leading zeros, whitespace)
-function normalizeEAN(v) {
-  if (v == null) return '';
-  let s = String(v).trim();
-  // Excel often turns long numbers into scientific notation — try to fix
-  if (/^\d+\.?\d*e\+?\d+$/i.test(s)) {
-    const n = Number(s);
-    if (!isNaN(n)) s = n.toFixed(0);
-  }
-  // Strip any non-digit (some sheets pad with apostrophes or spaces)
-  s = s.replace(/[^\d]/g, '');
-  // Strip leading zeros for comparison
-  return s.replace(/^0+/, '');
-}
+// normalizeEAN → app/lib/helpers.js (v3.23.0)
 
 // Detect if a "campaign" record is actually a stock file (PO2/PO3) that
 // shouldn't be listed under a period's campaigns. Stock files are global
@@ -20049,13 +20020,7 @@ function FlyerToggle({ label, checked, onChange }) {
 // ─────────────────────────────────────────────────────────────────────────
 // FlyerSVG — adaptive layout that re-arranges blocks based on aspect ratio
 // ─────────────────────────────────────────────────────────────────────────
-// v3.22.6: parte a mensagem do selo em 2 linhas equilibradas
-function _acumulaLines(msg) {
-  const words = String(msg || '').trim().split(/\s+/);
-  if (words.length <= 1) return [words[0] || '', ''];
-  const mid = Math.ceil(words.length / 2);
-  return [words.slice(0, mid).join(' '), words.slice(mid).join(' ')];
-}
+// _acumulaLines → app/lib/helpers.js (v3.23.0)
 function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imageOpacity, displayWidth, displayHeight, layoutOverrides = {}, selectedEl = null, onSelectEl, onDragEl, fnacAssets = {} }) {
   // Helper: returns a <g transform> wrapper for an element + click/drag handlers
   const ov = (id) => layoutOverrides[id] || { dx: 0, dy: 0, scale: 1 };
@@ -24877,52 +24842,7 @@ function PenetrationView({ currentStoreId, currentStoreName, currentUserId, embe
 
 // Componente que renderiza a comparação detalhada por categoria
 // v3.21.14: helpers para diarização
-function _workingDaysInMonth(year, month1, fromDay = 1) {
-  // Mon-Sat = working day. Sun excluded. Aproximação razoável FNAC.
-  const daysInMonth = new Date(year, month1, 0).getDate();
-  let count = 0;
-  for (let d = fromDay; d <= daysInMonth; d++) {
-    const dow = new Date(year, month1 - 1, d).getDay();
-    if (dow !== 0) count++; // 0 = domingo
-  }
-  return count;
-}
-function _daysRemainingInMonth(monthKey, referenceDay = null) {
-  // v3.21.27: aceita `referenceDay` (data até onde os dados estão actualizados).
-  // v3.21.31: inclui hoje no cálculo de "restantes" (fromDay = hoje, não hoje+1).
-  if (!monthKey) return { days: 22, total: 26, refDay: null };
-  const [y, m] = monthKey.split('-').map(Number);
-  const total = _workingDaysInMonth(y, m, 1);
-  const daysInMonth = new Date(y, m, 0).getDate();
-  const today = new Date();
-  const sameMonth = today.getFullYear() === y && (today.getMonth() + 1) === m;
-  const refIsExplicit = Number.isFinite(referenceDay) && referenceDay > 0;
-  if (refIsExplicit) {
-    const safeRef = Math.min(Math.max(1, referenceDay), daysInMonth);
-    // Restantes = dias úteis de (refDay+1) até ao fim do mês.
-    // Inclui automaticamente hoje porque today > refDay.
-    // v3.21.35: bug fix — antes o override `fromDay = today.getDate()` saltava
-    // os dias entre refDay+1 e today (ex: snap dia 28, today dia 30 → saltava 29).
-    const fromDay = safeRef + 1;
-    const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
-    return { days: remaining, total, elapsed: total - remaining, refDay: safeRef };
-  }
-  // Sem refDay → usa hoje (legacy)
-  const monthEnd = new Date(y, m, 0);
-  const monthStart = new Date(y, m - 1, 1);
-  if (today > monthEnd) return { days: 0, total, elapsed: total, refDay: daysInMonth };
-  if (today < monthStart) return { days: total, total, elapsed: 0, refDay: null };
-  // Mês actual — hoje inclusive
-  const todayDay = today.getDate();
-  const fromDay = todayDay;
-  const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
-  return { days: remaining, total, elapsed: total - remaining, refDay: todayDay };
-}
-function _hoursFromCarga(carga) {
-  // "40H00 Semanais" → 40; "35H00 Semanais" → 35; etc.
-  const m = String(carga || '').match(/(\d+)/);
-  return m ? Number(m[1]) : 40;
-}
+// _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga → app/lib/helpers.js (v3.23.0)
 
 // v3.21.16: cor consoante TP — 3 níveis (heatmap)
 function _tpColor(taxa) {
@@ -24968,32 +24888,7 @@ function _famFromDesc(desc, codFam) {
 
 // v3.21.42: aliases para nomes que diferem entre VENDEDOR_TOTAL e horário.
 // Key = nome no VENDEDOR_TOTAL (uppercase) → value = nome no horário (uppercase).
-const PT_NAME_ALIASES = {
-  'RICARDO GABRIEL': 'RICARDO SILVA',
-};
-
-// Match colaborador seller ↔ horário. Tenta: NIF exacto, alias explícito,
-// nome completo, primeiro+último.
-function _matchSchedCollab(seller, sched) {
-  if (!sched || !seller) return null;
-  const nif = String(seller.nif || '').trim();
-  const full = String(seller.name || '').toUpperCase().replace(/\s+/g, ' ').trim();
-  const aliased = PT_NAME_ALIASES[full] || null;
-  const firstLast = (s) => {
-    const parts = String(s || '').toUpperCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
-    if (parts.length < 2) return parts[0] || '';
-    return `${parts[0]} ${parts[parts.length - 1]}`;
-  };
-  const fl = firstLast(full);
-  for (const c of sched) {
-    if (nif && String(c.nif || '').trim() === nif) return c;
-    const cFull = String(c.name || '').toUpperCase().trim();
-    if (cFull === full) return c;
-    if (aliased && cFull === aliased) return c;
-    if (firstLast(c.name) === fl) return c;
-  }
-  return null;
-}
+// PT_NAME_ALIASES, _matchSchedCollab → app/lib/helpers.js (v3.23.0)
 
 // v3.21.34: horários PTS Aveiro built-in (Maio + Junho 2026), extraídos do
 // PDF de Permanências. true = dia trabalhado, false = folga/férias/descanso/V.
@@ -25086,13 +24981,7 @@ function parsePermanenciasText(text) {
 
 // v3.21.31: retorna true se a célula representa um dia trabalhado.
 // FC = Descanso, FO = Folga, Fer = F�rias, Aniv = Aniversário, V = Vazio.
-function _isWorkedCell(cell) {
-  const c = String(cell || '').trim().toUpperCase();
-  if (!c) return false;
-  if (['FC', 'FO', 'FER', 'F�RIAS', 'FERIAS', 'ANIV', 'V'].includes(c)) return false;
-  // Códigos válidos: 100PA, 110RA, 140UA, 190, 130, 170, 150, PM, PT, INV..., 1H, -1H
-  return /^(\d{2,3}[A-Z]{0,3}|INV.*|PM|PT|1H|-1H|BH\(?\+?\-?\)?)/i.test(c);
-}
+// _isWorkedCell → app/lib/helpers.js (v3.23.0)
 
 // v3.21.31: Importa snapshot TX Penetração → registos PP por colaborador PTS.
 // Modo simples: 1 PP por seller em sale_date=refDay (totais mensais).
@@ -25167,21 +25056,15 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow, budget
     const dailyTarget = isBehind
       ? Math.ceil(missing / Math.max(1, remainingDays))
       : Math.ceil(target / Math.max(1, totalDays));
-    // v3.22.3: apportionment justo (método do maior resto / Hamilton).
-    // Antes era Math.round + "o último fica com o resto" — os full-time (40h)
-    // arredondavam para cima e roubavam a quota ao part-time (20h), que recebia
-    // o resto negativo (ex: 5+5+5 deixava 1 para o 20h em vez do justo ~2).
-    // Agora: cada um leva o floor da sua quota exacta; o que falta para fechar
-    // o dailyTarget é distribuído pelos MAIORES restos fraccionários.
-    const lines = working.map(s => {
-      const h = _hoursFromCarga(s.carga);
+    // v3.22.3/v3.23.0: apportionment justo (maior resto / Hamilton) — extraído
+    // para apportionLargestRemainder() em app/lib/helpers.js (testado).
+    const hoursArr = working.map(s => _hoursFromCarga(s.carga));
+    const ppArr = apportionLargestRemainder(dailyTarget, hoursArr);
+    const lines = working.map((s, i) => {
+      const h = hoursArr[i];
       const share = totalHours > 0 ? h / totalHours : 1 / Math.max(1, working.length);
-      const exact = dailyTarget * share;
-      return { seller: s, hours: h, share, exact, pp: Math.floor(exact) };
+      return { seller: s, hours: h, share, pp: ppArr[i] };
     });
-    let leftover = dailyTarget - lines.reduce((a, b) => a + b.pp, 0);
-    const byRemainder = [...lines].sort((a, b) => (b.exact - b.pp) - (a.exact - a.pp));
-    for (let i = 0; i < byRemainder.length && leftover > 0; i++) { byRemainder[i].pp += 1; leftover--; }
     return { working, lines, dailyTarget, isBehind, missing, remainingDays, totalDays };
   }, [singleDay, snap?.monthKey, myStoreRow?.name, sellersPTS, budget, workdays]);
 

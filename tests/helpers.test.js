@@ -1,75 +1,144 @@
 import { describe, it, expect } from 'vitest';
+import {
+  normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
+  _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
+  _isWorkedCell, _matchSchedCollab, apportionLargestRemainder,
+} from '../app/lib/helpers.js';
 
-// Pure-function smoke tests para garantir que regressões básicas
-// nas helpers críticas não passam silenciosas em PR.
-//
-// Estas funções estão actualmente inline em app/CampaignPlatform.jsx —
-// quando forem extraídas, ajusta o import abaixo.
-
-// Helper: normalizar EAN (replica simples)
-function normalizeEAN(raw) {
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  // Remove non-digits, must be length 8-14 to count as valid
-  const digits = s.replace(/\D/g, '');
-  if (digits.length < 8 || digits.length > 14) return s.toLowerCase();
-  return digits;
-}
-
-// Helper: toIsoDate
-function toIsoDate(ddmmyyyy) {
-  const m = String(ddmmyyyy || '').match(/^(\d{2})-(\d{2})-(\d{4})$/);
-  return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
-}
-
-// Helper: ISO week
-function isoWeek(dateIso) {
-  const d = new Date(dateIso);
-  if (isNaN(d.getTime())) return dateIso;
-  const tmp = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  tmp.setUTCDate(tmp.getUTCDate() + 4 - (tmp.getUTCDay() || 7));
-  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil((((tmp - yearStart) / 86400000) + 1) / 7);
-  return `${tmp.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
-}
+// v3.23.0: testes contra o código REAL (app/lib/helpers.js), não cópias.
+// Cobrem os bugs corrigidos ao longo das versões 3.21–3.22.
 
 describe('normalizeEAN', () => {
-  it('extracts digits from numeric strings', () => {
-    expect(normalizeEAN('5601234567890')).toBe('5601234567890');
-  });
-  it('handles null/undefined/empty', () => {
-    expect(normalizeEAN(null)).toBe(null);
-    expect(normalizeEAN(undefined)).toBe(null);
-    expect(normalizeEAN('')).toBe(null);
-    expect(normalizeEAN('   ')).toBe(null);
-  });
-  it('strips spaces and dashes', () => {
+  it('extrai dígitos e tira zeros à esquerda', () => {
+    expect(normalizeEAN('05601234567890')).toBe('5601234567890');
     expect(normalizeEAN(' 5601-2345-67890 ')).toBe('5601234567890');
   });
-  it('returns lowercase for non-EAN strings', () => {
-    expect(normalizeEAN('ABC123')).toBe('abc123');
+  it('lida com null/vazio', () => {
+    expect(normalizeEAN(null)).toBe('');
+    expect(normalizeEAN(undefined)).toBe('');
+    expect(normalizeEAN('   ')).toBe('');
+  });
+  it('corrige notação científica do Excel', () => {
+    expect(normalizeEAN('5.60123e+12')).toBe('5601230000000');
+  });
+  it('⚠ documenta risco de colisão por strip de zeros', () => {
+    // dois EANs distintos colapsam para a mesma key — comportamento conhecido
+    expect(normalizeEAN('0012345')).toBe(normalizeEAN('12345'));
   });
 });
 
-describe('toIsoDate', () => {
-  it('converts dd-mm-yyyy to ISO', () => {
-    expect(toIsoDate('01-01-2026')).toBe('2026-01-01');
-    expect(toIsoDate('23-05-2026')).toBe('2026-05-23');
-  });
-  it('returns null for invalid formats', () => {
-    expect(toIsoDate('2026-01-01')).toBe(null);
-    expect(toIsoDate('foo')).toBe(null);
-    expect(toIsoDate('')).toBe(null);
-    expect(toIsoDate(null)).toBe(null);
+describe('_catFromTipo', () => {
+  it('mapeia TIPO → categoria', () => {
+    expect(_catFromTipo('EQUIPAMENTO TV')).toBe('tv');
+    expect(_catFromTipo('SEGURO HARDWARE')).toBe('hardware');
+    expect(_catFromTipo('ADDON SMARTWATCH')).toBe('smartwatch');
+    expect(_catFromTipo('qualquer coisa')).toBe('other');
   });
 });
 
-describe('isoWeek', () => {
-  it('returns correct ISO week format', () => {
-    expect(isoWeek('2026-01-05')).toMatch(/^2026-W\d{2}$/);
+describe('Excel serials', () => {
+  it('_dayFromSerial devolve o dia do mês', () => {
+    // 46143 = 2026-05-01
+    expect(_dayFromSerial(46143)).toBe(1);
   });
-  it('handles invalid dates gracefully', () => {
-    expect(isoWeek('not-a-date')).toBe('not-a-date');
+  it('_ymdFromSerial devolve ano/mês/dia', () => {
+    expect(_ymdFromSerial(46143)).toEqual({ year: 2026, month: 5, day: 1 });
+  });
+  it('serial inválido → null/0', () => {
+    expect(_ymdFromSerial('xx')).toBe(null);
+    expect(_dayFromSerial('xx')).toBe(0);
+  });
+});
+
+describe('_workingDaysInMonth', () => {
+  it('exclui domingos', () => {
+    // Maio 2026 tem 31 dias, 5 domingos (3,10,17,24,31) → 26 dias úteis
+    expect(_workingDaysInMonth(2026, 5, 1)).toBe(26);
+  });
+  it('conta a partir de fromDay', () => {
+    // de 29 a 31 Mai 2026: 29(sex),30(sáb),31(dom→exclui) = 2
+    expect(_workingDaysInMonth(2026, 5, 29)).toBe(2);
+  });
+});
+
+describe('_daysRemainingInMonth', () => {
+  it('com refDay conta a partir de refDay+1 (inclui dias entre refDay e hoje)', () => {
+    // refDay=27 Maio 2026 → conta 28,29,30,31(dom exclui) = 3
+    const r = _daysRemainingInMonth('2026-05', 27);
+    expect(r.refDay).toBe(27);
+    expect(r.days).toBe(3);
+    expect(r.total).toBe(26);
+  });
+  it('sem monthKey → fallback', () => {
+    expect(_daysRemainingInMonth(null)).toEqual({ days: 22, total: 26, refDay: null });
+  });
+});
+
+describe('_hoursFromCarga', () => {
+  it('extrai horas', () => {
+    expect(_hoursFromCarga('40H00 Semanais')).toBe(40);
+    expect(_hoursFromCarga('20H00')).toBe(20);
+    expect(_hoursFromCarga('')).toBe(40); // default
+  });
+});
+
+describe('apportionLargestRemainder (diarização justa)', () => {
+  it('16 seguros por [40,40,40,20]h → [5,5,4,2] (part-time não penalizado)', () => {
+    const out = apportionLargestRemainder(16, [40, 40, 40, 20]);
+    expect(out.reduce((a, b) => a + b, 0)).toBe(16);
+    expect(out[3]).toBe(2);            // o de 20h recebe 2 (não 1)
+    expect(out.filter(x => x === 5).length).toBe(2);
+    expect(out.filter(x => x === 4).length).toBe(1);
+  });
+  it('soma sempre exactamente o total', () => {
+    const out = apportionLargestRemainder(31, [40, 40, 35, 20, 20]);
+    expect(out.reduce((a, b) => a + b, 0)).toBe(31);
+  });
+  it('pesos a zero → distribui igualmente', () => {
+    expect(apportionLargestRemainder(4, [0, 0, 0, 0])).toEqual([1, 1, 1, 1]);
+  });
+  it('lista vazia → []', () => {
+    expect(apportionLargestRemainder(10, [])).toEqual([]);
+  });
+});
+
+describe('_isWorkedCell (horário PDF)', () => {
+  it('folgas/férias → não trabalhado', () => {
+    ['FC', 'FO', 'FER', 'FÉRIAS', 'ANIV', 'V', ''].forEach(c =>
+      expect(_isWorkedCell(c)).toBe(false));
+  });
+  it('turnos → trabalhado', () => {
+    ['100PA', '110RA', '140UA', '190', '130', 'PM', 'PT'].forEach(c =>
+      expect(_isWorkedCell(c)).toBe(true));
+  });
+});
+
+describe('_matchSchedCollab (match nome ↔ horário)', () => {
+  const sched = [
+    { nif: '1365', name: 'DAVID DINIS', days: {} },
+    { nif: '58988', name: 'RICARDO SILVA', days: {} },
+  ];
+  it('match por nome completo', () => {
+    expect(_matchSchedCollab({ name: 'David Dinis' }, sched)?.nif).toBe('1365');
+  });
+  it('alias RICARDO GABRIEL → RICARDO SILVA', () => {
+    expect(_matchSchedCollab({ name: 'RICARDO GABRIEL' }, sched)?.nif).toBe('58988');
+  });
+  it('match por NIF mesmo com nome diferente', () => {
+    expect(_matchSchedCollab({ nif: '58988', name: 'Outro Nome' }, sched)?.name).toBe('RICARDO SILVA');
+  });
+  it('sem match → null', () => {
+    expect(_matchSchedCollab({ name: 'JOÃO NINGUÉM' }, sched)).toBe(null);
+  });
+});
+
+describe('_acumulaLines', () => {
+  it('parte em 2 linhas equilibradas', () => {
+    const [a, b] = _acumulaLines('um dois tres quatro');
+    expect(a).toBe('um dois');
+    expect(b).toBe('tres quatro');
+  });
+  it('1 palavra → segunda linha vazia', () => {
+    expect(_acumulaLines('só')).toEqual(['só', '']);
   });
 });
