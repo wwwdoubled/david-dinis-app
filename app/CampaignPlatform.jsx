@@ -1779,7 +1779,7 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.30';
+const APP_VERSION = '3.21.32';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
 const APP_BUILD_DATE = '2026-05-29T04:30:00+01:00';
@@ -1792,6 +1792,8 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.32', date: '2026-05-30', summary: 'Folhetos com tipografia Gilroy (oficial FNAC). 6 pesos (Regular 400, Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900) servidos em public/fonts/gilroy/. (A) @font-face global no FlyerEditor para preview no browser. (B) Classes .ft-display / .ft-sans no SVG passam a usar Gilroy como primeira família (fallback Arial Black/Arial). (C) renderSVGToBlob agora embute as 6 OTFs como base64 dataURLs dentro do <defs><style> antes de serializar, porque o <img src=data:svg> usado no export PNG/PDF não vê fonts globais do documento. Cache _gilroyCSSCache para fetch uma única vez. Total ~330KB.' },
+  { version: '3.21.31', date: '2026-05-30', summary: 'Lote v3.21.31. (A) _daysRemainingInMonth inclui hoje no cálculo de dias úteis restantes — path com refDay: se today > refDay no mesmo mês, fromDay = today.getDate() (não refDay+1); path legacy: fromDay = todayDay (não +1). Aveiro com refDay=27 e today=30 passa de 0 para 1 dia útil. (B) Editor de Folhetos: removido tracejado azul de selecção (selRing), agora linha sólida fina (strokeWidth=0.3). (B2) Folhetos: toggles novos — "Título a negrito" (default ON), "Specs a negrito", "Logo FNAC (canto)", "Logo Cartão FNAC". Logos como placeholders SVG (rect+texto) — substituir por <image href> quando user enviar PNG/SVG definitivo. (B3) TPAutoImportButton: botão "📥 Importar para Diarização" no tab Equipa PTS. Para cada seller PTS, cria 1 registo PP em sale_date=refDay com equipment_count=seller.vendas, pp_count=seller.seguros; match por nome (case-insensitive) com profiles PTS via fetchAllProfiles; substitui registos prévios na mesma data; mostra resumo (criados/matched/sem-perfil/erros). (B4) Horário do mês: drawer "📅 Horário" no mesmo botão para colar texto do PDF de Permanências FNAC. Parser parsePermanenciasText detecta sequência de dias (qui 30, sex 1-mai, …) + linhas de colaborador (NIF/Nome/carga/N células). _isWorkedCell ignora FC/FO/Fer/Aniv/V. Quando horário válido está colado, a importação muda de modo: distribui equipment_count/pp_count por TODOS os dias trabalhados até refDay (proporcional, com fix do último dia para fechar o total exacto). Apaga registos prévios do mês inteiro para evitar duplicados. Resultado mostra modo (mensal vs horário). (C) NOVA tab "Arquitetura" no Admin com diagrama completo da app para apresentação: stack tecnológica (Frontend/Cloud/PWA/Deploy), SVG layered (Browser→Next.js→Supabase→Externos), 8 cards de módulos (Dashboard, Campanhas, Análises, PPs, Folhetos, Histórico, Inventário, Admin), lista de 23 tabelas BD, edge functions, roles, pipeline de email em 12 passos, 8 KPIs live da BD (lojas/users/admins/campanhas/períodos/snapshots/activity/emails). Botões Imprimir (window.print) + PDF (jsPDF + html2canvas multi-página) com @media print que esconde chrome.' },
   { version: '3.21.30', date: '2026-05-29', summary: 'Análise de Vendas: toggle "⚠ Excluir anómalos" no header. Quando ligado, todos os EANs com preços inconsistentes (max > 3× min) saem de KPIs, gráficos (linha diária, top 10, donuts, heatmap), tabela detalhada e insights. Recalcula tudo automaticamente via destaqueRowsRaw → destaqueRows. Toggle só aparece se há EANs anómalos (badge com contagem). Indicador laranja persistente no header do relatório (visível no PDF/email exportado): "N EANs excluídos · R rows · Q unid · X€ revenue". Casos como capa com revenue 6647€ removidos com 1 click.' },
   { version: '3.21.29', date: '2026-05-29', summary: 'Análise de Vendas: diagnóstico de linha. Quando preços (PVP/PMP) variam muito sob o mesmo EAN (max > 3× min), aparece ⚠ pequeno na descrição da row. Click expande nova secção "🔍 Diagnóstico" com (a) stats PVP s/IVA + PMP min/max/avg/mediana, (b) lista das hipóteses (EAN scaneado com produto errado, descrição vs preço errado, EANs colididos), (c) tabela top 10 rows raw (Data/POS/Talão/Qty/PVP/PMP/Revenue) com outliers destacados a laranja. Ajuda diagnosticar casos como "8018080492785 CAPA com revenue 6647€/11 unid" — provavelmente EAN registado como telemóvel. Novo helper _priceStats. Lógica de cálculo intacta (correcta).' },
   { version: '3.21.28', date: '2026-05-29', summary: 'Fix CRÍTICO: monthKey lido do workbook em vez do filename. Antes "TX_Penetração_Mai_27.xlsx" era interpretado como ano 2027 → mês inteiro futuro → "26 dias úteis restantes" e "Por dia: 2". Agora o parser deriva ano/mês das Excel serials reais em BD N ou RESUMO DIA (fonte de verdade) e trata o número do filename (1-31) como dia de geração do snapshot. Aveiro Mai/27 passa a "Dados até dia 27 · 3 dias úteis restantes" com "Por dia: 13" — alinhado com a realidade. Novo helper _ymdFromSerial, novo campo snap.snapshotDay, P0 no chain de referenceDay no PenetrationBreakdown.' },
@@ -19348,6 +19350,11 @@ function defaultFlyerData() {
     showLogo: true,
     showAccumulate: true,
     showDiscount: true,
+    // v3.21.31
+    titleBold: true,
+    specsBold: false,
+    showLogoFnac: false,
+    showLogoFnacCard: false,
   };
 }
 
@@ -19488,6 +19495,15 @@ function FlyerEditor({ campaigns = [] }) {
 
   return (
     <div className="fade-up">
+      {/* v3.21.32: Gilroy — tipografia oficial FNAC. Carregada para preview do browser; export embute via base64 (ver _loadGilroyEmbeddedCSS). */}
+      <style jsx global>{`
+        @font-face { font-family: 'Gilroy'; font-weight: 400; src: url('/fonts/gilroy/Gilroy-Regular.otf') format('opentype'); font-display: swap; }
+        @font-face { font-family: 'Gilroy'; font-weight: 500; src: url('/fonts/gilroy/Gilroy-Medium.otf') format('opentype'); font-display: swap; }
+        @font-face { font-family: 'Gilroy'; font-weight: 600; src: url('/fonts/gilroy/Gilroy-SemiBold.otf') format('opentype'); font-display: swap; }
+        @font-face { font-family: 'Gilroy'; font-weight: 700; src: url('/fonts/gilroy/Gilroy-Bold.otf') format('opentype'); font-display: swap; }
+        @font-face { font-family: 'Gilroy'; font-weight: 800; src: url('/fonts/gilroy/Gilroy-ExtraBold.otf') format('opentype'); font-display: swap; }
+        @font-face { font-family: 'Gilroy'; font-weight: 900; src: url('/fonts/gilroy/Gilroy-Black.otf') format('opentype'); font-display: swap; }
+      `}</style>
       <Header
         eyebrow="Folhetos"
         title="Editor de folhetos"
@@ -19713,6 +19729,11 @@ function FlyerEditor({ campaigns = [] }) {
             )}
 
             <FlyerToggle label="Mostrar logo FNAC" checked={data.showLogo} onChange={v => update({ showLogo: v })} />
+            {/* v3.21.31 — negrito + logos placeholder */}
+            <FlyerToggle label="Título a negrito" checked={data.titleBold !== false} onChange={v => update({ titleBold: v })} />
+            <FlyerToggle label="Specs a negrito" checked={!!data.specsBold} onChange={v => update({ specsBold: v })} />
+            <FlyerToggle label="Logo FNAC (canto)" checked={!!data.showLogoFnac} onChange={v => update({ showLogoFnac: v })} />
+            <FlyerToggle label="Logo Cartão FNAC" checked={!!data.showLogoFnacCard} onChange={v => update({ showLogoFnacCard: v })} />
 
             <FlyerField label="Rodapé legal" multiline value={data.footnote} onChange={v => update({ footnote: v })} small />
           </Section>
@@ -19832,7 +19853,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
     return (
       <rect
         x={x - 1} y={y - 1} width={w + 2} height={h + 2}
-        fill="none" stroke="#1F8FE8" strokeWidth="0.4" strokeDasharray="1.5 1"
+        fill="none" stroke="#1F8FE8" strokeWidth="0.3"
         pointerEvents="none"
       />
     );
@@ -19898,8 +19919,8 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
     >
       <defs>
         <style>{`
-          .ft-display { font-family: 'Arial Black', Impact, 'Helvetica Neue', sans-serif; font-weight: 900; }
-          .ft-sans { font-family: 'Arial', 'Helvetica Neue', sans-serif; }
+          .ft-display { font-family: 'Gilroy', 'Arial Black', Impact, 'Helvetica Neue', sans-serif; font-weight: 900; }
+          .ft-sans { font-family: 'Gilroy', 'Arial', 'Helvetica Neue', sans-serif; font-weight: 400; }
           .ft-bold { font-weight: 700; }
         `}</style>
       </defs>
@@ -19916,6 +19937,32 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
           opacity={imageOpacity}
         />
       )}
+
+      {/* Logos FNAC / Cartão FNAC — placeholders v3.21.31 (substituir por <image href> quando user enviar PNG/SVG) */}
+      {data.showLogoFnac && (() => {
+        const lw = isSmall ? 10 : 16, lh = isSmall ? 3.5 : 5;
+        const lx = W - padding - lw, ly = padding;
+        return (
+          <g {...elProps('logoFnac')}>
+            <rect x={lx} y={ly} width={lw} height={lh} fill="#e1a000" rx={0.5} />
+            <text x={lx + lw / 2} y={ly + lh * 0.72} fontSize={lh * 0.7} fontWeight={900}
+                  fill="#000" textAnchor="middle" fontFamily="Arial Black, Arial, sans-serif">FNAC</text>
+            {selRing('logoFnac', lx, ly, lw, lh)}
+          </g>
+        );
+      })()}
+      {data.showLogoFnacCard && (() => {
+        const lw = isSmall ? 14 : 22, lh = isSmall ? 4 : 6;
+        const lx = padding, ly = padding;
+        return (
+          <g {...elProps('logoFnacCard')}>
+            <rect x={lx} y={ly} width={lw} height={lh} fill="#000" rx={0.8} />
+            <text x={lx + lw / 2} y={ly + lh * 0.7} fontSize={lh * 0.55} fontWeight={900}
+                  fill="#e1a000" textAnchor="middle" fontFamily="Arial Black, Arial, sans-serif">CARTÃO FNAC</text>
+            {selRing('logoFnacCard', lx, ly, lw, lh)}
+          </g>
+        );
+      })()}
 
       {/* Side image */}
       {imgRect && (
@@ -19937,6 +19984,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
                 x={textX} y={y}
                 className="ft-display"
                 fontSize={titleSize}
+                fontWeight={data.titleBold === false ? 400 : 900}
                 fill={palette.fg}
               >
                 {line}
@@ -19958,6 +20006,7 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
             x={textX} y={specsY}
             className="ft-sans"
             fontSize={isWide ? 3.2 : 4}
+            fontWeight={data.specsBold ? 900 : 400}
             fill={palette.fg}
             opacity="0.95"
           >
@@ -20316,10 +20365,53 @@ function ProductImportDialog({ products, onPick, onClose }) {
 // ─────────────────────────────────────────────────────────────────────────
 // SVG → PNG/PDF utilities
 // ─────────────────────────────────────────────────────────────────────────
+
+// v3.21.32: cache do CSS Gilroy com OTFs embebidas em base64.
+// Necessário porque <img src="data:svg"> não vê fonts globais do documento.
+let _gilroyCSSCache = null;
+async function _loadGilroyEmbeddedCSS() {
+  if (_gilroyCSSCache) return _gilroyCSSCache;
+  const weights = [
+    ['Regular', 400], ['Medium', 500], ['SemiBold', 600],
+    ['Bold', 700], ['ExtraBold', 800], ['Black', 900],
+  ];
+  try {
+    const blocks = await Promise.all(weights.map(async ([name, w]) => {
+      const r = await fetch(`/fonts/gilroy/Gilroy-${name}.otf`);
+      if (!r.ok) throw new Error(`fetch Gilroy-${name}`);
+      const buf = await r.arrayBuffer();
+      // ArrayBuffer → base64
+      let bin = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      const b64 = btoa(bin);
+      return `@font-face{font-family:'Gilroy';font-weight:${w};font-style:normal;src:url('data:font/otf;base64,${b64}') format('opentype');}`;
+    }));
+    _gilroyCSSCache = blocks.join('\n');
+  } catch (e) {
+    console.warn('Gilroy embed failed, falling back to system fonts:', e);
+    _gilroyCSSCache = '';
+  }
+  return _gilroyCSSCache;
+}
+
 async function renderSVGToBlob(svgEl, format, type = 'png') {
   // Serialize the SVG with inline xmlns
   const clone = svgEl.cloneNode(true);
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  // v3.21.32: injecta @font-face Gilroy embebida dentro do <defs><style>
+  const gilroyCSS = await _loadGilroyEmbeddedCSS();
+  if (gilroyCSS) {
+    const ns = 'http://www.w3.org/2000/svg';
+    let defs = clone.querySelector('defs');
+    if (!defs) {
+      defs = clone.ownerDocument.createElementNS(ns, 'defs');
+      clone.insertBefore(defs, clone.firstChild);
+    }
+    const styleEl = clone.ownerDocument.createElementNS(ns, 'style');
+    styleEl.textContent = gilroyCSS;
+    defs.insertBefore(styleEl, defs.firstChild);
+  }
   // Force absolute width/height in mm units for the export
   const serialized = new XMLSerializer().serializeToString(clone);
   const svgBlob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
@@ -24498,31 +24590,32 @@ function _workingDaysInMonth(year, month1, fromDay = 1) {
   return count;
 }
 function _daysRemainingInMonth(monthKey, referenceDay = null) {
-  // v3.21.27: aceita `referenceDay` (data até onde os dados estão actualizados,
-  // e.g. último dia com dados no ficheiro). Quando dado, conta dias úteis a
-  // partir de refDay+1 (porque refDay já está incluído no `real`). Sem refDay,
-  // comportamento legado: usa hoje.
+  // v3.21.27: aceita `referenceDay` (data até onde os dados estão actualizados).
+  // v3.21.31: inclui hoje no cálculo de "restantes" (fromDay = hoje, não hoje+1).
   if (!monthKey) return { days: 22, total: 26, refDay: null };
   const [y, m] = monthKey.split('-').map(Number);
   const total = _workingDaysInMonth(y, m, 1);
   const daysInMonth = new Date(y, m, 0).getDate();
+  const today = new Date();
+  const sameMonth = today.getFullYear() === y && (today.getMonth() + 1) === m;
   const refIsExplicit = Number.isFinite(referenceDay) && referenceDay > 0;
   if (refIsExplicit) {
-    // Dia explícito (do ficheiro) — restantes começam no dia seguinte
     const safeRef = Math.min(Math.max(1, referenceDay), daysInMonth);
-    const fromDay = safeRef + 1;
+    // Restantes começam em refDay+1, mas se hoje > refDay no mesmo mês,
+    // hoje fica incluído (não saltamos hoje só porque o ficheiro é de ontem).
+    let fromDay = safeRef + 1;
+    if (sameMonth && today.getDate() > safeRef) fromDay = today.getDate();
     const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
     return { days: remaining, total, elapsed: total - remaining, refDay: safeRef };
   }
   // Sem refDay → usa hoje (legacy)
-  const today = new Date();
   const monthEnd = new Date(y, m, 0);
   const monthStart = new Date(y, m - 1, 1);
   if (today > monthEnd) return { days: 0, total, elapsed: total, refDay: daysInMonth };
   if (today < monthStart) return { days: total, total, elapsed: 0, refDay: null };
-  // Mês actual — refDay = hoje, restantes a partir de hoje+1
+  // Mês actual — hoje inclusive
   const todayDay = today.getDate();
-  const fromDay = todayDay + 1;
+  const fromDay = todayDay;
   const remaining = fromDay > daysInMonth ? 0 : _workingDaysInMonth(y, m, fromDay);
   return { days: remaining, total, elapsed: total - remaining, refDay: todayDay };
 }
@@ -24572,6 +24665,257 @@ function _famFromDesc(desc, codFam) {
   // Fallback: usar código família (9730 = Telecom)
   if (String(codFam) === '9730') return 'Telecom';
   return 'Outras';
+}
+
+// v3.21.31: parser do horário PDF colado como texto.
+// Formato esperado (Junho_C_Permanencias / 05_Maio_CPermanencias):
+//   Cabeçalho com Hor�rio: ...
+//   Linha por linha:
+//     <NIF> \n <NAME> \n (X/Y)Zs \n cell1 \n cell2 \n ... cellN \n
+//   Os dias aparecem antes (qui 30, sex 1-mai, ...).
+// Retorna: { days:[{dow,day,monthHint}], collabs:[{nif,name,carga,cells:[]}] }
+function parsePermanenciasText(text) {
+  if (!text || typeof text !== 'string') return null;
+  const lines = text.split(/\r?\n/).map(s => s.trim());
+  // Detecta sequência de cabeçalhos de dias: alterna [dow][numero(-mes)?]
+  const dows = ['seg', 'ter', 'qua', 'qui', 'sex', 's�b', 'sab', 'dom'];
+  const days = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const a = lines[i].toLowerCase();
+    if (!dows.some(d => a === d)) continue;
+    const b = lines[i + 1] || '';
+    const mNum = b.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
+    if (!mNum) continue;
+    // Começa a apanhar a sequência de dias
+    while (i < lines.length) {
+      const dwl = lines[i].toLowerCase();
+      const dwIdx = dows.indexOf(dwl);
+      if (dwIdx < 0) break;
+      const dayLine = lines[i + 1];
+      const md = dayLine.match(/^(\d{1,2})(?:-([a-z]+))?$/i);
+      if (!md) break;
+      days.push({ dow: dwl, day: Number(md[1]), monthHint: md[2] || null });
+      i += 2;
+    }
+    break;
+  }
+  if (days.length === 0) return null;
+  // A partir daqui, parse colaboradores
+  const collabs = [];
+  while (i < lines.length) {
+    // procura linha numérica de 4-7 dígitos = NIF interno FNAC
+    while (i < lines.length && !/^\d{4,7}$/.test(lines[i])) i++;
+    if (i >= lines.length) break;
+    const nif = lines[i++];
+    const name = lines[i++] || '';
+    if (!name || /^\d/.test(name)) continue;
+    // Próxima linha pode ser carga "(2/8)8s" ou directo cell
+    const cargaLine = lines[i] || '';
+    let carga = '';
+    if (/^\(\d+\/\d+\)/.test(cargaLine)) { carga = cargaLine; i++; }
+    // Apanha exactamente days.length células (ou até bater num novo NIF)
+    const cells = [];
+    let consumed = 0;
+    while (i < lines.length && consumed < days.length) {
+      const ln = lines[i];
+      // Para se aparecer um possível NIF novo seguido de nome textual
+      if (/^\d{4,7}$/.test(ln) && i + 1 < lines.length && /^[A-Z������]/.test(lines[i + 1])) break;
+      // Linhas vazias ainda contam como célula vazia
+      cells.push(ln || '');
+      i++; consumed++;
+    }
+    if (cells.length > 0) collabs.push({ nif, name: name.trim(), carga, cells });
+  }
+  return { days, collabs };
+}
+
+// v3.21.31: retorna true se a célula representa um dia trabalhado.
+// FC = Descanso, FO = Folga, Fer = F�rias, Aniv = Aniversário, V = Vazio.
+function _isWorkedCell(cell) {
+  const c = String(cell || '').trim().toUpperCase();
+  if (!c) return false;
+  if (['FC', 'FO', 'FER', 'F�RIAS', 'FERIAS', 'ANIV', 'V'].includes(c)) return false;
+  // Códigos válidos: 100PA, 110RA, 140UA, 190, 130, 170, 150, PM, PT, INV..., 1H, -1H
+  return /^(\d{2,3}[A-Z]{0,3}|INV.*|PM|PT|1H|-1H|BH\(?\+?\-?\)?)/i.test(c);
+}
+
+// v3.21.31: Importa snapshot TX Penetração → registos PP por colaborador PTS.
+// Modo simples: 1 PP por seller em sale_date=refDay (totais mensais).
+// Modo horário (se schedule fornecido): N PPs por seller distribuídos pelos
+// dias trabalhados, proporcionalmente. Match seller.name ↔ profile case-insensitive.
+function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [showSched, setShowSched] = useState(false);
+  const [schedText, setSchedText] = useState('');
+  const parsedSched = useMemo(() => schedText.trim() ? parsePermanenciasText(schedText) : null, [schedText]);
+
+  const handleImport = async () => {
+    if (!snap?.monthKey) { alert('Snapshot sem mês definido.'); return; }
+    const [y, m] = snap.monthKey.split('-').map(Number);
+    const dim = new Date(y, m, 0).getDate();
+    const refDay = Math.min(Math.max(1, Number(referenceDay) || dim), dim);
+    const useSched = !!parsedSched;
+    const modeLabel = useSched
+      ? `distribuído pelos dias trabalhados (horário ${parsedSched.days.length} dias × ${parsedSched.collabs.length} colaboradores)`
+      : `1 registo por colaborador em ${y}-${String(m).padStart(2,'0')}-${String(refDay).padStart(2,'0')}`;
+    if (!confirm(`Importar ${sellersPTS.length} colaboradores PTS para Diarização?\n\nModo: ${modeLabel}.\nRegistos existentes nas mesmas datas serão substituídos.`)) return;
+    setBusy(true);
+    try {
+      const profiles = await fetchAllProfiles();
+      const candidates = (profiles || []).filter(p => /^PT/.test(String(p.department || '').toUpperCase()));
+      const byName = new Map();
+      for (const p of candidates) {
+        const k = String(p.display_name || p.email || '').toUpperCase().trim();
+        if (k) byName.set(k, p);
+      }
+      const sess = await supabase.auth.getUser();
+      const currentUserId = sess?.data?.user?.id || null;
+      // Map horário por nome normalizado
+      const schedByName = new Map();
+      if (useSched) {
+        for (const c of parsedSched.collabs) {
+          schedByName.set(String(c.name).toUpperCase().trim(), c);
+        }
+      }
+      let created = 0, matched = 0, skipped = 0, errors = [];
+      for (const s of sellersPTS) {
+        const key = String(s.name || '').toUpperCase().trim();
+        const profile = byName.get(key);
+        if (!profile) { skipped++; continue; }
+        matched++;
+        // Identifica dias trabalhados do colaborador no horário
+        let workedDays = [];
+        if (useSched && schedByName.has(key)) {
+          const sched = schedByName.get(key);
+          parsedSched.days.forEach((d, idx) => {
+            // Apanha só dias dentro do mês corrente (ignora hint de mês anterior/posterior).
+            // Se o monthHint do dia 1 indica "mai" no PDF de Maio, tratamos qualquer dia
+            // entre 1 e refDay como pertencente ao mês corrente.
+            if (d.day < 1 || d.day > dim) return;
+            // Apenas distribui até refDay (resto do mês ainda não tem dados)
+            if (d.day > refDay) return;
+            if (_isWorkedCell(sched.cells[idx])) workedDays.push(d.day);
+          });
+        }
+        if (workedDays.length === 0) {
+          // Fallback: 1 registo no refDay
+          workedDays = [refDay];
+        }
+        const totalEquip = Math.round(s.vendas || 0);
+        const totalPP = Math.round(s.seguros || 0);
+        const equipPerDay = totalEquip / workedDays.length;
+        const ppPerDay = totalPP / workedDays.length;
+        // Apaga registos anteriores deste colaborador no mês (para não duplicar)
+        const monthStart = `${y}-${String(m).padStart(2,'0')}-01`;
+        const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(dim).padStart(2,'0')}`;
+        try {
+          await supabase.from('protection_plans').delete()
+            .eq('collaborator_id', profile.user_id)
+            .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+        } catch { /* ignore */ }
+        // Insere por dia (com arredondamento e ajuste do último para fechar o total)
+        let equipAcc = 0, ppAcc = 0;
+        for (let di = 0; di < workedDays.length; di++) {
+          const day = workedDays[di];
+          const isLast = di === workedDays.length - 1;
+          const eq = isLast ? totalEquip - equipAcc : Math.round(equipPerDay);
+          const pp = isLast ? totalPP - ppAcc : Math.round(ppPerDay);
+          equipAcc += eq; ppAcc += pp;
+          const saleDate = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+          const payload = {
+            sale_date: saleDate,
+            collaborator_id: profile.user_id,
+            collaborator_email: profile.email || null,
+            collaborator_name: profile.display_name || profile.email || s.name,
+            equipment_count: Math.max(0, eq),
+            pp_count: Math.max(0, pp),
+            value: null,
+            category: null,
+            notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${useSched ? ' · horário' : ''}`,
+            created_by: currentUserId,
+          };
+          const res = await cloudCreatePP(payload);
+          if (res?.ok) created++;
+          else errors.push(`${s.name} (${day}): ${res?.error || 'erro'}`);
+        }
+      }
+      setResult({ created, matched, skipped, total: sellersPTS.length, errors: errors.slice(0, 5), mode: useSched ? 'horário' : 'mensal' });
+    } catch (e) {
+      alert('Erro inesperado: ' + (e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      marginBottom: 16, padding: 12,
+      background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <button onClick={handleImport} disabled={busy} style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '8px 14px', background: T.ink, color: T.bg,
+          border: 'none', borderRadius: 6, fontSize: 12,
+          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+        }}>
+          <Upload size={13} /> {busy ? 'A importar…' : '📥 Importar para Diarização'}
+        </button>
+        <div style={{ fontSize: 11, color: T.inkSoft, flex: 1, minWidth: 200 }}>
+          {parsedSched
+            ? <>Vai distribuir totais por <strong>dias trabalhados</strong> conforme horário colado ({parsedSched.collabs.length} colaboradores, {parsedSched.days.length} dias).</>
+            : <>Cria 1 registo PP por colaborador com os totais do mês. Cola horário em baixo para distribuir por dias trabalhados.</>}
+        </div>
+        <button onClick={() => setShowSched(s => !s)} style={{
+          padding: '6px 10px', background: 'transparent', color: T.inkSoft,
+          border: `1px solid ${T.line}`, borderRadius: 4, fontSize: 11, cursor: 'pointer', fontFamily: 'inherit',
+        }}>
+          📅 Horário {showSched ? '▴' : '▾'}
+        </button>
+        {result && (
+          <div style={{
+            fontSize: 11, padding: '6px 10px', borderRadius: 4,
+            background: result.errors.length > 0 ? `${T.orange}22` : `${T.green}22`,
+            color: T.ink, border: `1px solid ${result.errors.length > 0 ? T.orange : T.green}`,
+          }}>
+            ✓ {result.created} criados · {result.matched} matched · {result.skipped} s/perfil · modo: {result.mode}
+            {result.errors.length > 0 && ` · ${result.errors.length} erros`}
+          </div>
+        )}
+      </div>
+      {showSched && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${T.line}` }}>
+          <div style={{ fontSize: 11, color: T.inkSoft, marginBottom: 6 }}>
+            Cola aqui o texto extraído do PDF de permanências (Ctrl+A → Ctrl+C no PDF aberto, depois Ctrl+V aqui).
+            Parser detecta automaticamente colaboradores e dias trabalhados (qualquer turno que não seja FC/FO/Fer/Aniv/V).
+          </div>
+          <textarea
+            value={schedText}
+            onChange={e => setSchedText(e.target.value)}
+            placeholder="qui&#10;30&#10;sex&#10;1-mai&#10;...&#10;1365&#10;DAVID DINIS&#10;(2/8)8s&#10;140UA&#10;120SA&#10;..."
+            rows={6}
+            style={{
+              width: '100%', padding: '8px 10px', fontSize: 11, fontFamily: 'Geist Mono, monospace',
+              background: T.paper, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 4,
+              outline: 'none', resize: 'vertical',
+            }}
+          />
+          {parsedSched && (
+            <div style={{ marginTop: 8, fontSize: 11, color: T.green }}>
+              ✓ Parseado: {parsedSched.days.length} dias · {parsedSched.collabs.length} colaboradores.
+              {parsedSched.collabs.slice(0, 3).map(c => {
+                const worked = c.cells.filter(_isWorkedCell).length;
+                return <span key={c.nif} style={{ marginLeft: 8, color: T.inkSoft }}>{c.name.split(' ')[0]} ({worked}d)</span>;
+              })}
+              {parsedSched.collabs.length > 3 && <span style={{ marginLeft: 8, color: T.inkMute }}>…</span>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
@@ -25199,6 +25543,10 @@ function PenetrationBreakdown({ snap, myStoreRow, prevSnap = null }) {
       </>)}{/* fim categories */}
 
       {sub === 'team' && (<>
+      {/* v3.21.31: Importar para Diarização (Planos de Proteção) */}
+      {sellersPTS.length > 0 && (
+        <TPAutoImportButton sellersPTS={sellersPTS} snap={snap} referenceDay={referenceDay} myStoreRow={myStoreRow} />
+      )}
       {/* v3.21.16: Equipa PTS — agregados topo */}
       {sellersPTS.length > 0 && (
         <TeamPTSAggregates sellersPTS={sellersPTS} budget={budget} workdays={workdays} avgTaxa={avgTaxa} />
@@ -26439,6 +26787,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
           { id: 'stores', label: 'Lojas', icon: Store },
           { id: 'activity', label: 'Atividade', icon: Activity },
           { id: 'system', label: 'Sistema', icon: Activity },
+          { id: 'architecture', label: 'Arquitetura', icon: GitCompareArrows },
           { id: 'cloud', label: 'Cloud', icon: Database },
           { id: 'layout', label: 'Layout da loja', icon: Layers },
           { id: 'zones', label: 'Zonas Cartazes', icon: MapPin },
@@ -26467,6 +26816,7 @@ function AdminView({ user, uiConfig, setUIConfig, userDepartment, stockRowsPO2, 
       {tab === 'activity' && <AdminActivityTab currentUserId={user?.id} />}
       {tab === 'cloud' && <AdminCloudTab currentUserId={user?.id} />}
       {tab === 'system' && <AdminSystemTab />}
+      {tab === 'architecture' && <AdminArchitectureTab />}
       {tab === 'stores' && <AdminStoresTab currentUserId={user?.id} />}
       {tab === 'layout' && <AdminStoreLayoutTab currentUserId={user?.id} userDepartment={userDepartment} currentStoreId={currentStoreId} currentStoreName={currentStoreName} />}
       {tab === 'zones' && <AdminPosterZonesTab currentUserId={user?.id} />}
@@ -26839,6 +27189,438 @@ function AdminSystemTab() {
         o projecto está em pausa. Se o service worker mostra "não registado", PWA não vai funcionar offline.
         Se o IDB está perto da quota, considera apagar cache em <code>Limpar dados locais</code>.
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// AdminArchitectureTab — Diagrama completo da app para apresentação
+// v3.21.31: stack, fluxo de dados, módulos, BD, edge functions, roles, etc.
+// Botão "Imprimir / PDF" usa window.print() — o CSS @media print esconde
+// chrome lateral e força A4 portrait.
+// ─────────────────────────────────────────────────────────────────────────
+function AdminArchitectureTab() {
+  const [counts, setCounts] = useState(null);
+  const printRef = useRef(null);
+
+  useEffect(() => {
+    if (!supabase) return;
+    Promise.all([
+      supabase.from('campaigns').select('id', { count: 'exact', head: true }),
+      supabase.from('periods').select('id', { count: 'exact', head: true }),
+      supabase.from('stock_snapshots').select('id', { count: 'exact', head: true }),
+      supabase.from('user_profiles').select('user_id', { count: 'exact', head: true }),
+      supabase.from('activity_log').select('id', { count: 'exact', head: true }),
+      supabase.from('email_queue').select('id', { count: 'exact', head: true }),
+      supabase.from('stores').select('id', { count: 'exact', head: true }),
+      supabase.from('admins').select('user_id', { count: 'exact', head: true }),
+    ]).then(([c, p, s, u, a, e, st, ad]) => {
+      setCounts({
+        campaigns: c.count || 0, periods: p.count || 0,
+        snapshots: s.count || 0, users: u.count || 0,
+        activities: a.count || 0, emails: e.count || 0,
+        stores: st.count || 0, admins: ad.count || 0,
+      });
+    }).catch(() => {});
+  }, []);
+
+  const handlePrint = () => window.print();
+
+  const handleExportPDF = async () => {
+    try {
+      const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+        import('jspdf'), import('html2canvas'),
+      ]);
+      const node = printRef.current;
+      if (!node) return;
+      const canvas = await html2canvas(node, { scale: 2, backgroundColor: '#ffffff', useCORS: true, windowWidth: 1180 });
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageW = 210, pageH = 297;
+      const imgH = canvas.height * pageW / canvas.width;
+      let heightLeft = imgH, position = 0;
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, position, pageW, imgH);
+      heightLeft -= pageH;
+      while (heightLeft > 0) {
+        position -= pageH;
+        pdf.addPage();
+        pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, position, pageW, imgH);
+        heightLeft -= pageH;
+      }
+      pdf.save(`arquitetura-david-dinis-app-v${APP_VERSION}.pdf`);
+    } catch (err) {
+      alert('Erro ao exportar PDF: ' + (err?.message || err));
+    }
+  };
+
+  const Section = ({ title, sub, children }) => (
+    <div style={{ marginBottom: 28 }}>
+      <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 4 }}>{title}</div>
+      {sub && <div style={{ fontSize: 12, color: T.inkSoft, marginBottom: 10 }}>{sub}</div>}
+      {children}
+    </div>
+  );
+
+  const Card = ({ title, items, accent }) => (
+    <div style={{
+      padding: 14, background: T.bgEl, border: `1px solid ${T.line}`,
+      borderRadius: 8, borderLeft: `3px solid ${accent || T.accent}`,
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: T.ink, marginBottom: 8 }}>{title}</div>
+      <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, color: T.inkSoft, lineHeight: 1.7 }}>
+        {items.map((it, i) => <li key={i}>{it}</li>)}
+      </ul>
+    </div>
+  );
+
+  // ── Conteúdo das secções ──
+  const stack = [
+    { title: 'Frontend', accent: T.accent, items: [
+      'Next.js 14 · App Router',
+      'React 18 (hooks: useState, useMemo, useEffect, useRef)',
+      'lucide-react · ícones',
+      'xlsx · parsing de ficheiros Excel',
+      'jspdf + html2canvas · export PDF',
+      'CSS-in-JS inline (sem framework)',
+    ]},
+    { title: 'Backend / Cloud', accent: T.green, items: [
+      'Supabase (PostgreSQL + Auth + Storage)',
+      'Row Level Security (RLS) em todas as tabelas',
+      'Edge Functions (Deno) — admin-user-mgmt, send-emails',
+      'Cron Supabase — envio diário 9h',
+      'Resend API — entrega de emails (DKIM/SPF/DMARC)',
+    ]},
+    { title: 'Storage local / PWA', accent: T.yellow, items: [
+      'IndexedDB (idb) · snapshots cifrados localmente',
+      'Service Worker · offline-first',
+      'localStorage · preferências UI',
+      'Hydration Gate · espera pela cloud antes de render',
+    ]},
+    { title: 'Deploy / Infra', accent: T.orange, items: [
+      'Vercel · hosting + DNS faveiro.xyz',
+      'GitHub · CI via push',
+      'Domínio próprio com SPF/DKIM/DMARC',
+      'PWA instalável (manifest + SW)',
+    ]},
+  ];
+
+  const tables = [
+    'stores · lojas (Aveiro, Porto, …)',
+    'user_profiles · perfis (nome, dept, store_id, role)',
+    'admins · lista de admins (user_id)',
+    'campaigns · campanhas (header)',
+    'periods · períodos por campanha (datas + pisos + zonas + slots)',
+    'protection_plans · diarização PPs por colaborador',
+    'stock_snapshots · uploads PO2/PO3 (chunked, gzip)',
+    'sales_snapshots · análise de vendas FNAC',
+    'counter_sales_snapshots · vendas ao mostrador',
+    'penetration_snapshots · TX Penetração (BD N, BD N-1, RESUMO DIA)',
+    'novidades · listagem por loja+dept',
+    'devolucoes · pendências de devolução',
+    'credentials · cofre cifrado de senhas (admin)',
+    'store_floors · pisos por loja',
+    'store_zones · zonas por loja+dept',
+    'poster_zones · zonas de cartazes (global)',
+    'notes · notas pessoais cifradas',
+    'activity_log · auditoria todas as acções',
+    'email_queue · fila de emails para Resend',
+    'email_templates · templates editáveis (Markdown)',
+    'feature_flags · módulos on/off',
+    'user_data · preferências por user (JSON)',
+    'ui_config · settings globais (JSON, admin)',
+  ];
+
+  const modules = [
+    { title: 'Dashboard', accent: T.accent, items: [
+      'KPIs · campanhas activas, PPs do mês, alertas',
+      'Notificações · fim de campanha, devoluções pendentes',
+      'Atalhos personalizáveis',
+    ]},
+    { title: 'Campanhas', accent: T.green, items: [
+      'Editor de períodos (datas, pisos, zonas, slots, cartazes)',
+      'Atribuição de artigos a móveis (drag/drop)',
+      'Estado por slot: pendente/feito/falta/destaque/mínima',
+      'Análise de Vendas da Campanha (PDF + email)',
+    ]},
+    { title: 'Análise de Vendas', accent: T.orange, items: [
+      'Upload ficheiro FNAC com vendas detalhadas',
+      'KPIs, top produtos, families, horas, dow',
+      'Heatmap dia×hora · cross-sell colaborador',
+      'Diagnóstico de inconsistências de preço (EAN)',
+    ]},
+    { title: 'Planos de Proteção', accent: T.yellow, items: [
+      'Diarização manual · PPs por colaborador/dia',
+      'TX Penetração FNAC · análise multi-sheet (BD N)',
+      'Heatmap diário por loja · selector loja/companhia',
+      'Equipa PTS expandida · VIM, churn, escalões',
+      'Equipamentos sem seguro por colaborador',
+    ]},
+    { title: 'Editor de Folhetos', accent: T.accent, items: [
+      'SVG editor · drag, resize, snap',
+      'Texto, preço, descrição, logos',
+      'Export PDF A6 imprimível',
+      'Bold toggle + logos FNAC + cartão',
+    ]},
+    { title: 'Alterações / Histórico', accent: T.inkSoft, items: [
+      'Diff por período · compara com versão anterior',
+      'Filtros: tipo, autor, data',
+      'Rollback de slot individual',
+    ]},
+    { title: 'Inventário · Novidades · Devoluções', accent: T.green, items: [
+      'Listagens por loja+dept',
+      'Filtros multi-coluna · sort · export',
+      'Anexos (fotos) opcionais',
+    ]},
+    { title: 'Administração', accent: T.red || '#c92a2a', items: [
+      'Utilizadores · roles · suspend',
+      'Lojas · multi-store',
+      'Atividade · auditoria filtrada',
+      'Sistema · saúde, latência, IDB',
+      'Cloud · purge/inspect',
+      'Layout/Zonas · floors+zones por loja+dept',
+      'Emails · fila + envio Resend',
+      'Configuração · templates, flags, retention',
+      'Arquitetura · este diagrama',
+    ]},
+  ];
+
+  const edgeFns = [
+    'admin-user-mgmt · CRUD utilizadores (verify_jwt=false, faz check interno)',
+    'send-emails · consume email_queue → Resend (admin OU cron service_role)',
+  ];
+
+  const roles = [
+    { title: 'Admin', accent: T.red || '#c92a2a', items: [
+      'Acesso total · pode tudo nas tabelas',
+      'Vê todos os departamentos',
+      'Gere utilizadores, lojas, configuração',
+      'Audit log completo + export CSV',
+    ]},
+    { title: 'User PTS / PES', accent: T.accent, items: [
+      'Vê só a sua loja + departamento',
+      'Cria/edita campanhas e periods do seu scope',
+      'Insert em activity_log (próprio)',
+      'Sem acesso a config nem outros depts',
+    ]},
+  ];
+
+  const dataFlow = [
+    'Upload Excel → parsing client-side (xlsx)',
+    '→ Snapshot guardado em IndexedDB local (cifrado)',
+    '→ Upload chunked para cloud (gzip+base64)',
+    '→ RLS valida que user pode escrever',
+    '→ Hydration Gate aguarda data antes de render',
+    '→ React re-render com data nova',
+    '→ Activity log entry insertada',
+    '→ Notification engine processa (fim campanha, alertas)',
+    '→ queueEmail() insert na email_queue (status=pending)',
+    '→ Cron Supabase 9h ou botão admin → Edge fn send-emails',
+    '→ POST Resend API → entrega ao destinatário',
+    '→ Status sent (provider_id guardado) ou error (retry≤3)',
+  ];
+
+  // ── SVG diagrama em camadas ──
+  const W = 920, H = 560, PAD = 24;
+  const layerH = 90, layerGap = 14;
+  const Layer = ({ y, color, label, boxes }) => (
+    <g>
+      <rect x={PAD} y={y} width={W - PAD * 2} height={layerH} rx={8} fill={`${color}10`} stroke={color} strokeOpacity={0.4} />
+      <text x={PAD + 10} y={y + 16} fontSize={11} fontWeight={600} fill={color} fontFamily="Geist Mono, monospace" letterSpacing="0.08em">{label}</text>
+      {boxes.map((b, i) => {
+        const bw = (W - PAD * 2 - 20 - (boxes.length - 1) * 8) / boxes.length;
+        const bx = PAD + 10 + i * (bw + 8);
+        return (
+          <g key={i}>
+            <rect x={bx} y={y + 26} width={bw} height={layerH - 36} rx={5} fill="#ffffff" stroke={color} strokeWidth={1} />
+            <text x={bx + bw / 2} y={y + 50} fontSize={12} fontWeight={600} fill="#222" textAnchor="middle">{b.t}</text>
+            <text x={bx + bw / 2} y={y + 66} fontSize={9.5} fill="#666" textAnchor="middle">{b.s}</text>
+          </g>
+        );
+      })}
+    </g>
+  );
+  const arrow = (x, y1, y2) => (
+    <g>
+      <line x1={x} y1={y1} x2={x} y2={y2 - 6} stroke="#888" strokeWidth={1.2} />
+      <polygon points={`${x - 4},${y2 - 6} ${x + 4},${y2 - 6} ${x},${y2}`} fill="#888" />
+    </g>
+  );
+
+  return (
+    <div ref={printRef}>
+      {/* Header + actions */}
+      <div className="no-print" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 12, color: T.inkSoft }}>
+          Diagrama completo · v{APP_VERSION} · {counts ? `${counts.stores} lojas · ${counts.users} users · ${counts.campaigns} campanhas · ${counts.periods} períodos` : '…'}
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={handlePrint} style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+            background: T.bgEl, color: T.ink, border: `1px solid ${T.line}`, borderRadius: 6,
+            fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
+          }}>
+            <Printer size={13} /> Imprimir
+          </button>
+          <button onClick={handleExportPDF} style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px',
+            background: T.ink, color: T.bg, border: 'none', borderRadius: 6,
+            fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
+          }}>
+            <FileDown size={13} /> PDF
+          </button>
+        </div>
+      </div>
+
+      {/* ─── Stack tecnológica ─── */}
+      <Section title="🧱 Stack tecnológica" sub="Tecnologias e dependências principais por camada">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          {stack.map((s, i) => <Card key={i} title={s.title} items={s.items} accent={s.accent} />)}
+        </div>
+      </Section>
+
+      {/* ─── Diagrama em camadas (SVG) ─── */}
+      <Section title="🏗 Arquitetura em camadas" sub="Fluxo do utilizador até à persistência e entrega externa">
+        <div style={{ background: '#fff', border: `1px solid ${T.line}`, borderRadius: 8, padding: 12, overflowX: 'auto' }}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto', minWidth: 600, display: 'block' }}>
+            {/* L1 Browser / PWA */}
+            <Layer y={20} color="#1F8FE8" label="L1 · BROWSER / PWA" boxes={[
+              { t: 'React Views', s: 'Dashboard · Campanhas · Análises' },
+              { t: 'Service Worker', s: 'offline-first cache' },
+              { t: 'IndexedDB', s: 'snapshots cifrados' },
+              { t: 'localStorage', s: 'prefs UI' },
+            ]} />
+            {arrow(W / 2, 110, 134)}
+            {/* L2 Next.js */}
+            <Layer y={134} color="#22a36a" label="L2 · NEXT.JS 14 (Vercel)" boxes={[
+              { t: 'App Router', s: 'rotas · SSR' },
+              { t: 'CampaignPlatform.jsx', s: 'monolito principal' },
+              { t: 'PWA manifest', s: 'instalável' },
+            ]} />
+            {arrow(W / 2, 224, 248)}
+            {/* L3 Supabase */}
+            <Layer y={248} color="#f59e0b" label="L3 · SUPABASE (cloud)" boxes={[
+              { t: 'PostgreSQL', s: '23+ tabelas · RLS' },
+              { t: 'Auth', s: 'JWT · sessions' },
+              { t: 'Edge Functions', s: 'admin-user-mgmt · send-emails' },
+              { t: 'pg_cron', s: '9h diário' },
+            ]} />
+            {arrow(W / 2, 338, 362)}
+            {/* L4 External */}
+            <Layer y={362} color="#c92a2a" label="L4 · SERVIÇOS EXTERNOS" boxes={[
+              { t: 'Resend API', s: 'email DKIM/SPF/DMARC' },
+              { t: 'DNS faveiro.xyz', s: 'TXT/CNAME via Vercel' },
+              { t: 'Destinatário', s: 'inbox / spam / quarentena' },
+            ]} />
+            {/* legenda */}
+            <text x={W / 2} y={H - 30} textAnchor="middle" fontSize={10} fill="#888" fontFamily="Geist Mono, monospace">
+              setas = fluxo de dados síncrono · cron 9h dispara L3→L4 sem intervenção do utilizador
+            </text>
+          </svg>
+        </div>
+      </Section>
+
+      {/* ─── Módulos da app ─── */}
+      <Section title="🧩 Módulos da aplicação" sub="O que existe em cada secção da sidebar">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+          {modules.map((m, i) => <Card key={i} title={m.title} items={m.items} accent={m.accent} />)}
+        </div>
+      </Section>
+
+      {/* ─── Tabelas Supabase ─── */}
+      <Section title="🗄 Base de dados Supabase" sub={`${tables.length} tabelas com Row Level Security`}>
+        <div style={{
+          background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, padding: 14,
+          fontSize: 11.5, color: T.inkSoft, lineHeight: 1.8, columnCount: 2, columnGap: 24,
+        }}>
+          {tables.map((t, i) => {
+            const [name, desc] = t.split(' · ');
+            return (
+              <div key={i} style={{ breakInside: 'avoid', marginBottom: 4 }}>
+                <code style={{ color: T.ink, fontWeight: 600 }}>{name}</code> · {desc}
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
+      {/* ─── Edge Functions ─── */}
+      <Section title="⚡ Edge Functions" sub="Código serverless Deno na Supabase">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12 }}>
+          {edgeFns.map((fn, i) => {
+            const [name, desc] = fn.split(' · ');
+            return (
+              <div key={i} style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${T.green}` }}>
+                <code style={{ fontSize: 13, fontWeight: 600, color: T.ink }}>{name}</code>
+                <div style={{ fontSize: 11, color: T.inkSoft, marginTop: 6 }}>{desc}</div>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
+
+      {/* ─── Roles ─── */}
+      <Section title="🛡 Roles & permissões" sub="Binário admin/non-admin · scope por loja+departamento">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
+          {roles.map((r, i) => <Card key={i} title={r.title} items={r.items} accent={r.accent} />)}
+        </div>
+      </Section>
+
+      {/* ─── Pipeline de email ─── */}
+      <Section title="✉ Pipeline de email" sub="Da geração do conteúdo até à entrega externa">
+        <div style={{
+          background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, padding: 16,
+          fontSize: 12, color: T.ink, lineHeight: 1.9,
+        }}>
+          {dataFlow.map((step, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span style={{ color: T.accent, fontWeight: 600, minWidth: 24, fontFamily: 'Geist Mono, monospace' }}>
+                {String(i + 1).padStart(2, '0')}
+              </span>
+              <span>{step}</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* ─── Stats em tempo real ─── */}
+      <Section title="📊 Estado actual (live)" sub="Contagens directas da BD agora">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+          {[
+            ['Lojas', counts?.stores, T.accent],
+            ['Utilizadores', counts?.users, T.green],
+            ['Admins', counts?.admins, T.red || '#c92a2a'],
+            ['Campanhas', counts?.campaigns, T.orange],
+            ['Períodos', counts?.periods, T.yellow],
+            ['Snapshots', counts?.snapshots, T.accent],
+            ['Activity log', counts?.activities, T.inkSoft],
+            ['Emails (queue)', counts?.emails, T.green],
+          ].map(([label, value, accent], i) => (
+            <div key={i} style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, borderLeft: `3px solid ${accent}` }}>
+              <div style={{ fontSize: 10, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.1em' }}>{label}</div>
+              <div style={{ fontSize: 22, fontWeight: 500, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>
+                {value == null ? '…' : value.toLocaleString('pt-PT')}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* ─── Versão & changelog resumido ─── */}
+      <Section title="📌 Versão actual" sub={`v${APP_VERSION}`}>
+        <div style={{ padding: 14, background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8, fontSize: 12, color: T.inkSoft, lineHeight: 1.7 }}>
+          App em produção desde Janeiro 2026. ~25.000 linhas em <code>CampaignPlatform.jsx</code>.
+          Stack monolítica intencional para simplificar deploy (Vercel auto-build em cada push).
+          Roadmap futuro: code-splitting por view, virtualização de tabelas grandes, multi-store comments.
+        </div>
+      </Section>
+
+      {/* Print styles */}
+      <style jsx global>{`
+        @media print {
+          .no-print { display: none !important; }
+          body { background: #fff !important; }
+          @page { size: A4 portrait; margin: 12mm; }
+        }
+      `}</style>
     </div>
   );
 }
