@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.32';
+const APP_VERSION = '3.21.33';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T19:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T19:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.33', date: '2026-05-30', summary: 'Folhetos: (A) FIX — linha azul de selecção persistia no PNG/PDF exportado. renderSVGToBlob faz agora strip dos rects com stroke=#1F8FE8 no clone antes de serializar. (B) Specs no SVG passam a ser MULTILINHA (split por \\n) com tamanho ajustável via slider 2-12mm (data.specsSize, default 4mm). FlyerField "Specs" no editor agora é textarea (multiline). Permite usar specs como bloco rico — nome do produto + características — quando o título passa a ser o nome da campanha.' },
   { version: '3.21.32', date: '2026-05-30', summary: 'Folhetos com tipografia Gilroy (oficial FNAC). 6 pesos (Regular 400, Medium 500, SemiBold 600, Bold 700, ExtraBold 800, Black 900) servidos em public/fonts/gilroy/. (A) @font-face global no FlyerEditor para preview no browser. (B) Classes .ft-display / .ft-sans no SVG passam a usar Gilroy como primeira família (fallback Arial Black/Arial). (C) renderSVGToBlob agora embute as 6 OTFs como base64 dataURLs dentro do <defs><style> antes de serializar, porque o <img src=data:svg> usado no export PNG/PDF não vê fonts globais do documento. Cache _gilroyCSSCache para fetch uma única vez. Total ~330KB.' },
   { version: '3.21.31', date: '2026-05-30', summary: 'Lote v3.21.31. (A) _daysRemainingInMonth inclui hoje no cálculo de dias úteis restantes — path com refDay: se today > refDay no mesmo mês, fromDay = today.getDate() (não refDay+1); path legacy: fromDay = todayDay (não +1). Aveiro com refDay=27 e today=30 passa de 0 para 1 dia útil. (B) Editor de Folhetos: removido tracejado azul de selecção (selRing), agora linha sólida fina (strokeWidth=0.3). (B2) Folhetos: toggles novos — "Título a negrito" (default ON), "Specs a negrito", "Logo FNAC (canto)", "Logo Cartão FNAC". Logos como placeholders SVG (rect+texto) — substituir por <image href> quando user enviar PNG/SVG definitivo. (B3) TPAutoImportButton: botão "📥 Importar para Diarização" no tab Equipa PTS. Para cada seller PTS, cria 1 registo PP em sale_date=refDay com equipment_count=seller.vendas, pp_count=seller.seguros; match por nome (case-insensitive) com profiles PTS via fetchAllProfiles; substitui registos prévios na mesma data; mostra resumo (criados/matched/sem-perfil/erros). (B4) Horário do mês: drawer "📅 Horário" no mesmo botão para colar texto do PDF de Permanências FNAC. Parser parsePermanenciasText detecta sequência de dias (qui 30, sex 1-mai, …) + linhas de colaborador (NIF/Nome/carga/N células). _isWorkedCell ignora FC/FO/Fer/Aniv/V. Quando horário válido está colado, a importação muda de modo: distribui equipment_count/pp_count por TODOS os dias trabalhados até refDay (proporcional, com fix do último dia para fechar o total exacto). Apaga registos prévios do mês inteiro para evitar duplicados. Resultado mostra modo (mensal vs horário). (C) NOVA tab "Arquitetura" no Admin com diagrama completo da app para apresentação: stack tecnológica (Frontend/Cloud/PWA/Deploy), SVG layered (Browser→Next.js→Supabase→Externos), 8 cards de módulos (Dashboard, Campanhas, Análises, PPs, Folhetos, Histórico, Inventário, Admin), lista de 23 tabelas BD, edge functions, roles, pipeline de email em 12 passos, 8 KPIs live da BD (lojas/users/admins/campanhas/períodos/snapshots/activity/emails). Botões Imprimir (window.print) + PDF (jsPDF + html2canvas multi-página) com @media print que esconde chrome.' },
   { version: '3.21.30', date: '2026-05-29', summary: 'Análise de Vendas: toggle "⚠ Excluir anómalos" no header. Quando ligado, todos os EANs com preços inconsistentes (max > 3× min) saem de KPIs, gráficos (linha diária, top 10, donuts, heatmap), tabela detalhada e insights. Recalcula tudo automaticamente via destaqueRowsRaw → destaqueRows. Toggle só aparece se há EANs anómalos (badge com contagem). Indicador laranja persistente no header do relatório (visível no PDF/email exportado): "N EANs excluídos · R rows · Q unid · X€ revenue". Casos como capa com revenue 6647€ removidos com 1 click.' },
@@ -19355,6 +19356,8 @@ function defaultFlyerData() {
     specsBold: false,
     showLogoFnac: false,
     showLogoFnacCard: false,
+    // v3.21.33
+    specsSize: 4,
   };
 }
 
@@ -19702,7 +19705,14 @@ function FlyerEditor({ campaigns = [] }) {
 
           <Section title="Conteúdo">
             <FlyerField label="Título" multiline value={data.title} onChange={v => update({ title: v })} />
-            <FlyerField label="Specs" value={data.specs} onChange={v => update({ specs: v })} />
+            <FlyerField label="Specs (multilinha — Enter para nova linha)" multiline value={data.specs} onChange={v => update({ specs: v })} />
+            <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 10, color: T.inkMute, minWidth: 90, fontFamily:'Geist Mono' }}>Tamanho: {(data.specsSize || 4).toFixed(1)}mm</span>
+              <input type="range" min={2} max={12} step={0.5}
+                value={data.specsSize || 4}
+                onChange={e => update({ specsSize: Number(e.target.value) })}
+                style={{ flex: 1 }} />
+            </div>
             <FlyerField label="PVP Recomendado (riscado)" value={data.pvpBase} onChange={v => update({ pvpBase: v })} />
             <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.4fr', gap: 6 }}>
               <FlyerField label="Preço (inteiro)" value={data.priceMain} onChange={v => update({ priceMain: v })} />
@@ -19999,22 +20009,28 @@ function FlyerSVG({ svgRef, format, palette, data, imageMode, imageDataUrl, imag
         return null;
       })()}
 
-      {/* Specs — anchored at fixed Y */}
-      {data.specs && !isSmall && (
-        <g {...elProps('specs')}>
-          <text
-            x={textX} y={specsY}
-            className="ft-sans"
-            fontSize={isWide ? 3.2 : 4}
-            fontWeight={data.specsBold ? 900 : 400}
-            fill={palette.fg}
-            opacity="0.95"
-          >
-            {data.specs}
-          </text>
-          {selRing('specs', textX - 1, specsY - 4, textW, isWide ? 5 : 7)}
-        </g>
-      )}
+      {/* Specs — anchored at fixed Y · v3.21.33 multilinha + tamanho ajustável */}
+      {data.specs && !isSmall && (() => {
+        const specsLines = String(data.specs || '').split('\n');
+        const sz = Number(data.specsSize) || (isWide ? 3.2 : 4);
+        const lineH = sz * 1.25;
+        return (
+          <g {...elProps('specs')}>
+            {specsLines.map((line, i) => (
+              <text key={i}
+                x={textX} y={specsY + i * lineH}
+                className="ft-sans"
+                fontSize={sz}
+                fontWeight={data.specsBold ? 900 : 400}
+                fill={palette.fg}
+                opacity="0.95">
+                {line}
+              </text>
+            ))}
+            {selRing('specs', textX - 1, specsY - sz, textW, specsLines.length * lineH + 1)}
+          </g>
+        );
+      })()}
 
       {/* PVP base (riscado) — anchored at fixed Y */}
       {data.pvpBase && !isSmall && (
@@ -20399,6 +20415,8 @@ async function renderSVGToBlob(svgEl, format, type = 'png') {
   // Serialize the SVG with inline xmlns
   const clone = svgEl.cloneNode(true);
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  // v3.21.33: remove anéis de selecção (rect com stroke #1F8FE8) do clone
+  clone.querySelectorAll('rect[stroke="#1F8FE8"]').forEach(r => r.remove());
   // v3.21.32: injecta @font-face Gilroy embebida dentro do <defs><style>
   const gilroyCSS = await _loadGilroyEmbeddedCSS();
   if (gilroyCSS) {
