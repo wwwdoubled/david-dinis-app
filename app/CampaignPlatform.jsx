@@ -1885,10 +1885,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.0';
+const APP_VERSION = '3.23.1';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T05:45:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T06:10:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1898,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.1', date: '2026-05-31', summary: 'Fix do heatmap cross-sell (vendas ao mostrador). BUG: cada colaborador mostrava a MESMA percentagem em todas as famílias — a fórmula da "taxa por família" (allocAttach/cell.prod) colapsava matematicamente para attachTotal/totalProdElig, constante por colaborador. Causa raiz: o ficheiro do mostrador não tem ID de talão, logo é impossível ligar um anexo (seguro/addon) à família do produto. CORREÇÃO honesta: a célula passa a mostrar o VOLUME real de produtos elegíveis vendidos por família (cor azul por intensidade) e adiciona-se uma coluna "TP global" com a taxa de anexação REAL de cada colaborador (verde/laranja/vermelho). Nota explicativa de que a taxa por família requer ID de talão (indisponível). Deixa de mostrar dados enganadores.' },
   { version: '3.23.0', date: '2026-05-31', summary: 'Fase A (qualidade): helpers puros extraídos para app/lib/helpers.js + testes REAIS. Antes tests/helpers.test.js testava CÓPIAS locais dos helpers (não o código real). Agora normalizeEAN, _workingDaysInMonth, _daysRemainingInMonth, _dayFromSerial/_ymdFromSerial, _hoursFromCarga, _catFromTipo, _acumulaLines, _isWorkedCell, _matchSchedCollab/PT_NAME_ALIASES e o novo apportionLargestRemainder (extraído da diarização) vivem num módulo testável e são importados pelo CampaignPlatform. 25 testes vitest cobrem os bugs corrigidos ao longo das v3.21-3.22 (dias úteis inclui hoje, apportionment 16/[40,40,40,20]→[5,5,4,2], alias Ricardo Gabriel→Ricardo Silva, _isWorkedCell folgas, colisão normalizeEAN documentada). Sem mudança de comportamento na app — só refactor + rede de segurança.' },
   { version: '3.22.8', date: '2026-05-31', summary: 'Folhetos: fix do redimensionar do logo FNAC + selo 1%. (A) O scale dos elementos era à volta da origem (0,0) do SVG → elementos no lado direito (logo) "voavam" para a direita ao aumentar (parecia que demorava/não crescia). elProps aceita agora uma âncora e o scale acontece à volta do canto do próprio elemento (translate(a) scale translate(-a)) → cresce no sítio. Aplicado ao logo FNAC e ao selo ACUMULA 1%. (B) Performance: logo FNAC redimensionado de 887×884 para 360×359 (6× menos píxeis a rasterizar por render) → aumentar fica fluido.' },
   { version: '3.22.7', date: '2026-05-31', summary: 'Folhetos: fix gap dos cêntimos. O cálculo da largura do preço inteiro usava 0.62 em (Arial Black), mas a fonte agora é Gilroy (mais estreita) → os cêntimos (,98€) ficavam muito afastados do número. Fator ajustado para 0.56 + novos sliders de ajuste fino "↔ Cêntimos" (-30..15mm) e "↕ Cêntimos" (-15..15mm) no editor para posicionar a vírgula+cêntimos exactamente onde se quer. Campos centsDx/centsDy.' },
@@ -8511,21 +8512,34 @@ function SalesView({ stockRowsPO2, stockRowsPO3, stockMapPO2, stockMapPO3, curre
     }
     const collabs = Array.from(data.keys()).sort();
     const fams = Array.from(eligibleFams).filter(f => collabs.some(c => data.get(c)?.has(f)));
-    // Matrix: cada célula = taxa anexação aproximada da família (atribuímos prop. dos anexos do colab ao peso da família)
+    // v3.23.1: FIX do heatmap. A taxa de anexação POR FAMÍLIA é impossível com
+    // este ficheiro (mostrador não tem ID de talão para ligar anexo→produto) —
+    // a fórmula antiga colapsava para attachTotal/totalProdElig (CONSTANTE por
+    // colaborador, igual em todas as famílias). Agora mostramos dados REAIS:
+    //   • célula = volume de produtos elegíveis vendidos nessa família
+    //   • taxa de anexação GLOBAL por colaborador (a única que a fonte permite)
+    let maxProd = 0;
     const matrix = collabs.map(name => {
       const famMap = data.get(name);
-      const totalProdElig = Array.from(famMap.values()).reduce((s, x) => s + x.prod, 0);
-      const attachTotal = collabAttach.get(name) || 0;
       return fams.map(fam => {
         const cell = famMap.get(fam);
         if (!cell || cell.prod === 0) return null;
-        // Atribuição proporcional dos anexos ao peso da família
-        const allocAttach = totalProdElig > 0 ? attachTotal * (cell.prod / totalProdElig) : 0;
-        const rate = cell.prod > 0 ? (allocAttach / cell.prod * 100) : 0;
-        return { rate, prod: cell.prod, attach: allocAttach };
+        if (cell.prod > maxProd) maxProd = cell.prod;
+        return { prod: cell.prod };
       });
     });
-    return { collabs, fams, matrix };
+    const collabRates = collabs.map(name => {
+      const famMap = data.get(name);
+      const totalProdElig = Array.from(famMap.values()).reduce((s, x) => s + x.prod, 0);
+      const attachTotal = collabAttach.get(name) || 0;
+      return {
+        name,
+        totalProd: totalProdElig,
+        attachTotal,
+        attachRate: totalProdElig > 0 ? (attachTotal / totalProdElig * 100) : 0,
+      };
+    });
+    return { collabs, fams, matrix, collabRates, maxProd };
   }, [counterFiltered, eligibleFams]);
 
   // ── Oportunidades perdidas: vendas de produtos elegíveis em dias onde o colab não vendeu QUALQUER seguro/addon ─
@@ -11211,45 +11225,70 @@ function CollabDayHeatmap({ data }) {
 }
 
 // ── Heatmap cross-sell (colaborador × família elegível) ────────────────
+// v3.23.1: heatmap = VOLUME de produtos elegíveis por família (dado real) +
+// coluna "TP global" com a taxa de anexação real de cada colaborador.
 function CrossSellHeatmap({ data }) {
   const [hover, setHover] = useState(null);
   if (!data || !data.collabs.length || !data.fams.length) return <div style={{ padding: 20, textAlign: 'center', color: T.inkMute, fontSize: 12 }}>Sem dados — verifica filtros e famílias elegíveis.</div>;
-  const cellW = Math.max(40, Math.floor(700 / data.fams.length));
+  const cellW = Math.max(40, Math.floor(640 / data.fams.length));
+  const maxProd = data.maxProd || 1;
+  const rateColor = (r) => r >= 30 ? T.green : (r >= 15 ? T.orange : (T.red || '#c92a2a'));
   return (
     <div style={{ position: 'relative', overflowX: 'auto' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: `160px repeat(${data.fams.length}, ${cellW}px)`, gap: 2, fontSize: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: `160px 70px repeat(${data.fams.length}, ${cellW}px)`, gap: 2, fontSize: 10 }}>
         <div />
+        <div style={{ textAlign: 'center', color: T.inkSoft, fontSize: 9, padding: '4px 2px', fontWeight: 600 }}>TP global</div>
         {data.fams.map((f, i) => (
           <div key={i} style={{ textAlign: 'center', color: T.inkSoft, fontSize: 9, padding: '4px 2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f}</div>
         ))}
-        {data.collabs.map((name, ci) => (
-          <React.Fragment key={ci}>
-            <div style={{ color: T.inkSoft, textAlign: 'right', paddingRight: 8, alignSelf: 'center', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
-            {data.fams.map((f, fi) => {
-              const cell = data.matrix[ci][fi];
-              if (!cell) {
-                return <div key={fi} style={{ height: 24, background: T.lineSoft, borderRadius: 2 }} />;
-              }
-              const intensity = Math.min(1, cell.rate / 60);
-              const bg = `rgba(93, 160, 80, ${0.12 + intensity * 0.78})`;
-              const isHover = hover && hover.ci === ci && hover.fi === fi;
-              return (
-                <div key={fi}
-                  onMouseEnter={() => setHover({ ci, fi, ...cell, name, fam: f })}
-                  onMouseLeave={() => setHover(null)}
-                  style={{ height: 24, background: bg, borderRadius: 2, cursor: 'pointer', textAlign: 'center', lineHeight: '24px', fontSize: 10, color: intensity > 0.5 ? '#fff' : T.ink, fontVariantNumeric: 'tabular-nums', outline: isHover ? `1.5px solid ${T.ink}` : 'none' }}>
-                  {cell.rate.toFixed(0)}%
-                </div>
-              );
-            })}
-          </React.Fragment>
-        ))}
+        {data.collabs.map((name, ci) => {
+          const cr = data.collabRates?.[ci];
+          return (
+            <React.Fragment key={ci}>
+              <div style={{ color: T.inkSoft, textAlign: 'right', paddingRight: 8, alignSelf: 'center', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</div>
+              {/* TP global real do colaborador */}
+              <div
+                onMouseEnter={() => setHover({ kind: 'rate', name, ...cr })}
+                onMouseLeave={() => setHover(null)}
+                style={{ height: 24, borderRadius: 2, cursor: 'help', textAlign: 'center', lineHeight: '24px', fontSize: 10, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: '#fff', background: rateColor(cr?.attachRate || 0) }}>
+                {(cr?.attachRate || 0).toFixed(0)}%
+              </div>
+              {data.fams.map((f, fi) => {
+                const cell = data.matrix[ci][fi];
+                if (!cell) {
+                  return <div key={fi} style={{ height: 24, background: T.lineSoft, borderRadius: 2 }} />;
+                }
+                const intensity = Math.min(1, cell.prod / maxProd);
+                const bg = `rgba(31, 143, 232, ${0.12 + intensity * 0.78})`;
+                const isHover = hover && hover.ci === ci && hover.fi === fi;
+                return (
+                  <div key={fi}
+                    onMouseEnter={() => setHover({ kind: 'vol', ci, fi, prod: cell.prod, name, fam: f })}
+                    onMouseLeave={() => setHover(null)}
+                    style={{ height: 24, background: bg, borderRadius: 2, cursor: 'pointer', textAlign: 'center', lineHeight: '24px', fontSize: 10, color: intensity > 0.5 ? '#fff' : T.ink, fontVariantNumeric: 'tabular-nums', outline: isHover ? `1.5px solid ${T.ink}` : 'none' }}>
+                    {cell.prod}
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          );
+        })}
       </div>
-      {hover && (
+      <div style={{ marginTop: 8, fontSize: 10, color: T.inkMute, lineHeight: 1.4 }}>
+        Células = nº de produtos elegíveis vendidos por família (azul = mais volume). <strong>TP global</strong> = taxa de anexação real do colaborador (seguros+addons ÷ produtos elegíveis).
+        A taxa <em>por família</em> requer ID de talão no ficheiro do mostrador (não disponível), por isso mostra-se o volume real em vez de uma estimativa enganadora.
+      </div>
+      {hover && hover.kind === 'vol' && (
         <div style={{ position: 'absolute', top: 0, right: 0, background: T.ink, color: T.bg, padding: '8px 12px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
           <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.name} · {hover.fam}</div>
-          <div style={{ fontWeight: 500 }}>{hover.rate.toFixed(1)}% anexação</div>
-          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.prod} produtos · ~{hover.attach.toFixed(1)} anexos</div>
+          <div style={{ fontWeight: 500 }}>{hover.prod} produtos elegíveis</div>
+        </div>
+      )}
+      {hover && hover.kind === 'rate' && (
+        <div style={{ position: 'absolute', top: 0, right: 0, background: T.ink, color: T.bg, padding: '8px 12px', borderRadius: 4, fontSize: 11, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.name}</div>
+          <div style={{ fontWeight: 500 }}>{(hover.attachRate || 0).toFixed(1)}% anexação global</div>
+          <div style={{ fontSize: 10, opacity: 0.7 }}>{hover.attachTotal} anexos · {hover.totalProd} produtos elegíveis</div>
         </div>
       )}
     </div>
