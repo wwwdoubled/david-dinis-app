@@ -1779,10 +1779,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.21.35';
+const APP_VERSION = '3.21.36';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-30T21:00:00+01:00';
+const APP_BUILD_DATE = '2026-05-30T21:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1792,6 +1792,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.21.36', date: '2026-05-30', summary: 'TPAutoImportButton: fix "0 criados". Antes filtrava candidatos por department começar por "PT" (muitos perfis não têm o campo), o que vazia o map de matching e fazia todos os sellers contarem como "sem perfil" e nada era criado. Agora: (A) sem filtro de department, (B) match indexa por display_name + email local-part + primeiro+último nome, (C) cria SEMPRE o registo PP — se houver perfil liga collaborator_id, senão só guarda collaborator_name como fallback. Resultado label "c/perfil" + "s/perfil" em vez de "matched + skipped".' },
   { version: '3.21.35', date: '2026-05-30', summary: 'Fix dias úteis restantes: a v3.21.31 introduziu override "fromDay = today.getDate()" que saltava os dias intermédios entre refDay+1 e today (ex: snap dia 28, today dia 30 → contava só dia 30, faltava dia 29 = 1 em vez de 2). Reverte para `fromDay = safeRef + 1` simples, que naturalmente inclui hoje porque today > refDay. Por dia em Maio Aveiro: 31 → 16 (31 unidades em falta / 2 dias = 16/dia, mais realista).' },
   { version: '3.21.34', date: '2026-05-30', summary: 'Horários PTS Aveiro built-in: BUILTIN_PT_SCHEDULES com Maio 2026 + Junho 2026 (7 colaboradores cada: DAVID DINIS, BEATRIZ PINTO, RICARDO ALVES, BRUNO MESQUITA, TIAGO NOVAIS, RICARDO SILVA, JOSUE ALVES) extraídos dos PDFs de Permanências SISQUAL. TPAutoImportButton detecta auto: se snap.monthKey ∈ {2026-05, 2026-06} usa o horário built-in (badge verde "built-in") sem precisar de paste. Paste continua a funcionar como override para outros meses ou correcções.' },
   { version: '3.21.33', date: '2026-05-30', summary: 'Folhetos: (A) FIX — linha azul de selecção persistia no PNG/PDF exportado. renderSVGToBlob faz agora strip dos rects com stroke=#1F8FE8 no clone antes de serializar. (B) Specs no SVG passam a ser MULTILINHA (split por \\n) com tamanho ajustável via slider 2-12mm (data.specsSize, default 4mm). FlyerField "Specs" no editor agora é textarea (multiline). Permite usar specs como bloco rico — nome do produto + características — quando o título passa a ser o nome da campanha.' },
@@ -24834,12 +24835,20 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
     if (!confirm(`Importar ${sellersPTS.length} colaboradores PTS para Diarização?\n\nModo: ${modeLabel}.\nRegistos existentes nas mesmas datas serão substituídos.`)) return;
     setBusy(true);
     try {
+      // v3.21.36: matching mais flexível — tenta nome completo, primeiro+último,
+      // e fallback por local part do email. NÃO filtra por department (muitos
+      // perfis não têm campo preenchido).
       const profiles = await fetchAllProfiles();
-      const candidates = (profiles || []).filter(p => /^PT/.test(String(p.department || '').toUpperCase()));
+      const norm = (s) => String(s || '').toUpperCase().replace(/\s+/g, ' ').trim();
       const byName = new Map();
-      for (const p of candidates) {
-        const k = String(p.display_name || p.email || '').toUpperCase().trim();
-        if (k) byName.set(k, p);
+      for (const p of (profiles || [])) {
+        const dn = norm(p.display_name);
+        const em = norm((p.email || '').split('@')[0].replace(/[._-]/g, ' '));
+        if (dn) byName.set(dn, p);
+        if (em) byName.set(em, p);
+        // Indexa também por primeiro+último (ex: "DAVID DINIS")
+        const parts = (dn || em).split(' ').filter(Boolean);
+        if (parts.length >= 2) byName.set(`${parts[0]} ${parts[parts.length-1]}`, p);
       }
       const sess = await supabase.auth.getUser();
       const currentUserId = sess?.data?.user?.id || null;
@@ -24850,12 +24859,13 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           schedByName.set(String(c.name).toUpperCase().trim(), c);
         }
       }
-      let created = 0, matched = 0, skipped = 0, errors = [];
+      let created = 0, matched = 0, unlinked = 0, errors = [];
       for (const s of sellersPTS) {
-        const key = String(s.name || '').toUpperCase().trim();
-        const profile = byName.get(key);
-        if (!profile) { skipped++; continue; }
-        matched++;
+        const key = norm(s.name);
+        const parts = key.split(' ').filter(Boolean);
+        const altKey = parts.length >= 2 ? `${parts[0]} ${parts[parts.length-1]}` : key;
+        const profile = byName.get(key) || byName.get(altKey);
+        if (profile) matched++; else unlinked++;
         // Identifica dias trabalhados do colaborador no horário
         let workedDays = [];
         if (useSched && schedByName.has(key)) {
@@ -24882,9 +24892,16 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
         const monthStart = `${y}-${String(m).padStart(2,'0')}-01`;
         const monthEnd = `${y}-${String(m).padStart(2,'0')}-${String(dim).padStart(2,'0')}`;
         try {
-          await supabase.from('protection_plans').delete()
-            .eq('collaborator_id', profile.user_id)
-            .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+          if (profile?.user_id) {
+            await supabase.from('protection_plans').delete()
+              .eq('collaborator_id', profile.user_id)
+              .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+          } else {
+            // fallback: apaga por nome (mesmo collaborator_name)
+            await supabase.from('protection_plans').delete()
+              .eq('collaborator_name', s.name)
+              .gte('sale_date', monthStart).lte('sale_date', monthEnd);
+          }
         } catch { /* ignore */ }
         // Insere por dia (com arredondamento e ajuste do último para fechar o total)
         let equipAcc = 0, ppAcc = 0;
@@ -24897,14 +24914,14 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           const saleDate = `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
           const payload = {
             sale_date: saleDate,
-            collaborator_id: profile.user_id,
-            collaborator_email: profile.email || null,
-            collaborator_name: profile.display_name || profile.email || s.name,
+            collaborator_id: profile?.user_id || null,
+            collaborator_email: profile?.email || null,
+            collaborator_name: profile?.display_name || s.name,
             equipment_count: Math.max(0, eq),
             pp_count: Math.max(0, pp),
             value: null,
             category: null,
-            notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${useSched ? ' · horário' : ''}`,
+            notes: `Importado de TX Penetração ${snap.month || snap.monthKey}${useSched ? ' · horário' : ''}${profile ? '' : ' · sem perfil'}`,
             created_by: currentUserId,
           };
           const res = await cloudCreatePP(payload);
@@ -24912,7 +24929,7 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
           else errors.push(`${s.name} (${day}): ${res?.error || 'erro'}`);
         }
       }
-      setResult({ created, matched, skipped, total: sellersPTS.length, errors: errors.slice(0, 5), mode: useSched ? 'horário' : 'mensal' });
+      setResult({ created, matched, unlinked, total: sellersPTS.length, errors: errors.slice(0, 5), mode: useSched ? 'horário' : 'mensal' });
     } catch (e) {
       alert('Erro inesperado: ' + (e?.message || e));
     } finally {
@@ -24951,7 +24968,7 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow }) {
             background: result.errors.length > 0 ? `${T.orange}22` : `${T.green}22`,
             color: T.ink, border: `1px solid ${result.errors.length > 0 ? T.orange : T.green}`,
           }}>
-            ✓ {result.created} criados · {result.matched} matched · {result.skipped} s/perfil · modo: {result.mode}
+            ✓ {result.created} criados · {result.matched} c/perfil · {result.unlinked} s/perfil · modo: {result.mode}
             {result.errors.length > 0 && ` · ${result.errors.length} erros`}
           </div>
         )}
