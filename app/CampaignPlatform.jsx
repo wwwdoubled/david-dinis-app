@@ -1903,10 +1903,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.22.2';
+const APP_VERSION = '3.22.3';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T01:45:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T02:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1916,6 +1916,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.22.3', date: '2026-05-31', summary: 'Fix diarização: distribuição justa por horas (método do maior resto / Hamilton). Antes era Math.round + "o último colaborador fica com o resto" — os full-time (40h) arredondavam a quota para cima e despejavam o resto negativo no part-time (ex: 16 seguros = 5+5+5 deixava só 1 para o de 20h). Agora cada um leva o floor da quota exacta e o que falta para fechar o objectivo vai para os maiores restos fraccionários. Exemplo 16 seguros / 40+40+40+20h: passa de [5,5,5,1] para [5,5,4,2] — Ricardo Gabriel (20h) recebe 2 (quota justa) em vez de 1.' },
   { version: '3.22.2', date: '2026-05-31', summary: 'Planta: TODOS os móveis visíveis + localizador. (A) StoreMapSVG: móveis sem cor do Excel (D6V, T1-T4, estantes numeradas…) passam a ter cor por departamento/produto (_deptColor: PTS=azul/roxo/verde por categoria, EDIT/livros=castanho, SERVICES=rosa). Labels visíveis em móveis a partir de 5px, texto branco/preto consoante o fundo, número mostrado quando não há label. Fundo do Excel atenuado para os móveis sobressaírem. (B) Novo StoreMapLocate: caixa de procura por código/número/nome/mobiliário → lista de resultados → clica para DESTACAR (anel amarelo a pulsar) e CENTRAR o móvel no mapa (scroll automático). (C) Admin → Planta da loja ganha o localizador acima do mapa + clicar num móvel destaca-o. Resolve "mais móveis no mapa e saber onde estão".' },
   { version: '3.22.1', date: '2026-05-31', summary: 'Planta: garantia dos DOIS pisos + upsert null-safe. O parser e o save já tratavam ambos os pisos (Excel PISO 1→app PISO 0, PISO 2→app PISO 1), mas o cloudUpsertFloorPlan usava onConflict que, com store_id=NULL, o Postgres trata como distinto → re-upload duplicava registos. Agora faz find-then-update/insert explícito (eq floor_name + eq/is store_id), garantindo 1 registo por piso por loja e re-uploads idempotentes. Selector de pisos no admin mostra ambos com contagem de móveis.' },
   { version: '3.22.0', date: '2026-05-31', summary: 'PLANTA INTERACTIVA DA LOJA — Fase 1. (A) Novo parser parsePlantaExcel: lê o Excel planograma (AVEIRO_PLANTA.xlsx) — folha NOMENCLATURA (371 móveis com dept/produto/mobiliário/piso) + folhas PISO 1/PISO 2 (grelha visual: cada célula mergeada/colorida = 1 móvel). Usa XLSX cellStyles para extrair cores de fundo + !merges para spans. A posição na grelha é a geometria — gera o mapa automaticamente, sem desenhar à mão. Mapeamento Excel→app: PISO 1→PISO 0 (térreo), PISO 2→PISO 1 (cima). (B) Migration store_floor_plans (grid_json jsonb por piso/loja, RLS read-authed/write-admin). cloudUpsertFloorPlan/cloudFetchFloorPlans/cloudDeleteFloorPlan. (C) Componente StoreMapSVG: renderiza a grelha com cores reais + móveis com labels + hover tooltip (dept/produto/mobiliário). Suporta modo overlay (cores por estado/vendas) para fases seguintes. (D) Admin → novo tab "Planta da loja": upload Excel → preview do mapa por piso → guardar na cloud. Aveiro: PISO 0 com 66 móveis, PISO 1 com 713 (242 com metadados). Próximas fases: vista Campanha no Mapa, heatmap de vendas, drag-drop.' },
@@ -25068,17 +25069,21 @@ function TPAutoImportButton({ sellersPTS, snap, referenceDay, myStoreRow, budget
     const dailyTarget = isBehind
       ? Math.ceil(missing / Math.max(1, remainingDays))
       : Math.ceil(target / Math.max(1, totalDays));
+    // v3.22.3: apportionment justo (método do maior resto / Hamilton).
+    // Antes era Math.round + "o último fica com o resto" — os full-time (40h)
+    // arredondavam para cima e roubavam a quota ao part-time (20h), que recebia
+    // o resto negativo (ex: 5+5+5 deixava 1 para o 20h em vez do justo ~2).
+    // Agora: cada um leva o floor da sua quota exacta; o que falta para fechar
+    // o dailyTarget é distribuído pelos MAIORES restos fraccionários.
     const lines = working.map(s => {
       const h = _hoursFromCarga(s.carga);
       const share = totalHours > 0 ? h / totalHours : 1 / Math.max(1, working.length);
-      const pp = Math.round(dailyTarget * share);
-      return { seller: s, hours: h, share, pp };
+      const exact = dailyTarget * share;
+      return { seller: s, hours: h, share, exact, pp: Math.floor(exact) };
     });
-    // Ajuste do último para fechar exactamente o dailyTarget
-    if (lines.length > 0) {
-      const sum = lines.reduce((a, b) => a + b.pp, 0);
-      lines[lines.length - 1].pp += (dailyTarget - sum);
-    }
+    let leftover = dailyTarget - lines.reduce((a, b) => a + b.pp, 0);
+    const byRemainder = [...lines].sort((a, b) => (b.exact - b.pp) - (a.exact - a.pp));
+    for (let i = 0; i < byRemainder.length && leftover > 0; i++) { byRemainder[i].pp += 1; leftover--; }
     return { working, lines, dailyTarget, isBehind, missing, remainingDays, totalDays };
   }, [singleDay, snap?.monthKey, myStoreRow?.name, sellersPTS, budget, workdays]);
 
