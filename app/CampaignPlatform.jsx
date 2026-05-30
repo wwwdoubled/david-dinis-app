@@ -20,6 +20,46 @@ async function getXLSX() {
   if (!_XLSX) _XLSX = await import('xlsx');
   return _XLSX;
 }
+
+// v3.23.3: error boundary por vista — se UMA vista crashar, mostra um fallback
+// só nessa área (não derruba a app inteira como a global em page.js). Reinicia
+// quando se muda de vista (via key={view}).
+class ViewBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) {
+    if (typeof console !== 'undefined') console.error('[ViewBoundary]', error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{
+          padding: 48, textAlign: 'center', maxWidth: 520, margin: '40px auto',
+          background: '#fff', border: '1px solid #e5e3df', borderRadius: 12,
+        }}>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>⚠</div>
+          <div style={{ fontSize: 17, fontWeight: 600, marginBottom: 8 }}>Esta secção encontrou um erro</div>
+          <div style={{ fontSize: 13, color: '#666', lineHeight: 1.5, marginBottom: 18 }}>
+            O resto da aplicação continua a funcionar. Muda de secção na barra lateral, ou recarrega a página.
+          </div>
+          <button onClick={() => this.setState({ error: null })} style={{
+            padding: '9px 18px', background: '#1a1a1a', color: '#fff', border: 'none',
+            borderRadius: 8, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit', marginRight: 8,
+          }}>Tentar de novo</button>
+          <button onClick={() => window.location.reload()} style={{
+            padding: '9px 18px', background: 'transparent', color: '#444', border: '1px solid #ddd',
+            borderRadius: 8, fontSize: 13, cursor: 'pointer', fontFamily: 'inherit',
+          }}>Recarregar</button>
+          <details style={{ marginTop: 16, fontSize: 11, color: '#999', textAlign: 'left' }}>
+            <summary style={{ cursor: 'pointer' }}>Detalhes técnicos</summary>
+            <pre style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{String(this.state.error?.message || this.state.error)}</pre>
+          </details>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 // v3.23.0: helpers puros extraídos (testáveis em tests/helpers.test.js)
 import {
   normalizeEAN, _catFromTipo, _dayFromSerial, _ymdFromSerial,
@@ -1896,10 +1936,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.2';
+const APP_VERSION = '3.23.3';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T06:40:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T07:10:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1909,6 +1949,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.3', date: '2026-05-31', summary: 'Robustez: (A) FIX CI — package-lock.json estava dessincronizado (faltavam jsbarcode, vitest e deps), por isso "npm ci" falhava e o CI estava VERMELHO em cada push. Lock regenerado e em sync → CI passa (testes + build). (B) Error boundary POR VISTA (ViewBoundary): se uma secção crashar, mostra um fallback "Tentar de novo / Recarregar" só nessa área em vez de derrubar a app inteira (a boundary global de page.js era o único nível). Reinicia ao mudar de secção (key={view}). Todas as vistas (Dashboard, Campanhas, Vendas, Alterações, Stock, Inventário, Folhetos, PPs, Admin, etc.) ficam isoladas.' },
   { version: '3.23.2', date: '2026-05-31', summary: 'Performance: XLSX carregado dinamicamente. Antes import * as XLSX estava no bundle inicial (~400 kB descomprimido) embora só usado pós-upload/export. Agora singleton lazy getXLSX() (await import("xlsx")) carregado só quando há ficheiro. First Load JS: 461→419 kB (página 461→332 kB). Convertidos para async: parseExcelSmart (+3 callers), parseFnacSalesExcelMainThread, parsePlantaExcel, parsePenetrationExcel, parseCounterSalesExcel, import de devoluções; exports (Pedido GU, inventário, devoluções) com await getXLSX(). Sem mudança de comportamento. Fecha a Fase A (extração de helpers + testes + fix cross-sell + XLSX lazy).' },
   { version: '3.23.1', date: '2026-05-31', summary: 'Fix do heatmap cross-sell (vendas ao mostrador). BUG: cada colaborador mostrava a MESMA percentagem em todas as famílias — a fórmula da "taxa por família" (allocAttach/cell.prod) colapsava matematicamente para attachTotal/totalProdElig, constante por colaborador. Causa raiz: o ficheiro do mostrador não tem ID de talão, logo é impossível ligar um anexo (seguro/addon) à família do produto. CORREÇÃO honesta: a célula passa a mostrar o VOLUME real de produtos elegíveis vendidos por família (cor azul por intensidade) e adiciona-se uma coluna "TP global" com a taxa de anexação REAL de cada colaborador (verde/laranja/vermelho). Nota explicativa de que a taxa por família requer ID de talão (indisponível). Deixa de mostrar dados enganadores.' },
   { version: '3.23.0', date: '2026-05-31', summary: 'Fase A (qualidade): helpers puros extraídos para app/lib/helpers.js + testes REAIS. Antes tests/helpers.test.js testava CÓPIAS locais dos helpers (não o código real). Agora normalizeEAN, _workingDaysInMonth, _daysRemainingInMonth, _dayFromSerial/_ymdFromSerial, _hoursFromCarga, _catFromTipo, _acumulaLines, _isWorkedCell, _matchSchedCollab/PT_NAME_ALIASES e o novo apportionLargestRemainder (extraído da diarização) vivem num módulo testável e são importados pelo CampaignPlatform. 25 testes vitest cobrem os bugs corrigidos ao longo das v3.21-3.22 (dias úteis inclui hoje, apportionment 16/[40,40,40,20]→[5,5,4,2], alias Ricardo Gabriel→Ricardo Silva, _isWorkedCell folgas, colisão normalizeEAN documentada). Sem mudança de comportamento na app — só refactor + rede de segurança.' },
@@ -6427,6 +6468,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               }}
             />
           )}
+          <ViewBoundary key={view}>
           {view === 'dashboard' && <Dashboard campaigns={filteredCampaigns} stockRowsPO2={stockRowsPO2} stockRowsPO3={stockRowsPO3} defaultLayout={defaultLayout} setView={setView} onExport={exportSession} onImport={importSession} periods={filteredPeriods} posters={posters} notifications={notifications} isAdmin={isAdmin} currentStoreName={stores.find(s => s.id === currentStoreId)?.name} />}
           {view === 'campaigns' && <CampaignsView
             campaigns={campaigns} setCampaigns={setCampaigns}
@@ -6516,6 +6558,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
             </div>
           )}
+          </ViewBoundary>
         </main>
       </div>
 
