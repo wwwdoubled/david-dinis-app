@@ -69,6 +69,9 @@ import {
 } from './lib/helpers';
 // v3.23.5: tema partilhado (T singleton mutável) — fundação p/ code-splitting
 import { THEMES, THEME_LABELS, THEME_ORDER, T, applyTheme } from './lib/theme';
+// v3.23.7: UI + formatação partilhados (reutilizáveis por vistas extraídas)
+import { Header, Section } from './lib/ui';
+import { parseNum, downloadBlob } from './lib/format';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Supabase client — singleton
@@ -1881,10 +1884,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.6';
+const APP_VERSION = '3.23.7';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T08:40:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T09:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1894,6 +1897,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.7', date: '2026-05-31', summary: 'Code-splitting (fundação 2/N): componentes/utils partilhados extraídos para módulos lib — Header e Section → app/lib/ui.jsx; parseNum e downloadBlob → app/lib/format.js. O monolito importa-os (os ~110 usos resolvem pelo import, sem mudança de comportamento). Com lib/theme + lib/helpers + lib/ui + lib/format, as vistas já têm de onde importar as dependências partilhadas sem depender do monolito — pré-requisito para extrair vistas grandes (Folhetos, Vendas) para chunks dinâmicos. Build + 30 testes ✓.' },
   { version: '3.23.6', date: '2026-05-31', summary: 'Removido o Editor de PDF da aplicação (temporariamente, a rever mais tarde) — saiu do menu lateral, command palette e render. A função (~1175 linhas) foi removida do ficheiro (recuperável no histórico git). First Load JS desce mais 8 kB (419→411). Limpa o monolito e ajuda o objectivo de code-splitting.' },
   { version: '3.23.5', date: '2026-05-31', summary: 'Code-splitting (passo 1/N): tema extraído para app/lib/theme.js (THEMES, THEME_LABELS, THEME_ORDER, T singleton mutável, applyTheme). T continua a ser o mesmo objecto partilhado (mutado por applyTheme) — zero mudança de comportamento. É a fundação que permite extrair vistas para ficheiros próprios (cada vista vai poder importar T do módulo em vez de depender do monolito). Build + 30 testes ✓.' },
   { version: '3.23.4', date: '2026-05-31', summary: 'Mais cobertura de testes: parsePermanenciasText (parser do horário PDF colado), _planTokens e _zoneFixtureScore (match zona da campanha ↔ móvel da planta) extraídos para app/lib/helpers.js e testados. 30 testes vitest no total (era 25). Sem mudança de comportamento — refactor + rede de segurança que continua a preparar o terreno para o code-splitting.' },
@@ -7122,22 +7126,7 @@ function ChangelogDialog({ onClose }) {
 // ─────────────────────────────────────────────────────────────────────────
 // Header
 // ─────────────────────────────────────────────────────────────────────────
-function Header({ eyebrow, title, subtitle, action }) {
-  return (
-    <div style={{ marginBottom: 40, display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 32 }}>
-      <div>
-        <div className="mono" style={{ fontSize: 11, letterSpacing: '0.15em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 12 }}>
-          {eyebrow}
-        </div>
-        <h1 className="display" style={{ fontSize: 48, lineHeight: 1.02, margin: 0, letterSpacing: '-0.025em' }}>
-          {title}
-        </h1>
-        {subtitle && <p style={{ fontSize: 16, color: T.inkSoft, marginTop: 14, maxWidth: 620 }}>{subtitle}</p>}
-      </div>
-      {action}
-    </div>
-  );
-}
+// Header → app/lib/ui.jsx (v3.23.7)
 
 // ─────────────────────────────────────────────────────────────────────────
 // DropZone
@@ -14027,32 +14016,7 @@ function suggestForAllZones({ floors, products, columns, stockPO2Index, stockPO3
 }
 
 // Tolerant number parser — handles "30%", "32,19", "€41,99", whitespace, etc.
-function parseNum(v) {
-  if (v === null || v === undefined || v === '') return 0;
-  if (typeof v === 'number') return isFinite(v) ? v : 0;
-  let s = String(v).trim();
-  if (!s) return 0;
-  // Strip common non-numeric chars: €, %, spaces
-  s = s.replace(/[€%\s]/g, '');
-  // Handle "1.234,56" (Portuguese) vs "1,234.56" (English)
-  // If both . and , present, the last one is the decimal separator
-  const lastDot = s.lastIndexOf('.');
-  const lastComma = s.lastIndexOf(',');
-  if (lastDot >= 0 && lastComma >= 0) {
-    if (lastComma > lastDot) {
-      // PT format: "1.234,56" — drop dots, replace comma with dot
-      s = s.replace(/\./g, '').replace(',', '.');
-    } else {
-      // EN format: "1,234.56" — drop commas
-      s = s.replace(/,/g, '');
-    }
-  } else if (lastComma >= 0) {
-    // Only comma → assume PT decimal: "32,19"
-    s = s.replace(',', '.');
-  }
-  const n = parseFloat(s);
-  return isNaN(n) ? 0 : n;
-}
+// parseNum → app/lib/format.js (v3.23.7)
 
 function isStarValue(v) {
   if (!v) return false;
@@ -20852,23 +20816,7 @@ function pngIDATLength(pngBytes) {
   return extractPngIDAT(pngBytes).length;
 }
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function Section({ title, children }) {
-  return (
-    <div>
-      <div className="mono" style={{ fontSize: 10, letterSpacing: '0.12em', color: T.inkMute, textTransform: 'uppercase', marginBottom: 10 }}>{title}</div>
-      {children}
-    </div>
-  );
-}
+// downloadBlob → app/lib/format.js · Section → app/lib/ui.jsx (v3.23.7)
 
 // PdfEditor removido temporariamente (v3.23.6) - recuperavel no historico git
 
