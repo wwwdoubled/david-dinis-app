@@ -1884,10 +1884,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.8';
+const APP_VERSION = '3.24.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T09:30:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T10:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1897,6 +1897,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.24.0', date: '2026-05-31', summary: 'Relógio + histórico de preços no Ctrl+K. (A) LiveClock: relógio ao vivo (hora de Portugal, HH:MM:SS + dia/mês) no rodapé da barra lateral, visível para todos os utilizadores, actualiza a cada segundo. (B) Histórico de preços no Ctrl+K: novo priceIndex agrega o preço de cada artigo em TODAS as campanhas (cada campanha já é um snapshot guardado com data). Ao procurar um artigo (EAN/nome/família) no Ctrl+K e seleccioná-lo, mostra a evolução do preço ao longo das campanhas — chips "Mai/26 19,99€ → Jun/26 17,99€" com ↓ verde (desceu) / ↑ vermelho (subiu), só as mudanças reais. O sub do resultado indica também em quantas campanhas o artigo apareceu. Sem tabela nova — deriva das campanhas existentes.' },
   { version: '3.23.8', date: '2026-05-31', summary: 'Testes para parseNum (parsing de preços PT/EN — função crítica usada em toda a app, agora em lib/format.js): formatos 1.234,56 / 1,234.56 / 32,19, remoção de €/%, null/lixo→0. 36 testes vitest no total.' },
   { version: '3.23.7', date: '2026-05-31', summary: 'Code-splitting (fundação 2/N): componentes/utils partilhados extraídos para módulos lib — Header e Section → app/lib/ui.jsx; parseNum e downloadBlob → app/lib/format.js. O monolito importa-os (os ~110 usos resolvem pelo import, sem mudança de comportamento). Com lib/theme + lib/helpers + lib/ui + lib/format, as vistas já têm de onde importar as dependências partilhadas sem depender do monolito — pré-requisito para extrair vistas grandes (Folhetos, Vendas) para chunks dinâmicos. Build + 30 testes ✓.' },
   { version: '3.23.6', date: '2026-05-31', summary: 'Removido o Editor de PDF da aplicação (temporariamente, a rever mais tarde) — saiu do menu lateral, command palette e render. A função (~1175 linhas) foi removida do ficheiro (recuperável no histórico git). First Load JS desce mais 8 kB (419→411). Limpa o monolito e ajuda o objectivo de code-splitting.' },
@@ -7008,6 +7009,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
               {candidates.length} candidatos
             </div>
           )}
+          <LiveClock />
           {user && supabaseEnabled && (
             <SyncIndicator status={syncStatus} isOnline={isOnline} />
           )}
@@ -7044,6 +7046,30 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
 // ─────────────────────────────────────────────────────────────────────────
 // VersionFooter — shows app version + build date with changelog tooltip
 // ─────────────────────────────────────────────────────────────────────────
+// v3.24.0: relógio ao vivo (hora de Portugal) — visível para todos os utilizadores
+function LiveClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const time = now.toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Europe/Lisbon' });
+  const date = now.toLocaleDateString('pt-PT', { weekday: 'long', day: '2-digit', month: 'long', timeZone: 'Europe/Lisbon' });
+  return (
+    <div className="no-print" style={{
+      textAlign: 'center', padding: '8px 10px', marginBottom: 8,
+      background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8,
+    }}>
+      <div style={{ fontSize: 22, fontWeight: 600, fontFamily: 'Geist Mono', letterSpacing: '0.02em', color: T.ink, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>
+        {time}
+      </div>
+      <div style={{ fontSize: 10, color: T.inkMute, marginTop: 2, textTransform: 'capitalize' }}>
+        {date}
+      </div>
+    </div>
+  );
+}
+
 function VersionFooter() {
   const [showChangelog, setShowChangelog] = useState(false);
   const buildDt = new Date(APP_BUILD_DATE);
@@ -22817,6 +22843,40 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
     return all.filter(it => canSeeMenuItem(it.id, userRole, isAdmin, uiConfig));
   }, [isAdmin, userRole, uiConfig]);
 
+  // v3.24.0: índice de HISTÓRICO de preços por EAN — agrega o preço de cada
+  // artigo em TODAS as campanhas (cada campanha = um snapshot guardado com data).
+  // Permite ver no Ctrl+K como o preço mudou ao longo das campanhas.
+  const priceIndex = useMemo(() => {
+    const idx = new Map(); // eanKey → { ean, label, fam, points:[{date,periodName,base,camp}] }
+    for (const c of campaigns || []) {
+      if (!c.rows || !c.headers) continue;
+      const cols = detectColumns(c.headers);
+      const date = c.uploaded_at || c.updated_at || c.created_at || null;
+      const period = (periods || []).find(p => p.id === c.periodId);
+      const periodName = period?.name || c.name || '';
+      const seenThisCampaign = new Set();
+      for (const r of c.rows) {
+        const ean = String(r[cols.ean] || '').trim();
+        const eanK = normalizeEAN(ean);
+        if (!eanK || seenThisCampaign.has(eanK)) continue;
+        seenThisCampaign.add(eanK);
+        const descr = cols.description ? String(r[cols.description] || '') : '';
+        const fam = cols.family ? String(r[cols.family] || '') : '';
+        const base = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
+        const camp = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
+        if (base <= 0 && camp <= 0) continue;
+        let e = idx.get(eanK);
+        if (!e) { e = { ean, label: descr || ean, fam, points: [] }; idx.set(eanK, e); }
+        else if (descr && e.label === e.ean) e.label = descr;
+        e.points.push({ date, periodName, base, camp });
+      }
+    }
+    for (const e of idx.values()) {
+      e.points.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+    }
+    return idx;
+  }, [campaigns, periods]);
+
   // Build search results
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -22855,51 +22915,34 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
       });
     });
 
-    // 4. Produtos (limitar a 30 para não rebentar) — só procura se q tem ≥ 2 caracteres
+    // 4. Produtos (limitar a 30) — usa o priceIndex (histórico por EAN).
     if (q.length >= 2) {
-      const prodOut = [];
-      const seen = new Set();
       const isNumeric = /^\d+$/.test(q);
-      const limit = 30;
-      outer: for (const c of campaigns || []) {
-        if (!c.rows || !c.headers) continue;
-        const cols = detectColumns(c.headers);
-        for (const r of c.rows) {
-          const ean = String(r[cols.ean] || '').trim();
-          const eanK = normalizeEAN(ean);
-          if (!eanK) continue;
-          if (seen.has(eanK)) continue;
-          const descr = cols.description ? String(r[cols.description] || '') : '';
-          const fam = cols.family ? String(r[cols.family] || '') : '';
-          let match = false;
-          if (isNumeric && eanK.includes(normalizeEAN(q))) match = true;
-          else if (descr.toLowerCase().includes(q)) match = true;
-          else if (fam.toLowerCase().includes(q)) match = true;
-          if (!match) continue;
-          seen.add(eanK);
-          const period = (periods || []).find(p => p.id === c.periodId);
-          // v3.15.4: incluir preço de campanha + desconto no sub (visibilidade
-          // imediata sem precisar de abrir Alterações). Se não houver preço,
-          // o subParts.filter(Boolean) descarta a string vazia.
-          const basePrice = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
-          const campPrice = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
-          const pct = (basePrice > 0 && campPrice > 0 && campPrice < basePrice)
-            ? Math.round((1 - campPrice / basePrice) * 100)
-            : 0;
-          const priceStr = campPrice
-            ? `${campPrice.toFixed(2)}€${pct ? ` (-${pct}%)` : ''}`
-            : (basePrice ? `${basePrice.toFixed(2)}€` : '');
-          const subParts = [ean, fam, period?.name, priceStr].filter(Boolean);
-          prodOut.push({
-            kind: 'product', id: eanK, ean,
-            label: descr || ean,
-            sub: subParts.join(' · '),
-            periodId: c.periodId,
-          });
-          if (prodOut.length >= limit) break outer;
-        }
+      const qEan = normalizeEAN(q);
+      let count = 0;
+      for (const [eanK, e] of priceIndex) {
+        let match = false;
+        if (isNumeric && qEan && eanK.includes(qEan)) match = true;
+        else if (e.label.toLowerCase().includes(q)) match = true;
+        else if ((e.fam || '').toLowerCase().includes(q)) match = true;
+        if (!match) continue;
+        const last = e.points[e.points.length - 1] || { base: 0, camp: 0 };
+        const pct = (last.base > 0 && last.camp > 0 && last.camp < last.base)
+          ? Math.round((1 - last.camp / last.base) * 100) : 0;
+        const priceStr = last.camp
+          ? `${last.camp.toFixed(2)}€${pct ? ` (-${pct}%)` : ''}`
+          : (last.base ? `${last.base.toFixed(2)}€` : '');
+        const nChanges = new Set(e.points.map(p => (p.camp || p.base))).size;
+        const subParts = [e.ean, e.fam, priceStr, e.points.length > 1 ? `${e.points.length} campanhas` : ''].filter(Boolean);
+        out.push({
+          kind: 'product', id: eanK, ean: e.ean,
+          label: e.label,
+          sub: subParts.join(' · '),
+          priceHistory: e.points,
+          priceChanges: nChanges,
+        });
+        if (++count >= 30) break;
       }
-      out.push(...prodOut);
     }
 
     // 5. Credenciais (cofre) — v3.15.3
@@ -22924,7 +22967,7 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
     }
 
     return out;
-  }, [query, campaigns, periods, viewItems, credentials]);
+  }, [query, campaigns, periods, viewItems, credentials, priceIndex]);
 
   // Reset índice activo quando muda a query
   useEffect(() => { setActiveIdx(0); }, [query]);
@@ -23070,6 +23113,45 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
                     <div style={{ fontSize: 11, color: T.inkMute, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.sub}
                     </div>
+                    {/* v3.24.0: histórico de preços (no resultado activo) */}
+                    {active && r.kind === 'product' && Array.isArray(r.priceHistory) && r.priceHistory.length > 0 && (() => {
+                      // mostra só mudanças de preço (descarta pontos iguais consecutivos)
+                      const pts = [];
+                      for (const p of r.priceHistory) {
+                        const val = p.camp || p.base || 0;
+                        const prev = pts[pts.length - 1];
+                        if (!prev || prev._val !== val) pts.push({ ...p, _val: val });
+                      }
+                      const fmtD = (d) => {
+                        if (!d) return '—';
+                        const dt = new Date(d);
+                        return isNaN(dt.getTime()) ? '—' : dt.toLocaleDateString('pt-PT', { month: 'short', year: '2-digit', timeZone: 'Europe/Lisbon' });
+                      };
+                      return (
+                        <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                          <span className="mono" style={{ fontSize: 9, color: T.inkMute, textTransform: 'uppercase', letterSpacing: '0.08em' }}>Histórico:</span>
+                          {pts.slice(-8).map((p, k) => {
+                            const val = p.camp || p.base || 0;
+                            const prev = k > 0 ? (pts.slice(-8)[k - 1]._val) : null;
+                            const up = prev != null && val > prev;
+                            const down = prev != null && val < prev;
+                            return (
+                              <span key={k} title={p.periodName || ''} style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 3,
+                                fontSize: 10, padding: '2px 6px', borderRadius: 4,
+                                background: T.bgEl, border: `1px solid ${T.line}`,
+                                color: down ? T.green : (up ? (T.red || '#c92a2a') : T.inkSoft),
+                                fontVariantNumeric: 'tabular-nums',
+                              }}>
+                                <span style={{ color: T.inkMute }}>{fmtD(p.date)}</span>
+                                <strong>{val.toFixed(2)}€</strong>
+                                {down && '↓'}{up && '↑'}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <span className="mono" style={{ fontSize: 9, color: T.inkMute, letterSpacing: '0.08em', textTransform: 'uppercase', flexShrink: 0 }}>
                     {r.kind === 'view' ? 'Atalho'
