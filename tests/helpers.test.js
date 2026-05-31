@@ -5,6 +5,7 @@ import {
   _isWorkedCell, _matchSchedCollab, apportionLargestRemainder,
   parsePermanenciasText, _zoneFixtureScore,
 } from '../app/lib/helpers.js';
+import { parseNum } from '../app/lib/format.js';
 
 // v3.23.0: testes contra o código REAL (app/lib/helpers.js), não cópias.
 // Cobrem os bugs corrigidos ao longo das versões 3.21–3.22.
@@ -130,6 +131,31 @@ describe('_matchSchedCollab (match nome ↔ horário)', () => {
   });
   it('sem match → null', () => {
     expect(_matchSchedCollab({ name: 'JOÃO NINGUÉM' }, sched)).toBe(null);
+  });
+});
+
+describe('parseNum (preços PT/EN)', () => {
+  it('formato PT "1.234,56" → 1234.56', () => {
+    expect(parseNum('1.234,56')).toBe(1234.56);
+  });
+  it('formato EN "1,234.56" → 1234.56', () => {
+    expect(parseNum('1,234.56')).toBe(1234.56);
+  });
+  it('decimal PT só com vírgula "32,19" → 32.19', () => {
+    expect(parseNum('32,19')).toBe(32.19);
+  });
+  it('tira € e %', () => {
+    expect(parseNum('19,99€')).toBe(19.99);
+    expect(parseNum('30%')).toBe(30);
+  });
+  it('null/vazio/lixo → 0', () => {
+    expect(parseNum(null)).toBe(0);
+    expect(parseNum('')).toBe(0);
+    expect(parseNum('abc')).toBe(0);
+  });
+  it('número passa directo', () => {
+    expect(parseNum(42)).toBe(42);
+    expect(parseNum(Infinity)).toBe(0);
   });
 });
 

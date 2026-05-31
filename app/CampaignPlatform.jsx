@@ -1884,10 +1884,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.7';
+const APP_VERSION = '3.23.8';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T09:15:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T09:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1897,6 +1897,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.8', date: '2026-05-31', summary: 'Testes para parseNum (parsing de preços PT/EN — função crítica usada em toda a app, agora em lib/format.js): formatos 1.234,56 / 1,234.56 / 32,19, remoção de €/%, null/lixo→0. 36 testes vitest no total.' },
   { version: '3.23.7', date: '2026-05-31', summary: 'Code-splitting (fundação 2/N): componentes/utils partilhados extraídos para módulos lib — Header e Section → app/lib/ui.jsx; parseNum e downloadBlob → app/lib/format.js. O monolito importa-os (os ~110 usos resolvem pelo import, sem mudança de comportamento). Com lib/theme + lib/helpers + lib/ui + lib/format, as vistas já têm de onde importar as dependências partilhadas sem depender do monolito — pré-requisito para extrair vistas grandes (Folhetos, Vendas) para chunks dinâmicos. Build + 30 testes ✓.' },
   { version: '3.23.6', date: '2026-05-31', summary: 'Removido o Editor de PDF da aplicação (temporariamente, a rever mais tarde) — saiu do menu lateral, command palette e render. A função (~1175 linhas) foi removida do ficheiro (recuperável no histórico git). First Load JS desce mais 8 kB (419→411). Limpa o monolito e ajuda o objectivo de code-splitting.' },
   { version: '3.23.5', date: '2026-05-31', summary: 'Code-splitting (passo 1/N): tema extraído para app/lib/theme.js (THEMES, THEME_LABELS, THEME_ORDER, T singleton mutável, applyTheme). T continua a ser o mesmo objecto partilhado (mutado por applyTheme) — zero mudança de comportamento. É a fundação que permite extrair vistas para ficheiros próprios (cada vista vai poder importar T do módulo em vez de depender do monolito). Build + 30 testes ✓.' },
