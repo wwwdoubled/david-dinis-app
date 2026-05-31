@@ -67,6 +67,8 @@ import {
   _isWorkedCell, PT_NAME_ALIASES, _matchSchedCollab, apportionLargestRemainder,
   parsePermanenciasText, _planTokens, _zoneFixtureScore,
 } from './lib/helpers';
+// v3.23.5: tema partilhado (T singleton mutável) — fundação p/ code-splitting
+import { THEMES, THEME_LABELS, THEME_ORDER, T, applyTheme } from './lib/theme';
 
 // ─────────────────────────────────────────────────────────────────────────
 // Supabase client — singleton
@@ -124,66 +126,8 @@ if (typeof window !== 'undefined' && !window.__ddErrorWired) {
 // preferences (theme, last-selected period, filter states).
 const CLOUD_ONLY = true;
 
-// ─────────────────────────────────────────────────────────────────────────
-// Tokens
-// ─────────────────────────────────────────────────────────────────────────
-// ─────────────────────────────────────────────────────────────────────────
-// Theme tokens — mutable object so theme changes apply everywhere
-// (every component reads T.bg, T.line, etc. inline, so when we mutate
-// properties and force a re-render, all UI updates without prop drilling)
-// ─────────────────────────────────────────────────────────────────────────
-const THEMES = {
-  // ── Soft Spatial · light (Direction C) ──────────────────────────
-  // Off-white quente, lavanda como acento, geometria arredondada.
-  light: {
-    bg: '#EFECE3', bgEl: '#FAF7EE', ink: '#1A1814', inkSoft: '#5E594F',
-    inkMute: '#928D80', line: '#DCD5C4', lineSoft: '#E8E2D0',
-    accent: '#6B5BD8', accentSoft: '#E3DEFA',
-    green: '#3F8F5E', red: '#C8473A', orange: '#D17B2A',
-    blue: '#3F6FC8', cyan: '#CFE3F2', yellow: '#E8C268',
-    purple: '#6B5BD8',
-    cellAlt: '#E6E2D6',
-    paper: '#FAF7EE',
-  },
-  // ── Soft Spatial · dark ─────────────────────────────────────────
-  dark: {
-    bg: '#13120E', bgEl: '#1E1C16', ink: '#F0EBE0', inkSoft: '#B0AA9A',
-    inkMute: '#7A7568', line: '#2A271F', lineSoft: '#221F18',
-    accent: '#9C8CF5', accentSoft: '#251F44',
-    green: '#74C28B', red: '#E26B5C', orange: '#E8A55A',
-    blue: '#8FB6E8', cyan: '#2A4658', yellow: '#E8C268',
-    purple: '#9C8CF5',
-    cellAlt: '#181610',
-    paper: '#1E1C16',
-  },
-  // FNAC Portugal — primary brand orange + black + white grid
-  fnac: {
-    bg: '#F4F4F4', bgEl: '#FFFFFF', ink: '#000000', inkSoft: '#3A3A3A',
-    inkMute: '#7A7A7A', line: '#D9D9D9', lineSoft: '#ECECEC',
-    accent: '#E68A00', accentSoft: '#FFE9C7', // FNAC orange
-    green: '#2E8540', red: '#D81B1B', orange: '#E68A00',
-    blue: '#1F4FB3', cyan: '#CFE7F8', yellow: '#FFCB05',
-    purple: '#6A3FB0',
-    cellAlt: '#EFEFEF',
-    paper: '#FFFFFF',
-  },
-};
-
-const THEME_LABELS = {
-  light: 'Claro',
-  dark: 'Escuro',
-  fnac: 'FNAC',
-};
-
-const THEME_ORDER = ['light', 'dark', 'fnac'];
-
-// Mutable T — properties updated when theme changes. Start in light mode.
-const T = { ...THEMES.light };
-
-function applyTheme(mode) {
-  const palette = THEMES[mode] || THEMES.light;
-  Object.assign(T, palette);
-}
+// Tokens de tema → app/lib/theme.js (v3.23.5). T é singleton mutável partilhado.
+// (THEMES, THEME_LABELS, THEME_ORDER, T, applyTheme importados no topo do ficheiro.)
 
 const STATES = [
   { id: 'pending', label: '—', bg: '#F2EDE3', fg: T.inkSoft },
@@ -1937,10 +1881,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.23.4';
+const APP_VERSION = '3.23.5';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T07:35:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T08:10:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1950,6 +1894,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.23.5', date: '2026-05-31', summary: 'Code-splitting (passo 1/N): tema extraído para app/lib/theme.js (THEMES, THEME_LABELS, THEME_ORDER, T singleton mutável, applyTheme). T continua a ser o mesmo objecto partilhado (mutado por applyTheme) — zero mudança de comportamento. É a fundação que permite extrair vistas para ficheiros próprios (cada vista vai poder importar T do módulo em vez de depender do monolito). Build + 30 testes ✓.' },
   { version: '3.23.4', date: '2026-05-31', summary: 'Mais cobertura de testes: parsePermanenciasText (parser do horário PDF colado), _planTokens e _zoneFixtureScore (match zona da campanha ↔ móvel da planta) extraídos para app/lib/helpers.js e testados. 30 testes vitest no total (era 25). Sem mudança de comportamento — refactor + rede de segurança que continua a preparar o terreno para o code-splitting.' },
   { version: '3.23.3', date: '2026-05-31', summary: 'Robustez: (A) FIX CI — package-lock.json estava dessincronizado (faltavam jsbarcode, vitest e deps), por isso "npm ci" falhava e o CI estava VERMELHO em cada push. Lock regenerado e em sync → CI passa (testes + build). (B) Error boundary POR VISTA (ViewBoundary): se uma secção crashar, mostra um fallback "Tentar de novo / Recarregar" só nessa área em vez de derrubar a app inteira (a boundary global de page.js era o único nível). Reinicia ao mudar de secção (key={view}). Todas as vistas (Dashboard, Campanhas, Vendas, Alterações, Stock, Inventário, Folhetos, PPs, Admin, etc.) ficam isoladas.' },
   { version: '3.23.2', date: '2026-05-31', summary: 'Performance: XLSX carregado dinamicamente. Antes import * as XLSX estava no bundle inicial (~400 kB descomprimido) embora só usado pós-upload/export. Agora singleton lazy getXLSX() (await import("xlsx")) carregado só quando há ficheiro. First Load JS: 461→419 kB (página 461→332 kB). Convertidos para async: parseExcelSmart (+3 callers), parseFnacSalesExcelMainThread, parsePlantaExcel, parsePenetrationExcel, parseCounterSalesExcel, import de devoluções; exports (Pedido GU, inventário, devoluções) com await getXLSX(). Sem mudança de comportamento. Fecha a Fase A (extração de helpers + testes + fix cross-sell + XLSX lazy).' },
