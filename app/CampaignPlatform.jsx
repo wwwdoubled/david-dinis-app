@@ -1884,10 +1884,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.24.0';
+const APP_VERSION = '3.24.1';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T10:15:00+01:00';
+const APP_BUILD_DATE = '2026-05-31T11:00:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1897,6 +1897,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.24.1', date: '2026-05-31', summary: 'Histórico de preços durável (tabela price_history). Nova migration price_history (log append-only por artigo, RLS read/insert authed + delete admin). No upload de campanha, a app compara os preços novos com o último conhecido das campanhas em memória e regista SÓ as mudanças reais (changed-only → tabela mantém-se pequena), best-effort (try/catch, não bloqueia o upload). cloudRecordPriceHistory (insert em lotes de 500) + cloudFetchPriceHistoryForEan (on-demand por EAN). No Ctrl+K, ao seleccionar um artigo, busca o histórico da cloud e funde-o com o derivado das campanhas (ordenado por data, só mudanças). Persiste mesmo que a campanha seja substituída/apagada. Degrada graciosamente: se a tabela não existir, usa só o histórico das campanhas (v3.24.0). Requer correr a migration no Supabase.' },
   { version: '3.24.0', date: '2026-05-31', summary: 'Relógio + histórico de preços no Ctrl+K. (A) LiveClock: relógio ao vivo (hora de Portugal, HH:MM:SS + dia/mês) no rodapé da barra lateral, visível para todos os utilizadores, actualiza a cada segundo. (B) Histórico de preços no Ctrl+K: novo priceIndex agrega o preço de cada artigo em TODAS as campanhas (cada campanha já é um snapshot guardado com data). Ao procurar um artigo (EAN/nome/família) no Ctrl+K e seleccioná-lo, mostra a evolução do preço ao longo das campanhas — chips "Mai/26 19,99€ → Jun/26 17,99€" com ↓ verde (desceu) / ↑ vermelho (subiu), só as mudanças reais. O sub do resultado indica também em quantas campanhas o artigo apareceu. Sem tabela nova — deriva das campanhas existentes.' },
   { version: '3.23.8', date: '2026-05-31', summary: 'Testes para parseNum (parsing de preços PT/EN — função crítica usada em toda a app, agora em lib/format.js): formatos 1.234,56 / 1,234.56 / 32,19, remoção de €/%, null/lixo→0. 36 testes vitest no total.' },
   { version: '3.23.7', date: '2026-05-31', summary: 'Code-splitting (fundação 2/N): componentes/utils partilhados extraídos para módulos lib — Header e Section → app/lib/ui.jsx; parseNum e downloadBlob → app/lib/format.js. O monolito importa-os (os ~110 usos resolvem pelo import, sem mudança de comportamento). Com lib/theme + lib/helpers + lib/ui + lib/format, as vistas já têm de onde importar as dependências partilhadas sem depender do monolito — pré-requisito para extrair vistas grandes (Folhetos, Vendas) para chunks dinâmicos. Build + 30 testes ✓.' },
@@ -3349,6 +3350,53 @@ async function cloudFetchAllCampaigns() {
     const r = rowsById.get(c.id);
     return r ? { ...c, rows: r.rows, itemCount: r.itemCount, _needsRows: false } : c;
   });
+}
+
+// v3.24.1: histórico de preços (tabela price_history). Best-effort — se a
+// tabela não existir ou falhar, a app continua (usa o histórico derivado das
+// campanhas). Insere em lotes para não rebentar com payloads grandes.
+async function cloudRecordPriceHistory(points, { storeId, userId } = {}) {
+  if (!supabase || !Array.isArray(points) || points.length === 0) return { ok: false, inserted: 0 };
+  const rows = points.map(p => ({
+    store_id: storeId || null,
+    ean: String(p.ean || ''),
+    ean_norm: String(p.eanNorm || ''),
+    name: p.name || null,
+    family: p.family || null,
+    base_price: p.base != null ? p.base : null,
+    campaign_price: p.camp != null ? p.camp : null,
+    discount_pct: p.pct != null ? p.pct : null,
+    source: p.source || 'campaign_upload',
+    period_id: (p.periodId && isUUID(p.periodId)) ? p.periodId : null,
+    campaign_name: p.campaignName || null,
+    created_by: userId || null,
+  }));
+  let inserted = 0;
+  try {
+    for (let i = 0; i < rows.length; i += 500) {
+      const batch = rows.slice(i, i + 500);
+      const { error } = await supabase.from('price_history').insert(batch);
+      if (error) { console.warn('[price_history] insert falhou:', error.message); return { ok: false, inserted, error: error.message }; }
+      inserted += batch.length;
+    }
+  } catch (e) {
+    console.warn('[price_history] erro:', e?.message || e);
+    return { ok: false, inserted, error: String(e) };
+  }
+  return { ok: true, inserted };
+}
+
+async function cloudFetchPriceHistoryForEan(eanNorm, storeId) {
+  if (!supabase || !eanNorm) return [];
+  let q = supabase.from('price_history')
+    .select('ean, name, base_price, campaign_price, discount_pct, period_id, campaign_name, captured_at, source')
+    .eq('ean_norm', eanNorm)
+    .order('captured_at', { ascending: true })
+    .limit(60);
+  if (storeId) q = q.eq('store_id', storeId);
+  const { data, error } = await q;
+  if (error) { /* tabela pode não existir ainda */ return []; }
+  return data || [];
 }
 
 async function cloudUpsertCampaign(campaign, userId, opts = {}) {
@@ -6663,6 +6711,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           isAdmin={isAdmin}
           uiConfig={uiConfig}
           userProfile={userProfile}
+          currentStoreId={currentStoreId}
           onClose={() => setGlobalSearchOpen(false)}
           onNavigatePeriod={(periodId) => {
             storeSet('campaigns.selectedPeriodId', periodId);
@@ -11591,6 +11640,52 @@ function ImportButton({ onImport }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// v3.24.1: helpers do histórico de preços (price_history)
+// ─────────────────────────────────────────────────────────────────────────
+// Extrai 1 ponto de preço por EAN de um conjunto de rows de campanha.
+function _extractCampaignPrices(rows, headers) {
+  const cols = detectColumns(headers || []);
+  const out = new Map(); // eanNorm → { ean, eanNorm, name, family, base, camp, pct }
+  for (const r of (rows || [])) {
+    const ean = String(r[cols.ean] || '').trim();
+    const eanNorm = normalizeEAN(ean);
+    if (!eanNorm || out.has(eanNorm)) continue;
+    const base = cols.basePrice ? parseNum(r[cols.basePrice]) : 0;
+    const camp = cols.campaignPrice ? parseNum(r[cols.campaignPrice]) : 0;
+    if (base <= 0 && camp <= 0) continue;
+    const pct = (base > 0 && camp > 0 && camp < base) ? Math.round((1 - camp / base) * 100) : 0;
+    out.set(eanNorm, {
+      ean, eanNorm,
+      name: cols.description ? String(r[cols.description] || '') : '',
+      family: cols.family ? String(r[cols.family] || '') : '',
+      base, camp, pct,
+    });
+  }
+  return out;
+}
+// Último preço conhecido por EAN, das campanhas existentes (exclui `excludeKey`).
+function _buildLatestPriceMap(campaigns, excludeKey) {
+  const sorted = [...(campaigns || [])].filter(c => c.key !== excludeKey)
+    .sort((a, b) => String(a.uploaded_at || a.updatedAt || a.created_at || '')
+      .localeCompare(String(b.uploaded_at || b.updatedAt || b.created_at || '')));
+  const map = new Map();
+  for (const c of sorted) {
+    if (!c.rows || !c.headers) continue;
+    for (const [k, v] of _extractCampaignPrices(c.rows, c.headers)) map.set(k, { base: v.base, camp: v.camp });
+  }
+  return map;
+}
+// Só os EANs cujo preço mudou vs o último conhecido (ou novos).
+function _diffPricePoints(newPrices, latestMap) {
+  const changed = [];
+  for (const [k, v] of newPrices) {
+    const prev = latestMap.get(k);
+    if (!prev || prev.base !== v.base || prev.camp !== v.camp) changed.push(v);
+  }
+  return changed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // CampaignsView — main listing/plan/output for campaigns
 // ─────────────────────────────────────────────────────────────────────────
 function CampaignsView({
@@ -11935,6 +12030,22 @@ function CampaignsView({
       setUploadStatus({ kind: 'error', message: `Erro ao processar o Excel: ${e?.message || e}` });
       return;
     }
+
+    // v3.24.1: regista mudanças de preço no histórico (best-effort, não bloqueia).
+    // Só grava EANs cujo preço difere do último conhecido nas campanhas existentes.
+    try {
+      if (user && supabase) {
+        const newPrices = _extractCampaignPrices(rows, headers);
+        const latest = _buildLatestPriceMap(campaigns, key);
+        const changed = _diffPricePoints(newPrices, latest);
+        if (changed.length > 0) {
+          cloudRecordPriceHistory(
+            changed.map(p => ({ ...p, periodId: selectedPeriodId || null, campaignName: file.name, source: 'campaign_upload' })),
+            { storeId: currentStoreId, userId: user.id }
+          ).then(res => { if (res?.ok && res.inserted) console.log('[price_history]', res.inserted, 'mudanças de preço registadas'); });
+        }
+      }
+    } catch (e) { console.warn('[price_history] skip:', e?.message || e); }
 
     // If a campaign with the same key is already loaded, replace its rows + headers
     // and ALWAYS align its periodId with the currently selected period (fixes the
@@ -22801,10 +22912,11 @@ function buildBlueprint(campaigns, defaultLayout, periods) {
 // Pesquisa em períodos, campanhas, produtos (EAN/desc/família) e atalhos
 // Navega com ↑↓, abre com Enter, fecha com Esc.
 // ─────────────────────────────────────────────────────────────────────────
-function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin, uiConfig, userProfile, onClose, onNavigatePeriod, onNavigateView }) {
+function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin, uiConfig, userProfile, currentStoreId, onClose, onNavigatePeriod, onNavigateView }) {
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [credentials, setCredentials] = useState([]); // v3.15.3: lazy load on mount
+  const [cloudHist, setCloudHist] = useState({}); // v3.24.1: eanNorm → points[] (cache)
   const inputRef = useRef(null);
   const listRef = useRef(null);
 
@@ -22972,6 +23084,22 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
   // Reset índice activo quando muda a query
   useEffect(() => { setActiveIdx(0); }, [query]);
 
+  // v3.24.1: busca o histórico de preços da cloud para o produto activo (on-demand, cache)
+  useEffect(() => {
+    const r = results[activeIdx];
+    if (!r || r.kind !== 'product') return;
+    const ean = r.id; // eanNorm
+    if (ean in cloudHist) return;
+    setCloudHist(prev => ({ ...prev, [ean]: 'loading' }));
+    cloudFetchPriceHistoryForEan(ean, currentStoreId).then(rows => {
+      const pts = (rows || []).map(x => ({
+        date: x.captured_at, periodName: x.campaign_name || '',
+        base: Number(x.base_price) || 0, camp: Number(x.campaign_price) || 0,
+      }));
+      setCloudHist(prev => ({ ...prev, [ean]: pts }));
+    }).catch(() => setCloudHist(prev => ({ ...prev, [ean]: [] })));
+  }, [activeIdx, results, currentStoreId]); // eslint-disable-line
+
   // Scroll do item activo para a vista
   useEffect(() => {
     const el = listRef.current && listRef.current.querySelector('[data-active="true"]');
@@ -23113,11 +23241,17 @@ function GlobalSearch({ campaigns, periods, stockRowsPO2, stockRowsPO3, isAdmin,
                     <div style={{ fontSize: 11, color: T.inkMute, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {r.sub}
                     </div>
-                    {/* v3.24.0: histórico de preços (no resultado activo) */}
-                    {active && r.kind === 'product' && Array.isArray(r.priceHistory) && r.priceHistory.length > 0 && (() => {
+                    {/* v3.24.0/.1: histórico de preços (cloud + campanhas) no resultado activo */}
+                    {active && r.kind === 'product' && (() => {
+                      const cloud = Array.isArray(cloudHist[r.id]) ? cloudHist[r.id] : [];
+                      // combina cloud (durável) + in-memory (campanhas carregadas), ordena por data
+                      const all = [...cloud, ...(Array.isArray(r.priceHistory) ? r.priceHistory : [])]
+                        .filter(p => (p.camp || p.base))
+                        .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+                      if (all.length === 0) return null;
                       // mostra só mudanças de preço (descarta pontos iguais consecutivos)
                       const pts = [];
-                      for (const p of r.priceHistory) {
+                      for (const p of all) {
                         const val = p.camp || p.base || 0;
                         const prev = pts[pts.length - 1];
                         if (!prev || prev._val !== val) pts.push({ ...p, _val: val });
