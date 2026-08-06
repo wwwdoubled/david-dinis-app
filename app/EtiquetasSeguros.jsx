@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   parsePrintTexto, parseCatalogoAoa, deduzCategoria,
-  catalogoDeVendas, segurosParaArtigo,
+  catalogoDeVendas, segurosParaArtigo, categoriaDoArtigo,
 } from "./lib/etiquetasParser";
 
 /* ------------------------------------------------------------------ */
@@ -714,11 +714,11 @@ export default function EtiquetasSeguros({ rows = [] }) {
     [catalogoApp]
   );
 
-  const etiquetaDoArtigo = (artigo, categoria) => {
+  const etiquetaDoArtigo = useCallback((artigo, categoria) => {
     const linhas = segurosParaArtigo(catalogoApp, categoria, artigo.pvp);
     if (!linhas.length) {
       setErro("Não há seguros desta categoria nos dados de vendas carregados.");
-      return;
+      return false;
     }
     const c = CATEGORIAS[categoria];
     const n = novaEtiqueta(categoria, {
@@ -730,7 +730,29 @@ export default function EtiquetasSeguros({ rows = [] }) {
     setErro("");
     setEtiquetas((l) => [...l, n]);
     setSelId(n.id);
-  };
+    return true;
+  }, [catalogoApp]);
+
+  /* ---------- EAN → etiqueta pronta, sem cliques ----------
+     Escrever ou ler com a pistola um EAN que existe nos dados de vendas
+     preenche a etiqueta de uma vez: o artigo dá o PVP (logo, o escalão) e a
+     designação dá a família. Se a família não for clara, pergunta-se. */
+  useEffect(() => {
+    const q = procura.trim();
+    if (!/^\d{6,}$/.test(q)) return;
+
+    const achados = artigos.filter((a) => String(a.ean || "").replace(/^0+/, "") === q.replace(/^0+/, ""));
+    if (achados.length !== 1) return;
+
+    const artigo = achados[0];
+    const categoria = categoriaDoArtigo(artigo.name);
+    if (categoria && CATEGORIAS[categoria] && catalogoApp.some((c) => c.categoria === categoria)) {
+      if (etiquetaDoArtigo(artigo, categoria)) setProcura("");
+    } else {
+      // família por confirmar — mostra os botões em vez de arriscar
+      setArtigoSel(artigo);
+    }
+  }, [procura, artigos, catalogoApp, etiquetaDoArtigo]);
 
   const catalogoFiltrado = React.useMemo(() => {
     const q = procura.trim().toUpperCase();
@@ -899,9 +921,13 @@ export default function EtiquetasSeguros({ rows = [] }) {
                     {catalogoApp.length} seguros e {artigos.length} artigos vindos da Análise de
                     Vendas — sem precisares de carregar nada.
                   </div>
-                  <label className="f" style={{ marginTop: 12 }}>Procurar o artigo</label>
-                  <input type="text" value={procura} placeholder="EAN ou designação do artigo…"
+                  <label className="f" style={{ marginTop: 12 }}>EAN ou designação do artigo</label>
+                  <input type="text" value={procura} autoFocus
+                    placeholder="Lê o código de barras ou escreve o nome…"
                     onChange={(e) => setProcura(e.target.value)} />
+                  <p className="hint">
+                    Um EAN completo cria a etiqueta sozinho — podes usar a pistola.
+                  </p>
                   {artigosFiltrados.length > 0 && !artigoSel && (
                     <div className="cat">
                       {artigosFiltrados.map((a, i) => (

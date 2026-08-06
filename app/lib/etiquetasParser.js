@@ -130,6 +130,37 @@ export function parsePrintTexto(texto) {
 }
 
 /**
+ * Deduz a categoria de seguro a partir da designação de um EQUIPAMENTO
+ * (não de um seguro). Serve para preencher a etiqueta só com o EAN.
+ *
+ * Devolve "" quando não há certeza — nesse caso o interface pergunta, em vez
+ * de arriscar a tabela de preços errada.
+ *
+ * @param {string} desc  designação do artigo, ex. "APPLE MACBOOK AIR 13 M3"
+ * @returns {string} chave de CATEGORIAS, ou ""
+ */
+export function categoriaDoArtigo(desc) {
+  const d = String(desc || '').toUpperCase();
+  if (!d) return '';
+
+  // Recondicionados ganha a tudo — é uma tabela de preços própria
+  if (/\bRECOND|\bSEMINOVO|\bREFURB/.test(d)) return 'Recondicionados';
+
+  if (/\b(TELM|TELEM|TELEMOV|SMTP|SMARTPHONE|TLM|IPHONE|GALAXY\s+S|PIXEL)\b/.test(d)) return 'Telecom';
+  if (/\b(TABLET|TAB|IPAD)\b/.test(d)) return 'Telecom';
+  if (/\b(TV|LCD|LED|OLED|QLED)\b/.test(d)) return 'TV';
+  // prefixos, não palavras inteiras: "AUSCULTADORES", "EARBUDS", "PORTÁTIL"
+  if (/\b(AUSCUL|HEADPHONE|EARBUD|COLUNA|SOUNDBAR|BARRA\s+SOM|AIRPODS|HIFI)/.test(d)) return 'Som';
+  if (/\b(NOTEB|PORT[ÁA]TIL|LAPTOP|MACBOOK|DESKTOP|MONITOR|IMAC)/.test(d)) return 'Informática';
+  if (/\b(FOTO|C[ÂA]MARA|CAMERA|GOPRO|LENTE|REFLEX|MIRRORLESS)/.test(d)) return 'Foto';
+  if (/\b(COZ&LAR|ASPIRADOR|M[ÁA]QUINA\s+CAF[ÉE]|FRITADEIRA|MICROONDAS)/.test(d)) return 'Casa';
+
+  // Deliberadamente sem regra para drones, gaming e mobilidade eléctrica:
+  // a família de seguro varia e não vale a pena adivinhar.
+  return '';
+}
+
+/**
  * Extrai o intervalo de escalão de uma designação, ANTES de a normalizar.
  * "SEG DDR FOTO 1 ANO (1001-1500)" -> { min: 1001, max: 1500 }
  * Devolve null quando a designação não tem escalão.

@@ -9,6 +9,7 @@ import {
   extraiEscalao,
   catalogoDeVendas,
   segurosParaArtigo,
+  categoriaDoArtigo,
 } from '../app/lib/etiquetasParser.js';
 
 describe('normalizaNome', () => {
@@ -230,5 +231,30 @@ describe('segurosParaArtigo', () => {
   it('aguenta catálogo vazio', () => {
     expect(segurosParaArtigo([], 'Foto', 100)).toEqual([]);
     expect(segurosParaArtigo(null, 'Foto', 100)).toEqual([]);
+  });
+});
+
+describe('categoriaDoArtigo', () => {
+  it('classifica os casos claros', () => {
+    expect(categoriaDoArtigo('APPLE MACBOOK AIR 13 M3 16GB')).toBe('Informática');
+    expect(categoriaDoArtigo('APPLE IPHONE 15 128GB PRETO')).toBe('Telecom');
+    expect(categoriaDoArtigo('SAMSUNG GALAXY TAB S9')).toBe('Telecom');
+    expect(categoriaDoArtigo('LG TV OLED 55C5 4K')).toBe('TV');
+    expect(categoriaDoArtigo('SONY AUSCULTADORES WH-1000XM5')).toBe('Som');
+    expect(categoriaDoArtigo('CANON CAMARA EOS R50')).toBe('Foto');
+    expect(categoriaDoArtigo('ASPIRADOR DYSON V15')).toBe('Casa');
+  });
+
+  it('recondicionados ganham a tudo', () => {
+    expect(categoriaDoArtigo('IPHONE 14 RECONDICIONADO')).toBe('Recondicionados');
+    expect(categoriaDoArtigo('MACBOOK PRO REFURB')).toBe('Recondicionados');
+  });
+
+  it('devolve vazio quando não há certeza', () => {
+    expect(categoriaDoArtigo('DJI MAVIC 3 DRONE')).toBe('');
+    expect(categoriaDoArtigo('PLAYSTATION 5 SLIM')).toBe('');
+    expect(categoriaDoArtigo('TROTINETE XIAOMI')).toBe('');
+    expect(categoriaDoArtigo('')).toBe('');
+    expect(categoriaDoArtigo(null)).toBe('');
   });
 });

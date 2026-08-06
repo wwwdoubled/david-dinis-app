@@ -20,7 +20,7 @@ tests/etiquetasParser.test.js 18 testes ao parser
 |---|---|---|
 | **Colar texto** | Copias a lista do ecrã Planos Proteção e colas. Um parser por regex extrai designações, preços, franquia e deduz a categoria. Linha em branco separa artigos. | O caminho normal. Rápido e exacto. |
 | **Manual** | Escolhes a categoria e a etiqueta nasce com as designações e coberturas habituais; escreves só os preços. | Quando não há acesso ao ecrã, ou para uma etiqueta pontual. |
-| **Catálogo** | Usa as linhas de vendas **já carregadas na app** (`stockRowsPO2/PO3`), sem upload nenhum: procuras o artigo por EAN ou nome, escolhes a família, e o preço do artigo determina o **escalão** de cada seguro. Se não houver dados em memória, podes importar o ficheiro de vendas à parte. | O caminho mais rápido e mais exacto. |
+| **Catálogo** | Usa as linhas de vendas **já carregadas na app** (`stockRowsPO2/PO3`), sem upload nenhum: escreves (ou lês com a pistola) o **EAN** e a etiqueta sai feita: o PVP do artigo determina o **escalão** de cada seguro e a designação determina a família. Se a família não for clara — drones, gaming, mobilidade — pergunta em vez de adivinhar. Se não houver dados em memória, podes importar o ficheiro de vendas à parte. | O caminho mais rápido e mais exacto. |
 | **Print (OCR)** | Arrastas o print ou fotografas; o `tesseract.js` (carregado do CDN, só quando usado) faz o reconhecimento no browser e o texto passa pelo mesmo parser. | Último recurso — engana-se nos números. Confere sempre os preços. |
 
 ## Regras do parser
