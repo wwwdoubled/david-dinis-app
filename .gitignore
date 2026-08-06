@@ -42,5 +42,6 @@ supabase/.temp/
 # misc projects
 /shots-analyzer/
 
-# script temporario de publicacao (local)
+# scripts temporarios de publicacao (locais, nao fazem parte da app)
 push.command
+commit.command
