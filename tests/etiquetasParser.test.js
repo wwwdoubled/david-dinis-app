@@ -6,6 +6,9 @@ import {
   deduzCategoria,
   parsePrintTexto,
   parseCatalogoAoa,
+  extraiEscalao,
+  catalogoDeVendas,
+  segurosParaArtigo,
 } from '../app/lib/etiquetasParser.js';
 
 describe('normalizaNome', () => {
@@ -143,5 +146,89 @@ describe('parseCatalogoAoa', () => {
     expect(parseCatalogoAoa([['a', 'b'], ['x', 'y']])).toEqual([]);
     expect(parseCatalogoAoa([])).toEqual([]);
     expect(parseCatalogoAoa(null)).toEqual([]);
+  });
+});
+
+describe('extraiEscalao', () => {
+  it('lê o intervalo antes da normalização', () => {
+    expect(extraiEscalao('SEG DDR FOTO 1 ANO (1001-1500)')).toEqual({ min: 1001, max: 1500 });
+    expect(extraiEscalao('SEG DDR TV 2 ANOS (1449,96-1999,95)')).toEqual({ min: 1449.96, max: 1999.95 });
+    expect(extraiEscalao('SEG X (0-250)')).toEqual({ min: 0, max: 250 });
+  });
+  it('devolve null quando não há escalão', () => {
+    expect(extraiEscalao('SEG DDR FOTO 1 ANO')).toBeNull();
+    expect(extraiEscalao('')).toBeNull();
+  });
+});
+
+describe('catalogoDeVendas', () => {
+  const rows = [
+    { name: 'SEG DDR INFORMATICA 1 ANO (0-250)', pvp: 29.99, qty: 1 },
+    { name: 'SEG DDR INFORMATICA 1 ANO (0-250)', pvp: 29.99, qty: 1 },
+    { name: 'SEG DDR INFORMATICA 1 ANO (0-250)', pvp: 19.99, qty: 1 }, // desconto pontual
+    { name: 'SEG DDR INFORMATICA 1 ANO (1001-1500)', pvp: 163.99, qty: 1 },
+    { name: 'APPLE MACBOOK AIR 13 M3', pvp: 1299, qty: 1 },
+    { name: 'SEG DDR FOTO 2 ANOS', pvp: -49.99, qty: -1 }, // devolução
+  ];
+
+  it('separa escalões da mesma designação', () => {
+    const cat = catalogoDeVendas(rows);
+    const inf = cat.filter((c) => c.nome === 'SEG DDR INFORMATICA 1 ANOS');
+    expect(inf).toHaveLength(2);
+    expect(inf.map((c) => c.escalao)).toEqual(
+      expect.arrayContaining([{ min: 0, max: 250 }, { min: 1001, max: 1500 }])
+    );
+  });
+
+  it('escolhe o preço mais frequente, ignorando descontos pontuais', () => {
+    const cat = catalogoDeVendas(rows);
+    const baixo = cat.find((c) => c.escalao?.max === 250);
+    expect(baixo.preco).toBe('29,99 €');
+    expect(baixo.ocorrencias).toBe(3);
+  });
+
+  it('exclui artigos e devoluções', () => {
+    const cat = catalogoDeVendas(rows);
+    expect(cat.some((c) => /MACBOOK/.test(c.nome))).toBe(false);
+    expect(cat.some((c) => /FOTO/.test(c.nome))).toBe(false);
+  });
+
+  it('aguenta entrada inválida', () => {
+    expect(catalogoDeVendas(null)).toEqual([]);
+    expect(catalogoDeVendas([])).toEqual([]);
+    expect(catalogoDeVendas([{ name: null }, {}])).toEqual([]);
+  });
+});
+
+describe('segurosParaArtigo', () => {
+  const cat = catalogoDeVendas([
+    { name: 'SEG DDR INFORMATICA 1 ANO (0-250)', pvp: 29.99, qty: 1 },
+    { name: 'SEG DDR INFORMATICA 1 ANO (1001-1500)', pvp: 163.99, qty: 1 },
+    { name: 'SEG-EXT. GARANTIA LAPTOP +3 ANOS', pvp: 99.9, qty: 1 },
+  ]);
+
+  it('escolhe o escalão que cobre o preço do artigo', () => {
+    const r = segurosParaArtigo(cat, 'Informática', 1299);
+    expect(r.find((x) => x.nome === 'SEG DDR INFORMATICA 1 ANOS').preco).toBe('163,99 €');
+  });
+
+  it('muda de escalão quando o artigo é mais barato', () => {
+    const r = segurosParaArtigo(cat, 'Informática', 199);
+    expect(r.find((x) => x.nome === 'SEG DDR INFORMATICA 1 ANOS').preco).toBe('29,99 €');
+  });
+
+  it('deixa o preço vazio se o artigo cai fora de todos os escalões', () => {
+    const r = segurosParaArtigo(cat, 'Informática', 5000);
+    expect(r.find((x) => x.nome === 'SEG DDR INFORMATICA 1 ANOS').preco).toBe('');
+  });
+
+  it('mantém as designações sem escalão', () => {
+    const r = segurosParaArtigo(cat, 'Informática', 1299);
+    expect(r.find((x) => x.nome === 'SEG-EXT. GARANTIA LAPTOP +3 ANOS').preco).toBe('99,90 €');
+  });
+
+  it('aguenta catálogo vazio', () => {
+    expect(segurosParaArtigo([], 'Foto', 100)).toEqual([]);
+    expect(segurosParaArtigo(null, 'Foto', 100)).toEqual([]);
   });
 });

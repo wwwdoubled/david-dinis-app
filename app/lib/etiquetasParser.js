@@ -130,6 +130,123 @@ export function parsePrintTexto(texto) {
 }
 
 /**
+ * Extrai o intervalo de escalão de uma designação, ANTES de a normalizar.
+ * "SEG DDR FOTO 1 ANO (1001-1500)" -> { min: 1001, max: 1500 }
+ * Devolve null quando a designação não tem escalão.
+ */
+export function extraiEscalao(bruto) {
+  const m = /\(\s*(\d[\d .,]*)\s*-\s*(\d[\d .,]*)\s*\)/.exec(String(bruto || ''));
+  if (!m) return null;
+  const num = (s) => parseFloat(s.replace(/[ .](?=\d{3}\b)/g, '').replace(',', '.'));
+  const min = num(m[1]);
+  const max = num(m[2]);
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+  return { min, max };
+}
+
+/**
+ * Constrói o catálogo a partir das linhas de vendas que a aplicação já tem
+ * carregadas (stockRowsPO2 / stockRowsPO3) — sem pedir upload nenhum.
+ *
+ * Cada linha traz { name, pvp, qty }. As designações de seguro guardam o
+ * escalão de valor do artigo entre parênteses, o que nos permite depois
+ * escolher o preço certo para um artigo concreto.
+ *
+ * @param {Array<{name:string, pvp:number, qty:number}>} rows
+ * @returns {Array<{nome:string, escalao:{min:number,max:number}|null,
+ *                  preco:string, valor:number, ocorrencias:number, categoria:string}>}
+ */
+export function catalogoDeVendas(rows) {
+  if (!Array.isArray(rows)) return [];
+
+  const mapa = new Map();
+
+  for (const r of rows) {
+    if (!r || !r.name) continue;
+    const bruto = String(r.name);
+    const nome = normalizaNome(bruto);
+    if (!nome || !RE_LINHA_SERVICO.test(nome)) continue;
+
+    // ignora devoluções — preço negativo ou quantidade negativa
+    const valor = Number(r.pvp);
+    if (!Number.isFinite(valor) || valor <= 0) continue;
+    if (Number(r.qty) < 0) continue;
+
+    const escalao = extraiEscalao(bruto);
+    const chave = nome + '|' + (escalao ? escalao.min + '-' + escalao.max : '');
+
+    const prev = mapa.get(chave) || { nome, escalao, valores: [], ocorrencias: 0 };
+    prev.ocorrencias += 1;
+    prev.valores.push(Math.round(valor * 100) / 100);
+    mapa.set(chave, prev);
+  }
+
+  return Array.from(mapa.values())
+    .map((e) => {
+      // o preço mais frequente — imune a linhas com desconto pontual
+      const contagem = new Map();
+      for (const v of e.valores) contagem.set(v, (contagem.get(v) || 0) + 1);
+      const top = Array.from(contagem.entries()).sort((a, b) => b[1] - a[1])[0];
+      const valor = top ? top[0] : 0;
+      return {
+        nome: e.nome,
+        escalao: e.escalao,
+        valor,
+        preco: valor.toFixed(2).replace('.', ',') + ' €',
+        ocorrencias: e.ocorrencias,
+        categoria: deduzCategoria([e.nome]),
+      };
+    })
+    .sort((a, b) => b.ocorrencias - a.ocorrencias);
+}
+
+/**
+ * Dado o catálogo e o preço de um artigo, devolve as linhas de seguro
+ * aplicáveis — escolhendo automaticamente o escalão certo.
+ *
+ * @param {Array} catalogo   saída de catalogoDeVendas
+ * @param {string} categoria "Foto", "Informática", …
+ * @param {number} precoArtigo  PVP do artigo, com IVA
+ * @returns {Array<{nome:string, preco:string}>}
+ */
+export function segurosParaArtigo(catalogo, categoria, precoArtigo) {
+  if (!Array.isArray(catalogo)) return [];
+  const p = Number(precoArtigo);
+
+  const doGrupo = catalogo.filter((c) => !categoria || c.categoria === categoria);
+
+  // agrupa por designação; dentro de cada uma escolhe o escalão que cobre o preço
+  const porNome = new Map();
+  for (const c of doGrupo) {
+    const lista = porNome.get(c.nome) || [];
+    lista.push(c);
+    porNome.set(c.nome, lista);
+  }
+
+  const saida = [];
+  for (const [nome, variantes] of porNome) {
+    const comEscalao = variantes.filter((v) => v.escalao);
+
+    if (!comEscalao.length || !Number.isFinite(p)) {
+      // sem escalões: fica o preço mais frequente
+      const melhor = variantes.sort((a, b) => b.ocorrencias - a.ocorrencias)[0];
+      saida.push({ nome, preco: melhor.preco });
+      continue;
+    }
+
+    const certo = comEscalao.find((v) => p >= v.escalao.min && p <= v.escalao.max);
+    if (certo) {
+      saida.push({ nome, preco: certo.preco });
+    } else {
+      // fora de todos os escalões: nada de inventar um preço
+      saida.push({ nome, preco: '' });
+    }
+  }
+
+  return saida.sort((a, b) => a.nome.localeCompare(b.nome));
+}
+
+/**
  * Constrói um catálogo de seguros a partir de uma sheet no formato
  * "BD TT SEGUROS" (array de arrays, primeira linha = cabeçalhos).
  *

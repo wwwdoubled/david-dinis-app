@@ -1,7 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { parsePrintTexto, parseCatalogoAoa, deduzCategoria } from "./lib/etiquetasParser";
+import {
+  parsePrintTexto, parseCatalogoAoa, deduzCategoria,
+  catalogoDeVendas, segurosParaArtigo,
+} from "./lib/etiquetasParser";
 
 /* ------------------------------------------------------------------ */
 /*  OCR — tesseract.js carregado do CDN só quando é preciso.           */
@@ -107,6 +110,13 @@ input[type=text]:focus,select:focus{outline:2px solid #E8710A;outline-offset:-1p
 .catrow:last-child{border-bottom:0}
 .catrow .cn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .catrow .cp{flex:0 0 auto;color:#E8710A;font-weight:700}
+.catrow.art{cursor:pointer}
+.catrow.art:hover{background:#fff6ed}
+.sel-art{margin-top:10px;padding:11px 12px;border:1px solid #E8710A;border-radius:7px;
+  background:#fff8f2;font-size:12.5px}
+.sel-art .t2{font-size:11.5px;color:#8a8a84;margin-top:3px}
+.ok-box{background:#e6f4ea;border:1px solid #b7ddc4;color:#276b3c;font-size:12px;padding:8px 10px;
+  border-radius:6px;margin-top:10px;line-height:1.45}
 
 .cam{position:fixed;inset:0;background:rgba(15,15,14,.92);z-index:60;display:flex;
   flex-direction:column;align-items:center;justify-content:center;padding:16px;gap:14px}
@@ -435,7 +445,7 @@ function Etiqueta({ e, base, rodape, botao }) {
 /* ================================================================== */
 /*  App                                                                */
 /* ================================================================== */
-export default function EtiquetasSeguros() {
+export default function EtiquetasSeguros({ rows = [] }) {
   const [etiquetas, setEtiquetas] = useState([novaEtiqueta()]);
   const [selId, setSelId] = useState(null);
   const [porFolha, setPorFolha] = useState(4);
@@ -454,6 +464,7 @@ export default function EtiquetasSeguros() {
   const [texto, setTexto] = useState("");
   const [catalogo, setCatalogo] = useState([]);
   const [procura, setProcura] = useState("");
+  const [artigoSel, setArtigoSel] = useState(null);
 
   const stageRef = useRef(null);
   const fileRef = useRef(null);
@@ -672,6 +683,55 @@ export default function EtiquetasSeguros() {
     setProgresso(null);
   };
 
+  /* ---------- catálogo vindo directamente da Análise de Vendas ---------- */
+  // Não pede upload nenhum: as linhas já carregadas na app trazem as
+  // designações de seguro com o escalão e o preço realmente praticado.
+  const catalogoApp = React.useMemo(() => catalogoDeVendas(rows), [rows]);
+
+  // artigos (não-seguros) para pesquisa por EAN ou designação
+  const artigos = React.useMemo(() => {
+    const mapa = new Map();
+    for (const r of rows || []) {
+      if (!r || !r.name || !(Number(r.pvp) > 0)) continue;
+      if (/^(SEG|PP|EXT|GAR|CONFIG)[\s_-]/i.test(r.name)) continue;
+      const chave = r.ean || r.name;
+      if (!mapa.has(chave)) mapa.set(chave, { ean: r.ean, name: r.name, pvp: Number(r.pvp) });
+    }
+    return Array.from(mapa.values());
+  }, [rows]);
+
+  const artigosFiltrados = React.useMemo(() => {
+    const q = procura.trim().toUpperCase();
+    if (q.length < 2) return [];
+    return artigos
+      .filter((a) => a.name.toUpperCase().includes(q) || String(a.ean || "").includes(q))
+      .slice(0, 12);
+  }, [artigos, procura]);
+
+  // categorias que têm mesmo seguros nos dados carregados
+  const categoriasDisponiveis = React.useMemo(
+    () => Object.keys(CATEGORIAS).filter((k) => catalogoApp.some((c) => c.categoria === k)),
+    [catalogoApp]
+  );
+
+  const etiquetaDoArtigo = (artigo, categoria) => {
+    const linhas = segurosParaArtigo(catalogoApp, categoria, artigo.pvp);
+    if (!linhas.length) {
+      setErro("Não há seguros desta categoria nos dados de vendas carregados.");
+      return;
+    }
+    const c = CATEGORIAS[categoria];
+    const n = novaEtiqueta(categoria, {
+      estado: "ok",
+      equipamento: artigo.name,
+      franquia: c.franquia,
+      servicos: linhas,
+    });
+    setErro("");
+    setEtiquetas((l) => [...l, n]);
+    setSelId(n.id);
+  };
+
   const catalogoFiltrado = React.useMemo(() => {
     const q = procura.trim().toUpperCase();
     const base = q ? catalogo.filter((c) => c.nome.includes(q) || c.categoria.toUpperCase().includes(q)) : catalogo;
@@ -833,6 +893,53 @@ export default function EtiquetasSeguros() {
           {/* --- 1c. catálogo vindo do ficheiro de vendas --- */}
           {modo === "catalogo" && (
             <>
+              {catalogoApp.length > 0 && (
+                <>
+                  <div className="ok-box">
+                    {catalogoApp.length} seguros e {artigos.length} artigos vindos da Análise de
+                    Vendas — sem precisares de carregar nada.
+                  </div>
+                  <label className="f" style={{ marginTop: 12 }}>Procurar o artigo</label>
+                  <input type="text" value={procura} placeholder="EAN ou designação do artigo…"
+                    onChange={(e) => setProcura(e.target.value)} />
+                  {artigosFiltrados.length > 0 && !artigoSel && (
+                    <div className="cat">
+                      {artigosFiltrados.map((a, i) => (
+                        <div className="catrow art" key={i} onClick={() => { setArtigoSel(a); setErro(""); }}>
+                          <span className="cn">{a.name}</span>
+                          <span className="cp">{a.pvp.toFixed(2).replace(".", ",")} €</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {artigoSel && (
+                    <div className="sel-art">
+                      <div className="cn"><b>{artigoSel.name}</b></div>
+                      <div className="t2">
+                        {artigoSel.pvp.toFixed(2).replace(".", ",")} € · escolhe a família:
+                      </div>
+                      <div className="chips" style={{ marginTop: 8 }}>
+                        {categoriasDisponiveis.map((k) => (
+                          <button key={k} className="chip" onClick={() => { etiquetaDoArtigo(artigoSel, k); setArtigoSel(null); setProcura(""); }}>
+                            {k}
+                          </button>
+                        ))}
+                      </div>
+                      <button className="btn btn-ghost" style={{ marginTop: 10 }} onClick={() => setArtigoSel(null)}>
+                        Escolher outro artigo
+                      </button>
+                    </div>
+                  )}
+
+                  <p className="hint">
+                    O preço do artigo determina o <b>escalão</b> de cada seguro, por isso os
+                    valores são os que o cliente vai mesmo pagar. A família não é adivinhada —
+                    escolhe-la tu. Confere na pré-visualização antes de imprimir.
+                  </p>
+                  <div className="sec" style={{ marginTop: 18 }}>Ou importar de um ficheiro</div>
+                </>
+              )}
               <div className="row">
                 <button className="btn btn-ghost" onClick={() => xlsxRef.current?.click()} disabled={!!progresso}>
                   {progresso ? "A ler o ficheiro…" : catalogo.length ? "Actualizar catálogo" : "Importar ficheiro de vendas"}
