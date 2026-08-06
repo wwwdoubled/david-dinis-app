@@ -1,6 +1,31 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { parsePrintTexto, parseCatalogoAoa, deduzCategoria } from "./lib/etiquetasParser";
+
+/* ------------------------------------------------------------------ */
+/*  OCR — tesseract.js carregado do CDN só quando é preciso.           */
+/*  Sem chave de API, sem custo, sem peso no bundle.                   */
+/* ------------------------------------------------------------------ */
+const TESSERACT_CDN = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/tesseract.min.js";
+
+let tesseractPromise = null;
+function carregarTesseract() {
+  if (typeof window === "undefined") return Promise.reject(new Error("sem browser"));
+  if (window.Tesseract) return Promise.resolve(window.Tesseract);
+  if (tesseractPromise) return tesseractPromise;
+  tesseractPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = TESSERACT_CDN;
+    s.async = true;
+    s.onload = () => (window.Tesseract ? resolve(window.Tesseract) : reject(new Error("Tesseract não carregou.")));
+    s.onerror = () => { tesseractPromise = null; reject(new Error("Não foi possível carregar o OCR. Verifica a ligação.")); };
+    document.head.appendChild(s);
+  });
+  return tesseractPromise;
+}
+
+const CHAVE_CATALOGO = "dd_catalogo_seguros";
 
 /* ================================================================== */
 /*  Estilos                                                            */
@@ -68,6 +93,20 @@ input[type=text]:focus,select:focus{outline:2px solid #E8710A;outline-offset:-1p
 .cov input{accent-color:#E8710A;width:15px;height:15px}
 .cov button{margin-left:auto;border:0;background:none;color:#a09a92;cursor:pointer;font-size:15px}
 .vazio{font-size:12.5px;color:#8a8a84;padding:14px 0;line-height:1.5}
+
+/* colar texto */
+.ta{width:100%;min-height:150px;margin-top:10px;padding:9px 10px;border:1px solid #d8d8d2;
+  border-radius:6px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  line-height:1.55;resize:vertical;background:#fff;color:#1b1b1b}
+.ta:focus{outline:2px solid #E8710A;outline-offset:-1px;border-color:#E8710A}
+
+/* catálogo */
+.cat{margin-top:10px;max-height:230px;overflow:auto;border:1px solid #e2e2de;border-radius:7px}
+.catrow{display:flex;gap:8px;align-items:baseline;padding:6px 9px;border-bottom:1px solid #f0f0ec;
+  font-size:11.5px}
+.catrow:last-child{border-bottom:0}
+.catrow .cn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.catrow .cp{flex:0 0 auto;color:#E8710A;font-weight:700}
 
 .cam{position:fixed;inset:0;background:rgba(15,15,14,.92);z-index:60;display:flex;
   flex-direction:column;align-items:center;justify-content:center;padding:16px;gap:14px}
@@ -410,8 +449,15 @@ export default function EtiquetasSeguros() {
   const [camAberta, setCamAberta] = useState(false);
   const [escala, setEscala] = useState(0.5);
 
+  // modo de entrada: texto colado | manual | catálogo da app | OCR local
+  const [modo, setModo] = useState("texto");
+  const [texto, setTexto] = useState("");
+  const [catalogo, setCatalogo] = useState([]);
+  const [procura, setProcura] = useState("");
+
   const stageRef = useRef(null);
   const fileRef = useRef(null);
+  const xlsxRef = useRef(null);
   const camInputRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -553,18 +599,105 @@ export default function EtiquetasSeguros() {
 
   useEffect(() => () => streamRef.current?.getTracks().forEach((t) => t.stop()), []);
 
-  /* ---------- leitura ---------- */
-  const lerUma = async (e) => {
-    const r = await fetch("/api/ler-print", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ imagem: e.img.b64, media: e.img.media }),
-    });
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.erro || "A leitura falhou.");
+  /* ---------- 1. texto colado ---------- */
+  const lerTexto = () => {
+    const blocos = texto.split(/\n\s*\n/).map((b) => b.trim()).filter(Boolean);
+    if (!blocos.length) {
+      setErro("Cola primeiro o texto do ecrã Planos Proteção.");
+      return;
     }
-    return r.json();
+    const novas = [];
+    for (const bloco of blocos) {
+      const j = parsePrintTexto(bloco);
+      if (!j.servicos.length) continue;
+      const c = CATEGORIAS[j.categoria];
+      novas.push(
+        novaEtiqueta(c ? j.categoria : "Informática", {
+          estado: "ok",
+          equipamento: j.equipamento,
+          franquia: j.franquia || (c ? c.franquia : ""),
+          titulo: c ? c.titulo : "EXTRA CLOUD",
+          coberturas: c ? c.coberturas : cob([]),
+          servicos: j.servicos,
+        })
+      );
+    }
+    if (!novas.length) {
+      setErro("Não reconheci nenhuma linha de serviço. As designações têm de começar por SEG, PP, EXT, GAR ou CONFIG.");
+      return;
+    }
+    setErro("");
+    setTexto("");
+    setEtiquetas((l) => [...l.filter((e) => e.servicos.length || e.equipamento), ...novas]);
+    setSelId(novas[0].id);
+  };
+
+  /* ---------- 3. catálogo a partir do ficheiro de vendas ---------- */
+  useEffect(() => {
+    try {
+      const bruto = localStorage.getItem(CHAVE_CATALOGO);
+      if (bruto) setCatalogo(JSON.parse(bruto));
+    } catch (err) {
+      /* ainda não há catálogo */
+    }
+  }, []);
+
+  const importarCatalogo = async (file) => {
+    if (!file) return;
+    setErro("");
+    setProgresso({ feitas: 0, total: 1 });
+    try {
+      const XLSX = await import("xlsx");
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      // a sheet BD TT SEGUROS é a preferida; senão, a primeira que dê linhas
+      const nomes = ["BD TT SEGUROS", ...wb.SheetNames];
+      let linhas = [];
+      for (const n of nomes) {
+        const sh = wb.Sheets[n];
+        if (!sh) continue;
+        const aoa = XLSX.utils.sheet_to_json(sh, { header: 1, blankrows: false, defval: null });
+        linhas = parseCatalogoAoa(aoa);
+        if (linhas.length) break;
+      }
+      if (!linhas.length) {
+        setErro("Não encontrei linhas de seguros. O ficheiro precisa de colunas de descrição e preço.");
+      } else {
+        setCatalogo(linhas);
+        try { localStorage.setItem(CHAVE_CATALOGO, JSON.stringify(linhas)); } catch (err) { /* quota */ }
+      }
+    } catch (err) {
+      setErro("Falha a ler o ficheiro: " + err.message);
+    }
+    setProgresso(null);
+  };
+
+  const catalogoFiltrado = React.useMemo(() => {
+    const q = procura.trim().toUpperCase();
+    const base = q ? catalogo.filter((c) => c.nome.includes(q) || c.categoria.toUpperCase().includes(q)) : catalogo;
+    return base.slice(0, 40);
+  }, [catalogo, procura]);
+
+  const etiquetaDoCatalogo = (categoria) => {
+    const linhas = catalogo.filter((c) => c.categoria === categoria);
+    if (!linhas.length) return;
+    const c = CATEGORIAS[categoria];
+    const n = novaEtiqueta(categoria, {
+      estado: "ok",
+      franquia: c.franquia,
+      servicos: linhas.map((l) => ({ nome: l.nome, preco: l.preco })),
+    });
+    setEtiquetas((l) => [...l, n]);
+    setSelId(n.id);
+  };
+
+  /* ---------- 4. OCR local ---------- */
+  const lerUma = async (e) => {
+    const T = await carregarTesseract();
+    const { data } = await T.recognize(e.img.url, "por");
+    const j = parsePrintTexto(data?.text || "");
+    if (!j.categoria) j.categoria = deduzCategoria(j.servicos.map((s) => s.nome));
+    return j;
   };
 
   const lerTodas = async () => {
@@ -631,37 +764,156 @@ export default function EtiquetasSeguros() {
           <h1>Etiquetas de seguros</h1>
           <p className="sub">Junta os prints de todos os artigos, lê tudo de uma vez, imprime.</p>
 
-          {/* ---- 1. prints ---- */}
-          <div className="sec">1 · Prints dos artigos</div>
-          <div
-            className={"drop" + (dragOn ? " on" : "")}
-            onClick={() => fileRef.current?.click()}
-            onDragOver={(e) => { e.preventDefault(); setDragOn(true); }}
-            onDragLeave={() => setDragOn(false)}
-            onDrop={(e) => { e.preventDefault(); setDragOn(false); adicionarFicheiros(e.dataTransfer.files); }}
-          >
-            Cola com <b>Ctrl+V</b>, arrasta os ficheiros
-            <br />
-            ou clica para escolher vários de uma vez
+          {/* ---- 1. origem dos dados ---- */}
+          <div className="sec">1 · De onde vêm os dados</div>
+          <div className="chips">
+            {[
+              ["texto", "Colar texto"],
+              ["manual", "Manual"],
+              ["catalogo", "Catálogo"],
+              ["ocr", "Print (OCR)"],
+            ].map(([k, label]) => (
+              <button key={k} className={"chip" + (modo === k ? " on" : "")} onClick={() => { setModo(k); setErro(""); }}>
+                {label}
+              </button>
+            ))}
           </div>
+
+          {/* --- 1a. texto colado --- */}
+          {modo === "texto" && (
+            <>
+              <textarea
+                className="ta"
+                value={texto}
+                onChange={(e) => setTexto(e.target.value)}
+                placeholder={"SEG DDR INFORMATICA 1 ANO (1001-1500)   163,99 €\nSEG-EXT. GARANTIA LAPTOP +3ANOS   99,90 €\nFranquia 120€\nAPPLE MACBOOK AIR 13 M3\n\n(linha em branco separa artigos)"}
+              />
+              <div className="row">
+                <button className="btn btn-main" onClick={lerTexto} disabled={!texto.trim()}>
+                  Criar etiquetas
+                </button>
+                <button className="btn btn-ghost" onClick={() => setTexto("")} disabled={!texto}>
+                  Limpar
+                </button>
+              </div>
+              <p className="hint">
+                No ecrã Planos Proteção, selecciona a lista, copia e cola aqui. Separa artigos
+                diferentes com uma <b>linha em branco</b>. Escalões, franquia e categoria são
+                detectados sozinhos.
+              </p>
+            </>
+          )}
+
+          {/* --- 1b. manual --- */}
+          {modo === "manual" && (
+            <>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Escolhe a categoria: a etiqueta nasce já com as designações e coberturas
+                habituais dessa família. Só tens de escrever os preços no passo 3.
+              </p>
+              <div className="chips" style={{ marginTop: 10 }}>
+                {Object.keys(CATEGORIAS).map((k) => (
+                  <button key={k} className="chip" onClick={() => {
+                    const c = CATEGORIAS[k];
+                    const n = novaEtiqueta(k, {
+                      estado: "ok",
+                      franquia: c.franquia,
+                      servicos: c.servicos.map((nome) => ({ nome, preco: "" })),
+                    });
+                    setEtiquetas((l) => [...l, n]);
+                    setSelId(n.id);
+                  }}>
+                    + {k}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* --- 1c. catálogo vindo do ficheiro de vendas --- */}
+          {modo === "catalogo" && (
+            <>
+              <div className="row">
+                <button className="btn btn-ghost" onClick={() => xlsxRef.current?.click()} disabled={!!progresso}>
+                  {progresso ? "A ler o ficheiro…" : catalogo.length ? "Actualizar catálogo" : "Importar ficheiro de vendas"}
+                </button>
+              </div>
+              <input ref={xlsxRef} type="file" accept=".xlsx,.xls,.xlsm" style={{ display: "none" }}
+                onChange={(e) => importarCatalogo(e.target.files?.[0])} />
+
+              {!catalogo.length ? (
+                <p className="hint">
+                  Importa o mesmo ficheiro que usas na Análise de Vendas. Da sheet
+                  <b> BD TT SEGUROS</b> saem as designações e o preço mais praticado de cada
+                  seguro. Fica guardado — só precisas de repetir quando os preços mudarem.
+                </p>
+              ) : (
+                <>
+                  <input type="text" style={{ marginTop: 10 }} value={procura}
+                    placeholder={`Procurar entre ${catalogo.length} seguros…`}
+                    onChange={(e) => setProcura(e.target.value)} />
+                  <div className="chips" style={{ marginTop: 10 }}>
+                    {Object.keys(CATEGORIAS)
+                      .filter((k) => catalogo.some((c) => c.categoria === k))
+                      .map((k) => (
+                        <button key={k} className="chip" onClick={() => etiquetaDoCatalogo(k)}>
+                          + {k}
+                        </button>
+                      ))}
+                  </div>
+                  <div className="cat">
+                    {catalogoFiltrado.map((c, i) => (
+                      <div className="catrow" key={i}>
+                        <span className="cn">{c.nome}</span>
+                        <span className="cp">{c.preco || "—"}</span>
+                      </div>
+                    ))}
+                    {!catalogoFiltrado.length && <div className="vazio">Nada encontrado.</div>}
+                  </div>
+                  <p className="hint">
+                    Os botões criam uma etiqueta com todos os seguros dessa categoria e os preços
+                    já preenchidos. Confere sempre antes de imprimir.
+                  </p>
+                </>
+              )}
+            </>
+          )}
+
+          {/* --- 1d. OCR local --- */}
+          {modo === "ocr" && (
+            <>
+              <div
+                className={"drop" + (dragOn ? " on" : "")}
+                onClick={() => fileRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); setDragOn(true); }}
+                onDragLeave={() => setDragOn(false)}
+                onDrop={(e) => { e.preventDefault(); setDragOn(false); adicionarFicheiros(e.dataTransfer.files); }}
+              >
+                Cola com <b>Ctrl+V</b>, arrasta os ficheiros
+                <br />
+                ou clica para escolher vários de uma vez
+              </div>
+              <div className="row">
+                <button className="btn btn-main" onClick={lerTodas} disabled={!pendentes || !!progresso}>
+                  {progresso ? `A ler ${progresso.feitas} de ${progresso.total}…` : `Ler ${pendentes || ""} print${pendentes === 1 ? "" : "s"}`}
+                </button>
+                <button className="btn btn-ghost" onClick={abrirCamera} disabled={!!progresso}>
+                  Fotografar
+                </button>
+              </div>
+              <p className="hint">
+                O reconhecimento corre <b>no teu browser</b> — nada sai do computador e não há
+                custo. Em contrapartida engana-se com alguma frequência nos números: confirma
+                sempre os preços no passo 3. Para prints, o modo <b>Colar texto</b> é mais fiável.
+              </p>
+            </>
+          )}
+
           <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
             onChange={(e) => adicionarFicheiros(e.target.files)} />
           <input ref={camInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }}
             onChange={(e) => adicionarFicheiros(e.target.files)} />
-
-          <div className="row">
-            <button className="btn btn-main" onClick={lerTodas} disabled={!pendentes || !!progresso}>
-              {progresso ? `A ler ${progresso.feitas} de ${progresso.total}…` : `Ler ${pendentes || ""} print${pendentes === 1 ? "" : "s"}`}
-            </button>
-            <button className="btn btn-ghost" onClick={abrirCamera} disabled={!!progresso}>
-              Fotografar
-            </button>
-          </div>
           {erro && <div className="err">{erro}</div>}
-          <p className="hint">
-            Um print por artigo. Cada um dá origem a uma etiqueta com a categoria, a franquia e os
-            preços já preenchidos.
-          </p>
 
           {/* ---- 2. lista ---- */}
           <div className="sec">2 · Etiquetas ({etiquetas.length})</div>
