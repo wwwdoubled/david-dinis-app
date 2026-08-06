@@ -1885,10 +1885,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.24.1';
+const APP_VERSION = '3.25.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-05-31T11:00:00+01:00';
+const APP_BUILD_DATE = '2026-08-06T21:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1898,8 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.25.0', date: '2026-08-06', time: '21:30', summary: 'Etiquetas de Seguros — novo módulo (menu PTS + /etiquetas) para gerar e imprimir etiquetas A4 (2/4/6 por folha), com CSS de impressão que esconde o resto da app. Quatro origens de dados, nenhuma com chave de API: (A) Catálogo — escreves, lês com a pistola ou apontas a câmara ao EAN e a etiqueta sai feita; o catálogo vem das linhas de vendas já em memória (stockRowsPO2/PO3), o PVP do artigo determina o ESCALÃO de cada seguro e a designação determina a família. Famílias ambíguas (drone, gaming, mobilidade) perguntam em vez de adivinhar; artigo fora dos escalões deixa o preço vazio em vez de inventar. (B) Colar texto do ecrã Planos Proteção, com parser por regex (escalões, franquia, grafias 4ANS/2 ANO). (C) Manual por categoria. (D) OCR no browser via tesseract.js do CDN (sem custo, menos fiável — avisado no interface). Novo app/lib/etiquetasParser.js (funções puras, 32 testes) e app/lib/useBarcodeScanner.js — hook extraído do scanner do Inventário (BarcodeDetector nativo + fallback ZXing para iOS/Firefox, debounce/lockout, libertação da câmara no iOS), agora partilhável. Coberturas por categoria e catálogo persistem em localStorage.' },
+  { version: '3.24.2', date: '2026-08-06', time: '21:12', summary: 'FIX — Inventário e Notas voltam a abrir. O commit v3.23.6 ("remover Editor de PDF") apagou 1182 linhas mas levou à frente mais do que devia: além do PdfEditor, removeu também InventoryView, NotesToolbar, toolBtn e useSavedIndicator, deixando os call-sites intactos. Daí o "InventoryView is not defined" no Inventário e o crash nas Notas (NotesView chama NotesToolbar duas vezes) — contidos pelo ViewBoundary, que mostrava o fallback só nessa área. As quatro funções foram repostas tal e qual do commit anterior, e passou-se um varrimento a todos os componentes usados no ficheiro para confirmar que não ficaram mais referências órfãs.' },
   { version: '3.24.1', date: '2026-05-31', summary: 'Histórico de preços durável (tabela price_history). Nova migration price_history (log append-only por artigo, RLS read/insert authed + delete admin). No upload de campanha, a app compara os preços novos com o último conhecido das campanhas em memória e regista SÓ as mudanças reais (changed-only → tabela mantém-se pequena), best-effort (try/catch, não bloqueia o upload). cloudRecordPriceHistory (insert em lotes de 500) + cloudFetchPriceHistoryForEan (on-demand por EAN). No Ctrl+K, ao seleccionar um artigo, busca o histórico da cloud e funde-o com o derivado das campanhas (ordenado por data, só mudanças). Persiste mesmo que a campanha seja substituída/apagada. Degrada graciosamente: se a tabela não existir, usa só o histórico das campanhas (v3.24.0). Requer correr a migration no Supabase.' },
   { version: '3.24.0', date: '2026-05-31', summary: 'Relógio + histórico de preços no Ctrl+K. (A) LiveClock: relógio ao vivo (hora de Portugal, HH:MM:SS + dia/mês) no rodapé da barra lateral, visível para todos os utilizadores, actualiza a cada segundo. (B) Histórico de preços no Ctrl+K: novo priceIndex agrega o preço de cada artigo em TODAS as campanhas (cada campanha já é um snapshot guardado com data). Ao procurar um artigo (EAN/nome/família) no Ctrl+K e seleccioná-lo, mostra a evolução do preço ao longo das campanhas — chips "Mai/26 19,99€ → Jun/26 17,99€" com ↓ verde (desceu) / ↑ vermelho (subiu), só as mudanças reais. O sub do resultado indica também em quantas campanhas o artigo apareceu. Sem tabela nova — deriva das campanhas existentes.' },
   { version: '3.23.8', date: '2026-05-31', summary: 'Testes para parseNum (parsing de preços PT/EN — função crítica usada em toda a app, agora em lib/format.js): formatos 1.234,56 / 1,234.56 / 32,19, remoção de €/%, null/lixo→0. 36 testes vitest no total.' },
@@ -7195,7 +7197,11 @@ function ChangelogDialog({ onClose }) {
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                 <span className="mono" style={{ fontSize: 12, fontWeight: 600, color: T.ink }}>v{entry.version}</span>
-                <span style={{ fontSize: 10, color: T.inkMute }}>{new Date(entry.date).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })}</span>
+                {/* v3.25.0: data + hora da alteração (hora só nas entradas que a registam) */}
+                <span style={{ fontSize: 10, color: T.inkMute }}>
+                  {new Date(entry.date).toLocaleDateString('pt-PT', { day: '2-digit', month: 'short', year: 'numeric' })}
+                  {entry.time ? ` · ${entry.time}` : ''}
+                </span>
                 {i === 0 && <span style={{ fontSize: 9, padding: '1px 6px', background: T.accent, color: '#fff', borderRadius: 3, letterSpacing: '0.08em', fontFamily: 'Geist Mono', fontWeight: 600 }}>ATUAL</span>}
               </div>
               <div style={{ fontSize: 12, color: T.inkSoft, lineHeight: 1.5 }}>{entry.summary}</div>
