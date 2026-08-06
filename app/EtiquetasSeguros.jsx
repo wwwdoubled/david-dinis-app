@@ -744,17 +744,12 @@ export default function EtiquetasSeguros({ rows = [] }) {
   /* ---------- scanner de barcodes (o mesmo motor do Inventário) ---------- */
   // Devolve o EAN normalizado; a partir daí segue o mesmo caminho que
   // escrever à mão ou ler com a pistola.
+  // A câmara entrega o EAN ao mesmo caminho que o teclado e a pistola:
+  // escreve-o no campo e o efeito com debounce trata do resto.
   const aoLerCodigo = useCallback((ean) => {
-    const achado = artigos.find((a) => String(a.ean || "").replace(/^0+/, "") === ean);
-    bip(!!achado);
-    if (achado) {
-      setProcura(ean);
-      return;
-    }
-    // EAN desconhecido: a etiqueta sai na mesma, com o código no equipamento
-    // para o vendedor completar. Escolhe-se a família à mão.
-    setErro("");
-    setArtigoSel({ ean, name: "EAN " + ean, pvp: 0, desconhecido: true });
+    bip(artigos.some((a) => String(a.ean || "").replace(/^0+/, "") === ean));
+    setArtigoSel(null);
+    setProcura(ean);
   }, [artigos]);
 
   const scanner = useBarcodeScanner({ onEan: aoLerCodigo });
@@ -763,22 +758,38 @@ export default function EtiquetasSeguros({ rows = [] }) {
      Escrever ou ler com a pistola um EAN que existe nos dados de vendas
      preenche a etiqueta de uma vez: o artigo dá o PVP (logo, o escalão) e a
      designação dá a família. Se a família não for clara, pergunta-se. */
+  // v3.25.2: um EAN completo faz SEMPRE alguma coisa. Antes, se não existisse
+  // nos dados de vendas, a função saía em silêncio — e sem dados carregados isso
+  // era sempre, pelo que escrever o código não produzia nada.
+  const resolverEan = useCallback((q) => {
+    const norm = q.replace(/^0+/, "");
+    const achado = artigos.find((a) => String(a.ean || "").replace(/^0+/, "") === norm);
+
+    if (achado) {
+      const categoria = categoriaDoArtigo(achado.name);
+      // família clara E com seguros no catálogo → etiqueta directa
+      if (categoria && CATEGORIAS[categoria] && catalogoApp.some((c) => c.categoria === categoria)) {
+        if (etiquetaDoArtigo(achado, categoria)) setProcura("");
+        return;
+      }
+      setArtigoSel(achado); // família por confirmar
+      return;
+    }
+
+    // EAN desconhecido: a etiqueta sai na mesma, com o código no equipamento.
+    setErro("");
+    setArtigoSel({ ean: q, name: "EAN " + q, pvp: 0, desconhecido: true });
+  }, [artigos, catalogoApp, etiquetaDoArtigo]);
+
+  // Debounce: a pistola escreve muito depressa e o teclado dígito a dígito.
+  // Espera-se que o código estabilize antes de agir.
   useEffect(() => {
     const q = procura.trim();
-    if (!/^\d{6,}$/.test(q)) return;
-
-    const achados = artigos.filter((a) => String(a.ean || "").replace(/^0+/, "") === q.replace(/^0+/, ""));
-    if (achados.length !== 1) return;
-
-    const artigo = achados[0];
-    const categoria = categoriaDoArtigo(artigo.name);
-    if (categoria && CATEGORIAS[categoria] && catalogoApp.some((c) => c.categoria === categoria)) {
-      if (etiquetaDoArtigo(artigo, categoria)) setProcura("");
-    } else {
-      // família por confirmar — mostra os botões em vez de arriscar
-      setArtigoSel(artigo);
-    }
-  }, [procura, artigos, catalogoApp, etiquetaDoArtigo]);
+    if (artigoSel) return;
+    if (!/^\d{8,}$/.test(q)) return;
+    const t = setTimeout(() => resolverEan(q), 500);
+    return () => clearTimeout(t);
+  }, [procura, artigoSel, resolverEan]);
 
   const catalogoFiltrado = React.useMemo(() => {
     const q = procura.trim().toUpperCase();
@@ -969,7 +980,14 @@ export default function EtiquetasSeguros({ rows = [] }) {
                   <label className="f" style={{ marginTop: 12 }}>EAN ou designação do artigo</label>
                   <input type="text" value={procura} autoFocus
                     placeholder="Lê o código de barras ou escreve o nome…"
-                    onChange={(e) => setProcura(e.target.value)} />
+                    onChange={(e) => { setProcura(e.target.value); setArtigoSel(null); }}
+                    onKeyDown={(e) => {
+                      // A pistola termina a leitura com Enter — não esperar pelo debounce.
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      const q = procura.trim();
+                      if (/^\d{6,}$/.test(q)) resolverEan(q);
+                    }} />
                   <div className="row">
                     <button className="btn btn-ghost" onClick={scanner.start} disabled={scanner.scanning}>
                       Ler código de barras
