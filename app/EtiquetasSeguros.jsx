@@ -5,6 +5,7 @@ import {
   parsePrintTexto, parseCatalogoAoa, deduzCategoria,
   catalogoDeVendas, segurosParaArtigo, categoriaDoArtigo,
 } from "./lib/etiquetasParser";
+import { useBarcodeScanner, bip } from "./lib/useBarcodeScanner";
 
 /* ------------------------------------------------------------------ */
 /*  OCR — tesseract.js carregado do CDN só quando é preciso.           */
@@ -122,6 +123,8 @@ input[type=text]:focus,select:focus{outline:2px solid #E8710A;outline-offset:-1p
   flex-direction:column;align-items:center;justify-content:center;padding:16px;gap:14px}
 .cam video{width:100%;max-width:760px;max-height:70vh;border-radius:10px;background:#000;object-fit:contain}
 .cam p{color:#e8e8e4;font-size:12.5px;margin:0;text-align:center;max-width:420px;line-height:1.5}
+.cam .mira{position:absolute;width:min(78vw,420px);height:135px;border:3px solid #E8710A;
+  border-radius:10px;box-shadow:0 0 0 100vmax rgba(0,0,0,.35);pointer-events:none}
 .shot{width:64px;height:64px;border-radius:50%;border:4px solid #fff;background:#E8710A;cursor:pointer}
 .shot:hover{background:#cf6208}
 
@@ -733,6 +736,21 @@ export default function EtiquetasSeguros({ rows = [] }) {
     return true;
   }, [catalogoApp]);
 
+  /* ---------- scanner de barcodes (o mesmo motor do Inventário) ---------- */
+  // Devolve o EAN normalizado; a partir daí segue o mesmo caminho que
+  // escrever à mão ou ler com a pistola.
+  const aoLerCodigo = useCallback((ean) => {
+    const existe = artigos.some((a) => String(a.ean || "").replace(/^0+/, "") === ean);
+    bip(existe);
+    if (!existe) {
+      setErro("EAN " + ean + " não aparece nos dados de vendas carregados.");
+      return;
+    }
+    setProcura(ean);
+  }, [artigos]);
+
+  const scanner = useBarcodeScanner({ onEan: aoLerCodigo });
+
   /* ---------- EAN → etiqueta pronta, sem cliques ----------
      Escrever ou ler com a pistola um EAN que existe nos dados de vendas
      preenche a etiqueta de uma vez: o artigo dá o PVP (logo, o escalão) e a
@@ -830,6 +848,16 @@ export default function EtiquetasSeguros({ rows = [] }) {
     <div className="app">
       <style>{CSS}</style>
 
+      {/* leitor de barcodes — mantido montado enquanto lê, para o vídeo não piscar */}
+      <div className="cam noprint" style={{ display: scanner.scanning ? "flex" : "none" }}>
+        <video ref={scanner.videoRef} playsInline muted />
+        <div className="mira" />
+        <p>Aponta ao código de barras do artigo. Cada leitura cria uma etiqueta.</p>
+        <div className="row">
+          <button className="btn btn-ghost" onClick={scanner.stop}>Fechar</button>
+        </div>
+      </div>
+
       {camAberta && (
         <div className="cam noprint">
           <video ref={videoRef} playsInline muted />
@@ -925,9 +953,16 @@ export default function EtiquetasSeguros({ rows = [] }) {
                   <input type="text" value={procura} autoFocus
                     placeholder="Lê o código de barras ou escreve o nome…"
                     onChange={(e) => setProcura(e.target.value)} />
+                  <div className="row">
+                    <button className="btn btn-ghost" onClick={scanner.start} disabled={scanner.scanning}>
+                      Ler código de barras
+                    </button>
+                  </div>
                   <p className="hint">
-                    Um EAN completo cria a etiqueta sozinho — podes usar a pistola.
+                    Um EAN completo cria a etiqueta sozinho — com a pistola, com a câmara,
+                    ou escrito à mão.
                   </p>
+                  {scanner.erro && <div className="err">{scanner.erro}</div>}
                   {artigosFiltrados.length > 0 && !artigoSel && (
                     <div className="cat">
                       {artigosFiltrados.map((a, i) => (
