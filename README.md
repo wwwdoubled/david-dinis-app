@@ -2,7 +2,7 @@
 
 Plataforma de gestão de campanhas, stock e materiais.
 
-**Password de acesso**: `Faveiro2026`
+**Password de acesso**: 
 
 ---
 
