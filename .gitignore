@@ -41,3 +41,6 @@ supabase/.temp/
 
 # misc projects
 /shots-analyzer/
+
+# script temporario de publicacao (local)
+push.command
