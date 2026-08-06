@@ -13,6 +13,7 @@ import {
   KeyRound, EyeOff, Copy, FileDown, Printer, PackageOpen, ChevronDown
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
+import EtiquetasSeguros from './EtiquetasSeguros';
 // v3.23.2: XLSX carregado dinamicamente (só quando há upload/export) — tira
 // ~400 kB do bundle inicial. Singleton em cache após o 1º load.
 let _XLSX = null;
@@ -2321,6 +2322,9 @@ const DEFAULT_MENU_VISIBILITY = {
   // canSeeMenuItem trata o admin como sempre visível; hideFor: ['PES'] no Sidebar
   // exclui visão PES. Para non-admins fica invisível por defeito (roles vazio).
   pps: { roles: [], visible: false },
+  // Etiquetas de Seguros — PTS-only (hideFor: ['PES'] no Sidebar), visível a
+  // user/manager. Admin pode desligar em Admin → Configuração (feature flags).
+  etiquetas: { roles: ['user', 'manager'], visible: true },
 };
 
 async function fetchUIConfig() {
@@ -6536,6 +6540,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
               <div style={{ fontSize: 14, color: T.ink }}>Acesso restrito a administradores.</div>
             </div>
           )}
+          {view === 'etiquetas' && <EtiquetasSeguros />}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
           {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} currentStoreId={currentStoreId} />}
           {view === 'devolucoes' && <DevolucoesView user={user} userDepartment={userDepartment} />}
@@ -6815,6 +6820,7 @@ function Sidebar({ view, setView, candidates, onLogout, user, isAdmin, userProfi
     { id: 'novidades',  label: 'Novidades',           icon: Sparkles,    showFor: ['PES'] },
     { id: 'devolucoes', label: 'Devoluções',          icon: PackageOpen, showFor: ['PES'] },
     { id: 'pps',        label: 'Planos de Proteção',  icon: Shield,      hideFor: ['PES'] },
+    { id: 'etiquetas',  label: 'Etiquetas Seguros',   icon: Tag,         hideFor: ['PES'] },
     { id: 'credentials',label: 'Cofre',               icon: KeyRound,    hideFor: ['PES'] },
   ];
   // v3.17.0: filtro dept-aware. Tanto admin (com switcher) como non-admin (fixo)
