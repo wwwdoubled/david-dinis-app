@@ -118,6 +118,8 @@ input[type=text]:focus,select:focus{outline:2px solid #E8710A;outline-offset:-1p
 .sel-art .t2{font-size:11.5px;color:#8a8a84;margin-top:3px}
 .ok-box{background:#e6f4ea;border:1px solid #b7ddc4;color:#276b3c;font-size:12px;padding:8px 10px;
   border-radius:6px;margin-top:10px;line-height:1.45}
+.warn-box{background:#fff6ed;border:1px solid #f3d3ae;color:#8a5410;font-size:12px;padding:8px 10px;
+  border-radius:6px;margin-top:10px;line-height:1.45}
 
 .cam{position:fixed;inset:0;background:rgba(15,15,14,.92);z-index:60;display:flex;
   flex-direction:column;align-items:center;justify-content:center;padding:16px;gap:14px}
@@ -463,7 +465,7 @@ export default function EtiquetasSeguros({ rows = [] }) {
   const [escala, setEscala] = useState(0.5);
 
   // modo de entrada: texto colado | manual | catálogo da app | OCR local
-  const [modo, setModo] = useState("texto");
+  const [modo, setModo] = useState("catalogo");
   const [texto, setTexto] = useState("");
   const [catalogo, setCatalogo] = useState([]);
   const [procura, setProcura] = useState("");
@@ -712,18 +714,21 @@ export default function EtiquetasSeguros({ rows = [] }) {
   }, [artigos, procura]);
 
   // categorias que têm mesmo seguros nos dados carregados
-  const categoriasDisponiveis = React.useMemo(
-    () => Object.keys(CATEGORIAS).filter((k) => catalogoApp.some((c) => c.categoria === k)),
-    [catalogoApp]
-  );
+  // Sem catálogo carregado, mostram-se todas — senão não haveria por onde escolher.
+  const categoriasDisponiveis = React.useMemo(() => {
+    const comSeguros = Object.keys(CATEGORIAS).filter((k) => catalogoApp.some((c) => c.categoria === k));
+    return comSeguros.length ? comSeguros : Object.keys(CATEGORIAS);
+  }, [catalogoApp]);
 
   const etiquetaDoArtigo = useCallback((artigo, categoria) => {
-    const linhas = segurosParaArtigo(catalogoApp, categoria, artigo.pvp);
-    if (!linhas.length) {
-      setErro("Não há seguros desta categoria nos dados de vendas carregados.");
-      return false;
-    }
     const c = CATEGORIAS[categoria];
+    if (!c) return false;
+    // Sem catálogo (ou sem seguros desta família) a etiqueta sai na mesma, com as
+    // designações habituais e os preços por preencher — melhor que não sair nada.
+    const doCatalogo = segurosParaArtigo(catalogoApp, categoria, artigo.pvp);
+    const linhas = doCatalogo.length
+      ? doCatalogo
+      : c.servicos.map((nome) => ({ nome, preco: "" }));
     const n = novaEtiqueta(categoria, {
       estado: "ok",
       equipamento: artigo.name,
@@ -740,13 +745,16 @@ export default function EtiquetasSeguros({ rows = [] }) {
   // Devolve o EAN normalizado; a partir daí segue o mesmo caminho que
   // escrever à mão ou ler com a pistola.
   const aoLerCodigo = useCallback((ean) => {
-    const existe = artigos.some((a) => String(a.ean || "").replace(/^0+/, "") === ean);
-    bip(existe);
-    if (!existe) {
-      setErro("EAN " + ean + " não aparece nos dados de vendas carregados.");
+    const achado = artigos.find((a) => String(a.ean || "").replace(/^0+/, "") === ean);
+    bip(!!achado);
+    if (achado) {
+      setProcura(ean);
       return;
     }
-    setProcura(ean);
+    // EAN desconhecido: a etiqueta sai na mesma, com o código no equipamento
+    // para o vendedor completar. Escolhe-se a família à mão.
+    setErro("");
+    setArtigoSel({ ean, name: "EAN " + ean, pvp: 0, desconhecido: true });
   }, [artigos]);
 
   const scanner = useBarcodeScanner({ onEan: aoLerCodigo });
@@ -943,12 +951,21 @@ export default function EtiquetasSeguros({ rows = [] }) {
           {/* --- 1c. catálogo vindo do ficheiro de vendas --- */}
           {modo === "catalogo" && (
             <>
-              {catalogoApp.length > 0 && (
-                <>
-                  <div className="ok-box">
-                    {catalogoApp.length} seguros e {artigos.length} artigos vindos da Análise de
-                    Vendas — sem precisares de carregar nada.
-                  </div>
+              {/* v3.25.1: o EAN e o scanner estão SEMPRE disponíveis. Antes viviam
+                  dentro do bloco "catalogoApp.length > 0" e desapareciam quando não
+                  havia dados de vendas carregados — que é o caso mais comum. */}
+              {catalogoApp.length > 0 ? (
+                <div className="ok-box">
+                  {catalogoApp.length} seguros e {artigos.length} artigos vindos da Análise de
+                  Vendas — os preços saem preenchidos.
+                </div>
+              ) : (
+                <div className="warn-box">
+                  Sem dados de vendas em memória. Podes na mesma ler o EAN — a etiqueta sai
+                  com as designações da família, mas <b>sem preços</b>. Para os preços, abre
+                  a Análise de Vendas ou importa o ficheiro aqui em baixo.
+                </div>
+              )}
                   <label className="f" style={{ marginTop: 12 }}>EAN ou designação do artigo</label>
                   <input type="text" value={procura} autoFocus
                     placeholder="Lê o código de barras ou escreve o nome…"
@@ -978,7 +995,10 @@ export default function EtiquetasSeguros({ rows = [] }) {
                     <div className="sel-art">
                       <div className="cn"><b>{artigoSel.name}</b></div>
                       <div className="t2">
-                        {artigoSel.pvp.toFixed(2).replace(".", ",")} € · escolhe a família:
+                        {artigoSel.desconhecido
+                          ? "Artigo não encontrado nos dados de vendas — preços por preencher."
+                          : artigoSel.pvp.toFixed(2).replace(".", ",") + " €"}
+                        {" · escolhe a família:"}
                       </div>
                       <div className="chips" style={{ marginTop: 8 }}>
                         {categoriasDisponiveis.map((k) => (
@@ -999,8 +1019,6 @@ export default function EtiquetasSeguros({ rows = [] }) {
                     escolhe-la tu. Confere na pré-visualização antes de imprimir.
                   </p>
                   <div className="sec" style={{ marginTop: 18 }}>Ou importar de um ficheiro</div>
-                </>
-              )}
               <div className="row">
                 <button className="btn btn-ghost" onClick={() => xlsxRef.current?.click()} disabled={!!progresso}>
                   {progresso ? "A ler o ficheiro…" : catalogo.length ? "Actualizar catálogo" : "Importar ficheiro de vendas"}
