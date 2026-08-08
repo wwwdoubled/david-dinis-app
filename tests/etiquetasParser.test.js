@@ -10,7 +10,67 @@ import {
   catalogoDeVendas,
   segurosParaArtigo,
   categoriaDoArtigo,
+  numerosDaLinha,
 } from '../app/lib/etiquetasParser.js';
+
+// Formato real do ecrã Planos Proteção: designação numa linha, franquia e preço
+// colados na linha seguinte ("Franquia 90€€ 41,99").
+describe('parsePrintTexto — formato Fnac com preço na linha seguinte', () => {
+  const texto = `SEG DDR TELM/SMTP BIMESTRAL (1449,96-1999,95) NOVO FNAC SAFE C/VPN E ID PROTECTION+EXTRA CLOUD
+Franquia 90€€ 41,99
+SEG DDR TELM/SMTP BIMESTRAL (1449,96-1999,95) NOVO FNAC SAFE C/VPN E ID PROTECTION
+Franquia 90€€ 37,99
+SEG DDR TELM/SMTP 1 ANO(1449,96-1999,95)
+Franquia 90€€ 239,99
+SEG DDR TELM/SMTP 2 ANOS(1449,96-1999,95)
+Franquia 90€€ 363,99`;
+
+  const r = parsePrintTexto(texto);
+
+  it('apanha os quatro serviços', () => {
+    expect(r.servicos).toHaveLength(4);
+  });
+
+  it('associa o preço da linha seguinte à designação certa', () => {
+    expect(r.servicos.map((s) => s.preco)).toEqual(['41,99 €', '37,99 €', '239,99 €', '363,99 €']);
+  });
+
+  it('limpa o escalão e normaliza ANO→ANOS mesmo colado ao parêntesis', () => {
+    expect(r.servicos[2].nome).toBe('SEG DDR TELM/SMTP 1 ANOS');
+    expect(r.servicos[3].nome).toBe('SEG DDR TELM/SMTP 2 ANOS');
+  });
+
+  it('preserva o resto da designação, incluindo o sufixo +EXTRA CLOUD', () => {
+    expect(r.servicos[0].nome).toBe('SEG DDR TELM/SMTP BIMESTRAL NOVO FNAC SAFE C/VPN E ID PROTECTION+EXTRA CLOUD');
+    expect(r.servicos[1].nome).toBe('SEG DDR TELM/SMTP BIMESTRAL NOVO FNAC SAFE C/VPN E ID PROTECTION');
+  });
+
+  it('lê a franquia e a categoria', () => {
+    expect(r.franquia).toBe('90 €');
+    expect(r.categoria).toBe('Telecom');
+  });
+
+  it('não confunde o escalão com um preço', () => {
+    expect(r.servicos.every((s) => !/1449|1999/.test(s.preco))).toBe(true);
+  });
+
+  it('não toma a linha da franquia como equipamento', () => {
+    expect(r.equipamento).toBe('');
+  });
+});
+
+describe('numerosDaLinha', () => {
+  it('ignora o intervalo de escalão', () => {
+    expect(numerosDaLinha('SEG X (1449,96-1999,95)')).toEqual([]);
+  });
+  it('separa franquia e preço colados', () => {
+    expect(numerosDaLinha('Franquia 90€€ 41,99')).toEqual(['90', '41,99']);
+  });
+  it('devolve vazio sem números', () => {
+    expect(numerosDaLinha('Garantias Fnac')).toEqual([]);
+    expect(numerosDaLinha('')).toEqual([]);
+  });
+});
 
 describe('normalizaNome', () => {
   it('remove o intervalo de escalão', () => {
@@ -90,7 +150,8 @@ APPLE MACBOOK AIR 13 M3 16GB 512GB MIDNIGHT
   it('extrai serviços, preços, franquia e categoria', () => {
     const r = parsePrintTexto(texto);
     expect(r.servicos).toHaveLength(4);
-    expect(r.servicos[1]).toEqual({ nome: 'SEG DDR INFORMATICA 1 ANOS', preco: '163,99 €' });
+    expect(r.servicos[1]).toMatchObject({ nome: 'SEG DDR INFORMATICA 1 ANOS', preco: '163,99 €' });
+    expect(r.servicos[1].escalao).toEqual({ min: 1001, max: 1500 });
     expect(r.servicos[2].nome).toBe('SEG DDR INFORMATICA 2 ANOS');
     expect(r.franquia).toBe('120 €');
     expect(r.categoria).toBe('Informática');
@@ -115,7 +176,7 @@ APPLE MACBOOK AIR 13 M3 16GB 512GB MIDNIGHT
 
   it('aceita serviços sem preço', () => {
     const r = parsePrintTexto('SEG DDR FOTO 1 ANO');
-    expect(r.servicos[0]).toEqual({ nome: 'SEG DDR FOTO 1 ANOS', preco: '' });
+    expect(r.servicos[0]).toMatchObject({ nome: 'SEG DDR FOTO 1 ANOS', preco: '' });
   });
 });
 

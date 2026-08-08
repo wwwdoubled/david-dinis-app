@@ -24,6 +24,6 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "vitest": "^2.1.8"
+    "vitest": "^3.2.4"
   }
 }

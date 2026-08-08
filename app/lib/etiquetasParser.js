@@ -53,6 +53,16 @@ export function extraiPreco(linha) {
   return num + ' €';
 }
 
+/**
+ * Números soltos de uma linha auxiliar, já sem o intervalo de escalão
+ * (senão "(1449,96-1999,95)" seria lido como preço).
+ * "Franquia 90€€ 41,99" -> ["90", "41,99"]
+ */
+export function numerosDaLinha(linha) {
+  const semEscalao = String(linha || '').replace(/\([^)]*\)/g, ' ');
+  return (semEscalao.match(/\d+(?:[.,]\d{1,2})?/g) || []).map((s) => s.replace('.', ','));
+}
+
 /** Extrai a franquia "120 €" de um texto completo, ou "" se não houver. */
 export function extraiFranquia(texto) {
   const m = RE_FRANQUIA.exec(String(texto || ''));
@@ -93,27 +103,43 @@ export function parsePrintTexto(texto) {
 
   const servicos = [];
   const naoServico = [];
+  let franquia = '';
 
   for (const linha of linhas) {
-    // a franquia sozinha não é um serviço
-    if (/^franquia/i.test(linha)) continue;
-
-    // separa a designação do preço: o preço está sempre à direita
-    const preco = extraiPreco(linha);
+    // ── é uma linha de serviço? ──
+    // O preço pode vir na própria linha ("SEG … 163,99 €") ou na linha seguinte.
+    const precoInline = extraiPreco(linha);
     let designacao = linha;
-    if (preco) {
-      const m = RE_PRECO.exec(linha);
-      designacao = linha.slice(0, m.index);
-    }
+    if (precoInline) designacao = linha.slice(0, RE_PRECO.exec(linha).index);
 
     const nome = normalizaNome(designacao);
-    if (!nome) continue;
-
-    if (RE_LINHA_SERVICO.test(nome)) {
-      servicos.push({ nome, preco });
-    } else {
-      naoServico.push(linha.trim());
+    if (nome && RE_LINHA_SERVICO.test(nome)) {
+      // guarda-se o escalão para o catálogo poder reutilizar estes preços
+      servicos.push({ nome, preco: precoInline, escalao: extraiEscalao(linha) });
+      continue;
     }
+
+    // ── linha auxiliar: franquia e/ou preço do serviço anterior ──
+    // O ecrã da Fnac cola os dois: "Franquia 90€€ 41,99" = franquia 90 €,
+    // preço 41,99 €. O preço pertence à designação imediatamente acima.
+    const nums = numerosDaLinha(linha);
+    const ultimo = servicos[servicos.length - 1];
+
+    if (/franquia/i.test(linha) && nums.length) {
+      if (!franquia) franquia = nums[0] + ' €';
+      if (nums.length > 1 && ultimo && !ultimo.preco) {
+        ultimo.preco = nums[nums.length - 1] + ' €';
+      }
+      continue;
+    }
+
+    // linha só com um valor ("€ 41,99", "Garantias Fnac 99,90 €")
+    if (nums.length === 1 && /€|EUR/i.test(linha) && ultimo && !ultimo.preco) {
+      ultimo.preco = nums[0] + ' €';
+      continue;
+    }
+
+    if (nome) naoServico.push(linha.trim());
   }
 
   // o equipamento é, tipicamente, a linha mais longa que não é um serviço
@@ -123,7 +149,7 @@ export function parsePrintTexto(texto) {
 
   return {
     equipamento: equipamento.replace(/\s+/g, ' ').trim(),
-    franquia: extraiFranquia(texto),
+    franquia: franquia || extraiFranquia(texto),
     categoria: deduzCategoria(servicos.map((s) => s.nome)),
     servicos,
   };

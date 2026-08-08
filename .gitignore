@@ -1,5 +1,9 @@
 # dependencies
 /node_modules
+# O projecto vive dentro do iCloud Drive (Documents). O iCloud ignora tudo o que
+# termine em .nosync, por isso as dependências ficam lá e node_modules é apenas
+# um symlink — senão cada leitura passa pela sincronização e os testes penduram-se.
+/node_modules.nosync
 /.pnp
 .pnp.js
 
