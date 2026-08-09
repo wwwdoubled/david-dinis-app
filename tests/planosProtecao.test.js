@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { PLANOS, FAMILIAS, planosParaArtigo, tectoDaFamilia } from '../app/lib/planosProtecao.js';
+import {
+  PLANOS, FAMILIAS, planosParaArtigo, tectoDaFamilia,
+  familiaDaTabela, grupoEG, extensoesParaArtigo,
+} from '../app/lib/planosProtecao.js';
 
 describe('tabela de planos', () => {
   it('tem as nove famílias do ficheiro oficial', () => {
@@ -82,5 +85,60 @@ describe('tectoDaFamilia', () => {
   it('devolve o maior valor coberto', () => {
     expect(tectoDaFamilia('Telemóveis')).toBe(2499.95);
     expect(tectoDaFamilia('Inexistente')).toBe(0);
+  });
+});
+
+describe('familiaDaTabela — cruzamento EAN → família', () => {
+  it('classifica os casos claros', () => {
+    expect(familiaDaTabela('APPLE IPHONE 16 128GB', 'TELECOM')).toBe('Telemóveis');
+    expect(familiaDaTabela('SAMSUNG GALAXY TAB S9', '')).toBe('Tablets');
+    expect(familiaDaTabela('APPLE WATCH SERIES 10', '')).toBe('Smartwatches');
+    expect(familiaDaTabela('SONY PLAYSTATION 5 SLIM', '')).toBe('Consolas');
+    expect(familiaDaTabela('TROTINETE XIAOMI PRO 4', '')).toBe('Bicicletas Elétricas');
+    expect(familiaDaTabela('GUITARRA FENDER STRATOCASTER', '')).toBe('Instrumentos Musicais');
+    expect(familiaDaTabela('LG TV OLED 55C5', '')).toBe('Equip. Eletrónicos');
+    expect(familiaDaTabela('APPLE MACBOOK AIR M3', '')).toBe('Equip. Eletrónicos');
+  });
+
+  it('o mais específico ganha ao genérico', () => {
+    // "APPLE WATCH" tem WATCH — não deve cair em electrónica
+    expect(familiaDaTabela('APPLE WATCH ULTRA 2', '')).toBe('Smartwatches');
+    // trotinete eléctrica não é electrónica genérica
+    expect(familiaDaTabela('SCOOTER ELETRICA NINEBOT', '')).toBe('Bicicletas Elétricas');
+  });
+
+  it('usa a família Fnac quando a descrição não chega', () => {
+    expect(familiaDaTabela('XPTO 1234', 'TELEMOVEIS')).toBe('Telemóveis');
+  });
+
+  it('devolve vazio quando não há certeza', () => {
+    expect(familiaDaTabela('ARTIGO DESCONHECIDO', '')).toBe('');
+    expect(familiaDaTabela('', '')).toBe('');
+    expect(familiaDaTabela(null, null)).toBe('');
+  });
+});
+
+describe('grupoEG e extensoesParaArtigo', () => {
+  it('identifica o grupo de extensão de garantia', () => {
+    expect(grupoEG('APPLE MACBOOK AIR M3', '')).toBe('Informática Portátil');
+    expect(grupoEG('MONITOR DELL 27', '')).toBe('Informática Fixa');
+    expect(grupoEG('LG TV OLED 55C5', '')).toBe('Imagem e Som');
+    expect(grupoEG('ASPIRADOR DYSON V15', '')).toBe('PAE');
+    expect(grupoEG('ARTIGO XPTO', '')).toBe('');
+  });
+
+  it('devolve só as extensões do grupo certo', () => {
+    const r = extensoesParaArtigo('Imagem e Som', 500);
+    expect(r.length).toBeGreaterThan(0);
+    expect(r.every((p) => /IMAGEM E SOM/i.test(p.produto))).toBe(true);
+  });
+
+  it('portátil não traz as de informática fixa', () => {
+    const r = extensoesParaArtigo('Informática Portátil', 900);
+    expect(r.every((p) => /PORT[ÁA]TIL/i.test(p.produto))).toBe(true);
+  });
+
+  it('sem grupo não devolve nada', () => {
+    expect(extensoesParaArtigo('', 500)).toEqual([]);
   });
 });

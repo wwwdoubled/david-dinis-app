@@ -1885,10 +1885,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.26.0';
+const APP_VERSION = '3.27.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-08-09T23:30:00+01:00';
+const APP_BUILD_DATE = '2026-08-09T23:45:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1898,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.27.0', date: '2026-08-09', time: '23:45', summary: 'Etiquetas: seguros e extensões de garantia vão-se buscar sozinhos pelo EAN. Novo índice que cruza tudo o que a app já conhece — linhas de stock/vendas e produtos de TODAS as campanhas carregadas (EAN, descrição, família Fnac, preço base e de campanha). Lê-se o código de barras (pistola, câmara ou teclado) e ficam preenchidos de uma vez: preço do artigo, família da tabela de Planos de Proteção e grupo de extensão de garantia. Daí saem os seguros aplicáveis com o escalão certo E as extensões de garantia da tabela própria (EG 2+2 PAE, Multigarantia Imagem e Som, Informática Fixa/Portátil e versões Pro), tudo na mesma etiqueta. familiaDaTabela() e grupoEG() nunca adivinham: quando a descrição não é clara devolvem vazio e o interface pede para escolher, em vez de aplicar a tabela de preços errada em silêncio. EAN fora das campanhas e do stock deixa de ser beco sem saída — avisa e deixa escrever o preço à mão. 62 testes só nesta área.' },
   { version: '3.26.0', date: '2026-08-09', time: '23:30', summary: 'Etiquetas: tabela oficial de preços + performance das campanhas. (A) Nova aba "Tabela de preços", agora a primeira: escolhes a família (Telemóveis, Tablets, Smartwatches, Consolas, Equip. Eletrónicos, Bicicletas, Instrumentos, Videojogos, Extensões de Garantia) e escreves o preço do artigo — os escalões são aplicados sozinhos e saem todos os planos aplicáveis com preço, franquia e addon cloud. Os 291 escalões da "Atualização oferta Planos de Proteção" ficaram embebidos em app/lib/planosProtecao.js. NÃO depende de EAN nem dos dados de vendas, que era o motivo de a procura por EAN nunca encontrar nada. (B) PERFORMANCE com vários Excel: o memo `products` dependia de zoneIndex, que deriva de floors — por isso CADA atribuição de móvel reparseava todas as linhas de todos os ficheiros (String/trim/normalizeEAN/parseNum por célula, centenas de milhar de linhas). Separado em productsBase (parsing, só refaz quando as campanhas mudam) e products (só lookups em Map). O mapa EAN→família do topFamilies tinha o mesmo problema via `periods` e passou a memo próprio. Corrigido de caminho um bug latente: otherZoneIndex não estava nas dependências, pelo que as zonas de outros períodos ficavam desactualizadas. 132 testes.' },
   { version: '3.25.3', date: '2026-08-09', time: '00:35', summary: 'Etiquetas — o "Colar texto" passa a aceitar o formato real do ecrã Planos Proteção, em que o preço vem na LINHA SEGUINTE e colado à franquia ("Franquia 90€€ 41,99" = franquia 90 €, preço 41,99 €). Antes essas linhas eram descartadas por completo e os preços perdiam-se todos. O parser associa agora o preço à designação imediatamente acima, aceita o escalão colado ao texto ("1 ANO(1449,96-1999,95)") sem o confundir com um preço, e preserva sufixos como "+EXTRA CLOUD". Cada serviço guarda também o seu escalão, para o catálogo poder reutilizar estes preços. Infra: vitest 2.1.8 → 3.2.4 — a versão antiga era incompatível com o Node 25 e a suite bloqueava no arranque em vez de correr; node_modules movido para fora da sincronização do iCloud (pasta .nosync + symlink), que tornava cada leitura lentíssima. 78 testes a passar.' },
   { version: '3.25.2', date: '2026-08-06', time: '22:05', summary: 'FIX Etiquetas — escrever o EAN não fazia nada. O efeito que reagia ao código saía em silêncio (return) quando o artigo não estava nos dados de vendas em memória, o que sem esses dados carregados era sempre. Passou a haver uma função resolverEan que faz SEMPRE alguma coisa: artigo conhecido e família clara gera a etiqueta directa; família por confirmar mostra os botões; EAN desconhecido cria a etiqueta na mesma, com o código no campo do equipamento e os preços por preencher. Acrescentado debounce de 500 ms (a pistola escreve muito depressa, o teclado dígito a dígito) e resolução imediata ao Enter, que é como a pistola termina a leitura. A câmara passa a entregar o código ao mesmo caminho, em vez de ter lógica própria.' },
@@ -6017,6 +6018,31 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // uma password nova via supabase.auth.updateUser({password}).
   const mustChangePassword = !!userProfile?.must_change_password;
 
+  // v3.27.0: artigos das campanhas para o cruzamento EAN → seguros nas Etiquetas.
+  // Um registo por EAN, com descrição, família e preço — o suficiente para a
+  // tabela de Planos de Proteção escolher família e escalão sozinha.
+  const etiquetasProdutos = useMemo(() => {
+    const m = new Map();
+    for (const c of campaigns || []) {
+      if (!c.rows || !c.rows.length) continue;
+      const cols = detectColumns(c.headers || []);
+      if (!cols.ean) continue;
+      for (const r of c.rows) {
+        const k = normalizeEAN(r[cols.ean]);
+        if (!k || m.has(k)) continue;
+        m.set(k, {
+          ean: k,
+          description: cols.description ? String(r[cols.description] ?? '').trim() : '',
+          family: cols.family ? String(r[cols.family] ?? '').trim() : '',
+          basePrice: parseNum(cols.basePrice ? r[cols.basePrice] : 0),
+          campaignPrice: parseNum(cols.campaignPrice ? r[cols.campaignPrice] : 0),
+        });
+      }
+    }
+    return Array.from(m.values());
+  }, [campaigns]);
+
+
   return (
     <div style={{ background: T.bg, color: T.ink, minHeight: '100vh', fontFamily: "'Geist', sans-serif" }}>
       {mustChangePassword && (
@@ -6548,7 +6574,10 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           )}
           {/* v3.24.2: as linhas de vendas já carregadas alimentam o catálogo de
               seguros — designação, escalão e preço real, sem novo upload. */}
-          {view === 'etiquetas' && <EtiquetasSeguros rows={[...(stockRowsPO2 || []), ...(stockRowsPO3 || [])]} />}
+          {view === 'etiquetas' && <EtiquetasSeguros
+            rows={[...(stockRowsPO2 || []), ...(stockRowsPO3 || [])]}
+            produtos={etiquetasProdutos}
+          />}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
           {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} currentStoreId={currentStoreId} />}
           {view === 'devolucoes' && <DevolucoesView user={user} userDepartment={userDepartment} />}

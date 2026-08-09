@@ -6,7 +6,10 @@ import {
   catalogoDeVendas, segurosParaArtigo, categoriaDoArtigo,
 } from "./lib/etiquetasParser";
 import { useBarcodeScanner, bip } from "./lib/useBarcodeScanner";
-import { FAMILIAS, planosParaArtigo, tectoDaFamilia } from "./lib/planosProtecao";
+import {
+  FAMILIAS, planosParaArtigo, tectoDaFamilia,
+  familiaDaTabela, grupoEG, extensoesParaArtigo,
+} from "./lib/planosProtecao";
 
 /* ------------------------------------------------------------------ */
 /*  OCR — tesseract.js carregado do CDN só quando é preciso.           */
@@ -466,7 +469,7 @@ function Etiqueta({ e, base, rodape, botao }) {
 /* ================================================================== */
 /*  App                                                                */
 /* ================================================================== */
-export default function EtiquetasSeguros({ rows = [] }) {
+export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
   const [etiquetas, setEtiquetas] = useState([novaEtiqueta()]);
   const [selId, setSelId] = useState(null);
   const [porFolha, setPorFolha] = useState(4);
@@ -762,6 +765,26 @@ export default function EtiquetasSeguros({ rows = [] }) {
     return true;
   }, [catalogoApp]);
 
+  /* ---------- EAN → artigo (cruzamento) ----------
+     O índice junta tudo o que a app conhece: linhas de vendas/stock e produtos
+     das campanhas. Dá preço + descrição + família Fnac, que é o que falta para
+     a tabela de preços decidir sozinha. */
+  const indicePorEan = React.useMemo(() => {
+    const m = new Map();
+    const juntar = (ean, name, pvp, fam1) => {
+      const k = String(ean || "").replace(/[^\d]/g, "").replace(/^0+/, "");
+      if (!k || !name) return;
+      const p = Number(pvp);
+      const ja = m.get(k);
+      // fica o registo com preço; entre dois com preço, o primeiro encontrado
+      if (ja && ja.pvp > 0) return;
+      m.set(k, { ean: k, name: String(name).trim(), pvp: Number.isFinite(p) && p > 0 ? p : 0, fam1: fam1 || "" });
+    };
+    for (const r of rows || []) juntar(r?.ean, r?.name, r?.pvp, r?.fam1);
+    for (const p of produtos || []) juntar(p?.ean, p?.description || p?.name, p?.campaignPrice || p?.basePrice, p?.family);
+    return m;
+  }, [rows, produtos]);
+
   /* ---------- tabela oficial: família + preço ---------- */
   const precoNum = React.useMemo(() => {
     const t = precoArtigo.trim().replace(/[€\s]/g, "").replace(",", ".");
@@ -774,15 +797,59 @@ export default function EtiquetasSeguros({ rows = [] }) {
     [familia, precoNum]
   );
 
+  // Extensões de garantia do artigo — tabela própria, cruzada pelo grupo.
+  const [grupoExt, setGrupoExt] = useState("");
+  const extensoes = React.useMemo(
+    () => (grupoExt && precoNum !== null ? extensoesParaArtigo(grupoExt, precoNum) : []),
+    [grupoExt, precoNum]
+  );
+
+  /* Resolve um EAN: preenche preço, família e grupo de extensão de uma vez. */
+  const [eanTabela, setEanTabela] = useState("");
+  const [avisoEan, setAvisoEan] = useState("");
+
+  const resolverEanTabela = useCallback((bruto) => {
+    const k = String(bruto || "").replace(/[^\d]/g, "").replace(/^0+/, "");
+    if (!k) return;
+    const art = indicePorEan.get(k);
+    bip(!!art);
+    if (!art) {
+      setAvisoEan(`EAN ${k} não está nas campanhas nem no stock carregados. Escreve o preço à mão.`);
+      return;
+    }
+    const fam = familiaDaTabela(art.name, art.fam1);
+    setNomeArtigo(art.name);
+    if (art.pvp > 0) setPrecoArtigo(String(art.pvp).replace(".", ","));
+    if (fam) setFamilia(fam);
+    setGrupoExt(grupoEG(art.name, art.fam1));
+    setEanTabela("");
+    setAvisoEan(
+      !art.pvp ? `${art.name} — encontrado, mas sem preço nos dados. Escreve-o à mão.`
+        : !fam ? `${art.name} — família não reconhecida. Escolhe-a em baixo.`
+        : ""
+    );
+  }, [indicePorEan]);
+
+  useEffect(() => {
+    const q = eanTabela.trim();
+    if (!/^\d{8,}$/.test(q)) return;
+    const t = setTimeout(() => resolverEanTabela(q), 400);
+    return () => clearTimeout(t);
+  }, [eanTabela, resolverEanTabela]);
+
+  const scannerTabela = useBarcodeScanner({ onEan: (e) => setEanTabela(e) });
+
   const etiquetaDaTabela = () => {
     if (!planos.length) return;
     // a franquia vem da tabela quando existe; senão fica a da categoria
     const comFranquia = planos.find((p) => p.franquia);
+    // seguros + extensões de garantia na mesma etiqueta
+    const linhas = [...planos, ...extensoes].map((p) => ({ nome: p.nome, preco: p.preco }));
     const n = novaEtiqueta(FAMILIA_PARA_CATEGORIA[familia] || "Informática", {
       estado: "ok",
       equipamento: nomeArtigo.trim(),
       franquia: comFranquia ? comFranquia.franquia : "",
-      servicos: planos.map((p) => ({ nome: p.nome, preco: p.preco })),
+      servicos: linhas,
     });
     setErro("");
     setEtiquetas((l) => [...l, n]);
@@ -968,7 +1035,27 @@ export default function EtiquetasSeguros({ rows = [] }) {
                 de vendas.
               </p>
 
-              <label className="f" style={{ marginTop: 12 }}>Família</label>
+              <div className="sec" style={{ marginTop: 14 }}>Ler o artigo pelo EAN</div>
+              <input type="text" value={eanTabela} autoFocus
+                placeholder="Lê o código de barras ou escreve o EAN…"
+                onChange={(e) => { setEanTabela(e.target.value); setAvisoEan(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); resolverEanTabela(eanTabela); } }} />
+              <div className="row">
+                <button className="btn btn-ghost" onClick={scannerTabela.start} disabled={scannerTabela.scanning}>
+                  Ler código de barras
+                </button>
+                <button className="btn btn-ghost" onClick={() => { setFamilia(""); setPrecoArtigo(""); setNomeArtigo(""); setGrupoExt(""); setAvisoEan(""); }}>
+                  Limpar
+                </button>
+              </div>
+              <p className="hint">
+                Cruza com as campanhas e o stock já carregados: preenche preço, família e o
+                grupo de extensão de garantia. Se o artigo não estiver lá, escreve o preço à mão.
+              </p>
+              {avisoEan && <div className="warn-box">{avisoEan}</div>}
+              {scannerTabela.erro && <div className="err">{scannerTabela.erro}</div>}
+
+              <label className="f" style={{ marginTop: 14 }}>Família</label>
               <div className="chips">
                 {FAMILIAS.map((f) => (
                   <button key={f} className={"chip" + (familia === f ? " on" : "")}
@@ -1013,8 +1100,22 @@ export default function EtiquetasSeguros({ rows = [] }) {
                     {planos[0].escalao.max.toFixed(2).replace(".", ",")} €
                     {planos.find((p) => p.franquia) ? ` · franquia ${planos.find((p) => p.franquia).franquia}` : ""}
                   </p>
-                  <button className="btn btn-main" style={{ marginTop: 6 }} onClick={etiquetaDaTabela}>
-                    Criar etiqueta com estes {planos.length} planos
+                  {extensoes.length > 0 && (
+                    <>
+                      <div className="sec" style={{ marginTop: 16 }}>Extensões de garantia · {grupoExt}</div>
+                      <div className="cat">
+                        {extensoes.map((p, i) => (
+                          <div className="catrow" key={i}>
+                            <span className="cn">{p.produto}</span>
+                            <span className="cp">{p.preco}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <button className="btn btn-main" style={{ marginTop: 10 }} onClick={etiquetaDaTabela}>
+                    Criar etiqueta · {planos.length} seguros
+                    {extensoes.length ? ` + ${extensoes.length} extensões` : ""}
                   </button>
                 </>
               )}

@@ -595,3 +595,68 @@ export function tectoDaFamilia(familia) {
   }
   return max;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Cruzamento EAN → família da tabela
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Mapeia a designação (e a família Fnac, quando existe) para uma das FAMILIAS
+ * da tabela de preços. Devolve "" quando não há certeza — nunca adivinha, para
+ * não aplicar a tabela de preços errada em silêncio.
+ *
+ * @param {string} desc  descrição do artigo
+ * @param {string} fam1  família Fnac do ficheiro, se disponível
+ */
+export function familiaDaTabela(desc, fam1) {
+  const d = (String(desc || '') + ' ' + String(fam1 || '')).toUpperCase();
+  if (!d.trim()) return '';
+
+  // ordem importa: o mais específico primeiro
+  if (/\b(TROTI|TROTINETE|SCOOTER|BICICLET|E-?BIKE|HOVERBOARD)/.test(d)) return 'Bicicletas Elétricas';
+  if (/\b(SMARTWATCH|SMTWATCH|GALAXY\s*WATCH|APPLE\s*WATCH|IWATCH)/.test(d)) return 'Smartwatches';
+  if (/\b(TABLET|IPAD)\b|\bTAB\b/.test(d)) return 'Tablets';
+  // prefixos: "TELEMOVEIS", "SMARTPHONES" — não são palavras exactas
+  if (/\b(TELM|TELEM|SMTP|SMARTPHONE|IPHONE)/.test(d)) return 'Telemóveis';
+  if (/\b(CONSOLA|PLAYSTATION|\bPS5\b|\bPS4\b|XBOX|NINTENDO|SWITCH)\b/.test(d)) return 'Consolas';
+  if (/\b(VIDEOJOGO|VIDEO\s*JOGO|JOGO\s|\bDVD\b|BLU-?RAY)/.test(d)) return 'Videojogos';
+  if (/\b(GUITARR|PIANO|VIOLIN|BATERIA\s*MUSIC|INSTRUMENTO|SINTETIZAD|AMPLIFICAD)/.test(d)) return 'Instrumentos Musicais';
+
+  // catch-all da electrónica: TV, informática, foto, som, drones
+  if (/\b(TV|LCD|LED|OLED|QLED|MONITOR|NOTEB|PORT[ÁA]TIL|LAPTOP|MACBOOK|DESKTOP|IMAC|IMPRESSOR|FOTO|C[ÂA]MARA|CAMERA|GOPRO|LENTE|DRONE|AUSCUL|COLUNA|SOUNDBAR|AIRPODS|HIFI)/.test(d)) {
+    return 'Equip. Eletrónicos';
+  }
+  return '';
+}
+
+/**
+ * Grupo de extensão de garantia aplicável ao artigo, ou "" se não for claro.
+ * As EG têm tabela própria, separada dos DDR.
+ */
+export function grupoEG(desc, fam1) {
+  const d = (String(desc || '') + ' ' + String(fam1 || '')).toUpperCase();
+  if (!d.trim()) return '';
+  if (/\b(NOTEB|PORT[ÁA]TIL|LAPTOP|MACBOOK)/.test(d)) return 'Informática Portátil';
+  if (/\b(DESKTOP|IMAC|MONITOR|IMPRESSOR|\bPC\b)/.test(d)) return 'Informática Fixa';
+  if (/\b(TV|LCD|LED|OLED|QLED|AUSCUL|COLUNA|SOUNDBAR|HIFI|FOTO|C[ÂA]MARA|CAMERA)/.test(d)) return 'Imagem e Som';
+  if (/\b(ASPIRADOR|CAF[ÉE]|FRITADEIRA|MICROONDAS|M[ÁA]QUINA\s*LAVAR|PAE)/.test(d)) return 'PAE';
+  return '';
+}
+
+/**
+ * Extensões de garantia aplicáveis a um grupo e preço.
+ * Filtra a família "Extensões de Garantia" pelos produtos do grupo indicado.
+ */
+export function extensoesParaArtigo(grupo, preco) {
+  if (!grupo) return [];
+  const todos = planosParaArtigo('Extensões de Garantia', preco);
+  const g = grupo.toUpperCase();
+  return todos.filter((p) => {
+    const n = p.produto.toUpperCase();
+    if (g === 'PAE') return /\bPAE\b/.test(n);
+    if (g === 'IMAGEM E SOM') return /IMAGEM E SOM/.test(n);
+    if (g === 'INFORMÁTICA PORTÁTIL') return /PORT[ÁA]TIL/.test(n);
+    if (g === 'INFORMÁTICA FIXA') return /\bFIXA\b/.test(n);
+    return false;
+  });
+}
