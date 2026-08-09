@@ -6,6 +6,7 @@ import {
   catalogoDeVendas, segurosParaArtigo, categoriaDoArtigo,
 } from "./lib/etiquetasParser";
 import { useBarcodeScanner, bip } from "./lib/useBarcodeScanner";
+import { FAMILIAS, planosParaArtigo, tectoDaFamilia } from "./lib/planosProtecao";
 
 /* ------------------------------------------------------------------ */
 /*  OCR — tesseract.js carregado do CDN só quando é preciso.           */
@@ -30,6 +31,20 @@ function carregarTesseract() {
 }
 
 const CHAVE_CATALOGO = "dd_catalogo_seguros";
+
+/* As famílias da tabela oficial de preços não têm os mesmos nomes que as
+   categorias do banner. Este mapa liga umas às outras (coberturas e título). */
+const FAMILIA_PARA_CATEGORIA = {
+  "Telemóveis": "Telecom",
+  "Tablets": "Telecom",
+  "Smartwatches": "Telecom",
+  "Equip. Eletrónicos": "Informática",
+  "Consolas": "Informática",
+  "Bicicletas Elétricas": "Casa",
+  "Instrumentos Musicais": "Som",
+  "Videojogos": "Informática",
+  "Extensões de Garantia": "Casa",
+};
 
 /* ================================================================== */
 /*  Estilos                                                            */
@@ -111,6 +126,7 @@ input[type=text]:focus,select:focus{outline:2px solid #E8710A;outline-offset:-1p
 .catrow:last-child{border-bottom:0}
 .catrow .cn{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .catrow .cp{flex:0 0 auto;color:#E8710A;font-weight:700}
+.catrow .addon{color:#8a8a84;font-weight:400}
 .catrow.art{cursor:pointer}
 .catrow.art:hover{background:#fff6ed}
 .sel-art{margin-top:10px;padding:11px 12px;border:1px solid #E8710A;border-radius:7px;
@@ -465,7 +481,12 @@ export default function EtiquetasSeguros({ rows = [] }) {
   const [escala, setEscala] = useState(0.5);
 
   // modo de entrada: texto colado | manual | catálogo da app | OCR local
-  const [modo, setModo] = useState("catalogo");
+  const [modo, setModo] = useState("tabela");
+  // modo "tabela": família + preço do artigo → preços oficiais. Não depende
+  // de dados de vendas nem de EAN, por isso funciona sempre.
+  const [familia, setFamilia] = useState("");
+  const [precoArtigo, setPrecoArtigo] = useState("");
+  const [nomeArtigo, setNomeArtigo] = useState("");
   const [texto, setTexto] = useState("");
   const [catalogo, setCatalogo] = useState([]);
   const [procura, setProcura] = useState("");
@@ -741,6 +762,35 @@ export default function EtiquetasSeguros({ rows = [] }) {
     return true;
   }, [catalogoApp]);
 
+  /* ---------- tabela oficial: família + preço ---------- */
+  const precoNum = React.useMemo(() => {
+    const t = precoArtigo.trim().replace(/[€\s]/g, "").replace(",", ".");
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : null;
+  }, [precoArtigo]);
+
+  const planos = React.useMemo(
+    () => (familia && precoNum !== null ? planosParaArtigo(familia, precoNum) : []),
+    [familia, precoNum]
+  );
+
+  const etiquetaDaTabela = () => {
+    if (!planos.length) return;
+    // a franquia vem da tabela quando existe; senão fica a da categoria
+    const comFranquia = planos.find((p) => p.franquia);
+    const n = novaEtiqueta(FAMILIA_PARA_CATEGORIA[familia] || "Informática", {
+      estado: "ok",
+      equipamento: nomeArtigo.trim(),
+      franquia: comFranquia ? comFranquia.franquia : "",
+      servicos: planos.map((p) => ({ nome: p.nome, preco: p.preco })),
+    });
+    setErro("");
+    setEtiquetas((l) => [...l, n]);
+    setSelId(n.id);
+    setNomeArtigo("");
+    setPrecoArtigo("");
+  };
+
   /* ---------- scanner de barcodes (o mesmo motor do Inventário) ---------- */
   // Devolve o EAN normalizado; a partir daí segue o mesmo caminho que
   // escrever à mão ou ler com a pistola.
@@ -897,6 +947,7 @@ export default function EtiquetasSeguros({ rows = [] }) {
           <div className="sec">1 · De onde vêm os dados</div>
           <div className="chips">
             {[
+              ["tabela", "Tabela de preços"],
               ["texto", "Colar texto"],
               ["manual", "Manual"],
               ["catalogo", "Catálogo"],
@@ -907,6 +958,68 @@ export default function EtiquetasSeguros({ rows = [] }) {
               </button>
             ))}
           </div>
+
+          {/* --- 1z. tabela oficial de preços (o caminho normal) --- */}
+          {modo === "tabela" && (
+            <>
+              <p className="hint" style={{ marginTop: 10 }}>
+                Preços oficiais dos Planos de Proteção. Escolhe a família, escreve o preço do
+                artigo e os escalões são aplicados sozinhos. Não precisa de EAN nem de dados
+                de vendas.
+              </p>
+
+              <label className="f" style={{ marginTop: 12 }}>Família</label>
+              <div className="chips">
+                {FAMILIAS.map((f) => (
+                  <button key={f} className={"chip" + (familia === f ? " on" : "")}
+                    onClick={() => setFamilia(f)}>
+                    {f}
+                  </button>
+                ))}
+              </div>
+
+              <label className="f" style={{ marginTop: 14 }}>Preço do artigo</label>
+              <input type="text" inputMode="decimal" value={precoArtigo} placeholder="Ex.: 1499,99"
+                onChange={(e) => setPrecoArtigo(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && planos.length) etiquetaDaTabela(); }} />
+
+              <label className="f" style={{ marginTop: 10 }}>Equipamento (opcional)</label>
+              <input type="text" value={nomeArtigo} placeholder="Ex.: APPLE IPHONE 16 128GB"
+                onChange={(e) => setNomeArtigo(e.target.value)} />
+
+              {familia && precoNum !== null && !planos.length && (
+                <div className="warn-box">
+                  {precoNum > tectoDaFamilia(familia)
+                    ? `Acima do maior escalão de ${familia} (${tectoDaFamilia(familia).toFixed(2).replace(".", ",")} €). Confirma no sistema.`
+                    : "Nenhum plano cobre este valor nesta família."}
+                </div>
+              )}
+
+              {planos.length > 0 && (
+                <>
+                  <div className="cat" style={{ marginTop: 12 }}>
+                    {planos.map((p, i) => (
+                      <div className="catrow" key={i}>
+                        <span className="cn">
+                          {p.nome}
+                          {p.addon ? <span className="addon"> +cloud {p.addon}</span> : null}
+                        </span>
+                        <span className="cp">{p.preco}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="hint">
+                    Escalão {planos[0].escalao.min.toFixed(2).replace(".", ",")} –{" "}
+                    {planos[0].escalao.max.toFixed(2).replace(".", ",")} €
+                    {planos.find((p) => p.franquia) ? ` · franquia ${planos.find((p) => p.franquia).franquia}` : ""}
+                  </p>
+                  <button className="btn btn-main" style={{ marginTop: 6 }} onClick={etiquetaDaTabela}>
+                    Criar etiqueta com estes {planos.length} planos
+                  </button>
+                </>
+              )}
+            </>
+          )}
 
           {/* --- 1a. texto colado --- */}
           {modo === "texto" && (

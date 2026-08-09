@@ -1885,10 +1885,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.25.3';
+const APP_VERSION = '3.26.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-08-09T00:35:00+01:00';
+const APP_BUILD_DATE = '2026-08-09T23:30:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1898,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.26.0', date: '2026-08-09', time: '23:30', summary: 'Etiquetas: tabela oficial de preços + performance das campanhas. (A) Nova aba "Tabela de preços", agora a primeira: escolhes a família (Telemóveis, Tablets, Smartwatches, Consolas, Equip. Eletrónicos, Bicicletas, Instrumentos, Videojogos, Extensões de Garantia) e escreves o preço do artigo — os escalões são aplicados sozinhos e saem todos os planos aplicáveis com preço, franquia e addon cloud. Os 291 escalões da "Atualização oferta Planos de Proteção" ficaram embebidos em app/lib/planosProtecao.js. NÃO depende de EAN nem dos dados de vendas, que era o motivo de a procura por EAN nunca encontrar nada. (B) PERFORMANCE com vários Excel: o memo `products` dependia de zoneIndex, que deriva de floors — por isso CADA atribuição de móvel reparseava todas as linhas de todos os ficheiros (String/trim/normalizeEAN/parseNum por célula, centenas de milhar de linhas). Separado em productsBase (parsing, só refaz quando as campanhas mudam) e products (só lookups em Map). O mapa EAN→família do topFamilies tinha o mesmo problema via `periods` e passou a memo próprio. Corrigido de caminho um bug latente: otherZoneIndex não estava nas dependências, pelo que as zonas de outros períodos ficavam desactualizadas. 132 testes.' },
   { version: '3.25.3', date: '2026-08-09', time: '00:35', summary: 'Etiquetas — o "Colar texto" passa a aceitar o formato real do ecrã Planos Proteção, em que o preço vem na LINHA SEGUINTE e colado à franquia ("Franquia 90€€ 41,99" = franquia 90 €, preço 41,99 €). Antes essas linhas eram descartadas por completo e os preços perdiam-se todos. O parser associa agora o preço à designação imediatamente acima, aceita o escalão colado ao texto ("1 ANO(1449,96-1999,95)") sem o confundir com um preço, e preserva sufixos como "+EXTRA CLOUD". Cada serviço guarda também o seu escalão, para o catálogo poder reutilizar estes preços. Infra: vitest 2.1.8 → 3.2.4 — a versão antiga era incompatível com o Node 25 e a suite bloqueava no arranque em vez de correr; node_modules movido para fora da sincronização do iCloud (pasta .nosync + symlink), que tornava cada leitura lentíssima. 78 testes a passar.' },
   { version: '3.25.2', date: '2026-08-06', time: '22:05', summary: 'FIX Etiquetas — escrever o EAN não fazia nada. O efeito que reagia ao código saía em silêncio (return) quando o artigo não estava nos dados de vendas em memória, o que sem esses dados carregados era sempre. Passou a haver uma função resolverEan que faz SEMPRE alguma coisa: artigo conhecido e família clara gera a etiqueta directa; família por confirmar mostra os botões; EAN desconhecido cria a etiqueta na mesma, com o código no campo do equipamento e os preços por preencher. Acrescentado debounce de 500 ms (a pistola escreve muito depressa, o teclado dígito a dígito) e resolução imediata ao Enter, que é como a pistola termina a leitura. A câmara passa a entregar o código ao mesmo caminho, em vez de ter lógica própria.' },
   { version: '3.25.1', date: '2026-08-06', time: '21:50', summary: 'FIX Etiquetas — o campo do EAN e o botão "Ler código de barras" não apareciam. Estavam dentro do bloco condicionado a catalogoApp.length > 0, ou seja, só surgiam quando já havia dados de vendas em memória — que é justamente o caso menos comum, e nunca na página autónoma /etiquetas. Passaram para fora da condição: a leitura por EAN (pistola, câmara ou à mão) está sempre disponível. Sem catálogo, a etiqueta sai na mesma com as designações da família e os preços por preencher, em vez de não sair nada; um aviso laranja explica-o. EAN desconhecido deixa de ser erro — cria a etiqueta com o código no equipamento. Os botões de família deixam de ficar vazios quando não há catálogo. O modo por defeito passa a ser Catálogo (era Colar texto).' },
@@ -7420,20 +7421,27 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
   // fallback para EAN→família via campaigns.rows. Resolve o caso de
   // todos os slots aparecerem como "Sem família" quando campaign.rows
   // ainda não está hidratado.
-  const topFamilies = useMemo(() => {
-    // Build EAN → family map (best-effort; só preenche se rows hidratados)
-    const eanFamily = new Map();
+  // v3.26.0 (perf): o mapa EAN→família custa O(todas as linhas de todos os
+  // Excel). Estava dentro do memo de topFamilies, que também depende de
+  // `periods` — logo era reconstruído a cada alteração de slot. Agora só
+  // refaz quando as campanhas mudam.
+  const eanFamily = useMemo(() => {
+    const mapa = new Map();
     campaigns.forEach(c => {
       if (!c.rows || c.rows.length === 0) return;
       const cols = detectColumns(c.headers || []);
       if (!cols.ean || !cols.family) return;
       c.rows.forEach(r => {
         const k = normalizeEAN(r[cols.ean]);
-        if (k && !eanFamily.has(k)) {
-          eanFamily.set(k, String(r[cols.family] || '').trim());
+        if (k && !mapa.has(k)) {
+          mapa.set(k, String(r[cols.family] || '').trim());
         }
       });
     });
+    return mapa;
+  }, [campaigns]);
+
+  const topFamilies = useMemo(() => {
     // Count families across all period slots
     const counts = new Map();
     let totalSlots = 0;
@@ -7457,7 +7465,7 @@ function Dashboard({ campaigns, stockRowsPO2, stockRowsPO3, defaultLayout, setVi
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
     return { list, total: totalSlots, unmatched, hasMatches: counts.size > 0 };
-  }, [campaigns, periods]);
+  }, [eanFamily, periods]);
 
   // ─── Cartazes pendentes: posters activos em períodos já terminados ──
   const pendingPosters = useMemo(() => {
@@ -15962,10 +15970,19 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
     [allPeriods, currentPeriodId]
   );
 
-  // Build products from ALL active campaigns. Deduplicate by EAN — keep first occurrence.
-  const products = useMemo(() => {
-    const seen = new Map(); // eanKey -> product
-    const orderedProducts = [];
+  // v3.26.0 (perf): o parsing das linhas está separado do enriquecimento.
+  //
+  // Antes era tudo um único useMemo que dependia de zoneIndex — e zoneIndex
+  // deriva de floors, que muda a CADA atribuição de móvel. Resultado: cada
+  // clique reparseava todas as linhas de todos os Excel carregados (48k linhas
+  // por ficheiro, várias centenas de milhar com vários ficheiros), com
+  // String(), trim(), normalizeEAN() e parseNum() por célula.
+  //
+  // Agora: productsBase (caro, O(linhas)) só refaz quando as campanhas mudam;
+  // products (barato, O(produtos), só lookups em Map) refaz nos cliques.
+  const productsBase = useMemo(() => {
+    const seen = new Set(); // eanKey já visto — dedupe entre campanhas
+    const out = [];
     campaigns.forEach(camp => {
       // Detect cols for this specific campaign (in case headers differ)
       const campCols = camp.id === primary.id ? cols : { ...detectColumns(camp.headers) };
@@ -15974,11 +15991,6 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
         const eanKey = normalizeEAN(eanRaw);
         // Dedupe: skip if already seen
         if (eanKey && seen.has(eanKey)) return;
-
-        const stockPO2 = eanKey ? (stockIndexPO2.index.get(eanKey) ?? 0) : 0;
-        const stockPO3 = eanKey ? (stockIndexPO3.index.get(eanKey) ?? 0) : 0;
-        const zones = eanKey ? (zoneIndex.get(eanKey) ?? []) : [];
-        const otherZones = eanKey ? (otherZoneIndex.get(eanKey) ?? []) : [];
 
         const basePriceVal = parseNum(campCols.basePrice ? r[campCols.basePrice] : 0);
         const campPriceVal = parseNum(campCols.campaignPrice ? r[campCols.campaignPrice] : 0);
@@ -16001,21 +16013,36 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
           discount,
           discountIsCalculated: explicitDiscount < 0.5 && calcDiscount > 0,
           isStar: campCols.star ? isStarValue(r[campCols.star]) : false,
-          stockPO2,
-          stockPO3,
-          stockTotal: stockPO2 + stockPO3,
-          zones,
-          otherZones,
-          assigned: zones.length > 0,
           sourceCampaignId: camp.id,
           sourceCampaignName: camp.name,
         };
-        if (eanKey) seen.set(eanKey, product);
-        orderedProducts.push(product);
+        if (eanKey) seen.add(eanKey);
+        out.push(product);
       });
     });
-    return orderedProducts;
-  }, [campaigns, primary, cols, stockIndexPO2, stockIndexPO3, zoneIndex]);
+    return out;
+  }, [campaigns, primary, cols]);
+
+  // Enriquecimento: stock e zonas. Só lookups em Map — corre a cada clique num
+  // móvel, mas sobre os produtos já parseados, não sobre as linhas em bruto.
+  const products = useMemo(() => {
+    return productsBase.map(p => {
+      const k = p.eanKey;
+      const stockPO2 = k ? (stockIndexPO2.index.get(k) ?? 0) : 0;
+      const stockPO3 = k ? (stockIndexPO3.index.get(k) ?? 0) : 0;
+      const zones = k ? (zoneIndex.get(k) ?? []) : [];
+      const otherZones = k ? (otherZoneIndex.get(k) ?? []) : [];
+      return {
+        ...p,
+        stockPO2,
+        stockPO3,
+        stockTotal: stockPO2 + stockPO3,
+        zones,
+        otherZones,
+        assigned: zones.length > 0,
+      };
+    });
+  }, [productsBase, stockIndexPO2, stockIndexPO3, zoneIndex, otherZoneIndex]);
 
   const [pageSize, setPageSize] = useState(100);
 
