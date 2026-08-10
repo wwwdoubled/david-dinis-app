@@ -469,7 +469,7 @@ function Etiqueta({ e, base, rodape, botao }) {
 /* ================================================================== */
 /*  App                                                                */
 /* ================================================================== */
-export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
+export default function EtiquetasSeguros({ rows = [], produtos = [], onLookupEan = null }) {
   const [etiquetas, setEtiquetas] = useState([novaEtiqueta()]);
   const [selId, setSelId] = useState(null);
   const [porFolha, setPorFolha] = useState(4);
@@ -838,15 +838,7 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
   const [eanTabela, setEanTabela] = useState("");
   const [avisoEan, setAvisoEan] = useState("");
 
-  const resolverEanTabela = useCallback((bruto) => {
-    const k = String(bruto || "").replace(/[^\d]/g, "").replace(/^0+/, "");
-    if (!k) return;
-    const art = indicePorEan.get(k);
-    bip(!!art);
-    if (!art) {
-      setAvisoEan(`EAN ${k} não está nas campanhas nem no stock carregados. Escreve o preço à mão.`);
-      return;
-    }
+  const aplicarArtigo = useCallback((art) => {
     const fam = familiaDaTabela(art.name, art.fam1);
     setNomeArtigo(art.name);
     if (art.preco > 0) setPrecoArtigo(String(art.preco).replace(".", ","));
@@ -860,7 +852,39 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
         : !fam ? `${art.name} — família não reconhecida. Escolhe-a em baixo.`
         : ""
     );
-  }, [indicePorEan]);
+  }, []);
+
+  /* Resolve o EAN em cascata por todas as fontes:
+     1. índice local (stock + campanhas de todos os períodos)
+     2. histórico de preços na cloud — tem o base_price, o PVP original
+     Só depois é que desiste e pede o preço à mão. */
+  const resolverEanTabela = useCallback(async (bruto) => {
+    const k = String(bruto || "").replace(/[^\d]/g, "").replace(/^0+/, "");
+    if (!k) return;
+
+    const local = indicePorEan.get(k);
+    if (local) { bip(true); aplicarArtigo(local); return; }
+
+    if (onLookupEan) {
+      setAvisoEan("A procurar no histórico de preços…");
+      try {
+        const h = await onLookupEan(k);
+        if (h && h.name) {
+          bip(true);
+          // base_price é o PVP original — é sobre esse que o prémio incide
+          aplicarArtigo({
+            ean: k, name: h.name, fam1: h.family || "",
+            preco: Number(h.basePrice) > 0 ? Number(h.basePrice) : 0,
+            origem: Number(h.basePrice) > 0 ? "original" : "promocao",
+          });
+          return;
+        }
+      } catch (err) { /* tabela pode não existir — segue para o aviso */ }
+    }
+
+    bip(false);
+    setAvisoEan(`EAN ${k} não aparece em nenhuma fonte carregada (stock, campanhas ou histórico de preços). Escreve o preço original à mão.`);
+  }, [indicePorEan, onLookupEan, aplicarArtigo]);
 
   useEffect(() => {
     const q = eanTabela.trim();

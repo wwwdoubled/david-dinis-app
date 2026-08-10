@@ -1886,10 +1886,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.28.0';
+const APP_VERSION = '3.29.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-08-10T19:15:00+01:00';
+const APP_BUILD_DATE = '2026-08-10T20:05:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1899,6 +1899,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.29.0', date: '2026-08-10', time: '20:05', summary: 'Etiquetas: cruzamento do EAN em cascata por todas as fontes, sempre sobre o PVP original. Procura-se primeiro no índice local (stock PO2/PO3 + produtos de todas as campanhas de todos os períodos) e, se não estiver lá, vai-se ao histórico de preços na cloud (price_history), que guarda o base_price — o PVP original, que é sobre o qual o prémio incide. Só depois de esgotar as fontes é que pede o preço à mão, e diz quais consultou. O selector de móveis passa a mostrar a DESCRIÇÃO do que já está em cada móvel, resolvida pelo índice EAN→produto, em vez do código de barras; antes o slot só guardava a referência e aparecia o EAN.' },
   { version: '3.28.0', date: '2026-08-10', time: '19:15', summary: 'Mínimo de referências por móvel + o que já lá está. (A) Cada móvel passa a ter um mínimo de referências, editável no próprio cabeçalho quando se editam zonas — guardado no período, sem migration; vazio repõe o defeito de 4. O cabeçalho mostra 3/5 com barra a vermelho (vazio), amarelo (abaixo do mínimo) ou verde (cumprido). (B) Nova barra de progresso no topo da Listagem, sempre à vista enquanto se atribuem produtos: quantos móveis estão completos, a meio e vazios, com barra tricolor e total de referências colocadas. (C) O selector de móveis (ao adicionar um produto) deixa de mostrar só a contagem — mostra as três primeiras referências que já lá estão, quantas faltam para o mínimo e o ponto de cor do estado. (D) FIX Etiquetas: o cruzamento por EAN não encontrava nada no stock porque lia r.ean/r.name, mas as linhas de stock são objectos com as chaves do próprio Excel (EAN, Descrição, PVP); passou a detectar as colunas pelo cabeçalho, como o buildStockIndex. Novos helpers testáveis estadoMovel() e resumoPreenchimento().' },
   { version: '3.27.1', date: '2026-08-10', time: '18:40', summary: 'FIX Etiquetas — o prémio do seguro passa a incidir sobre o VALOR ORIGINAL do artigo, não sobre o preço de promoção. O cruzamento por EAN estava a preferir o campaignPrice ao basePrice, exactamente ao contrário da regra: um telemóvel de 1.500 € em promoção a 1.200 € saía com o prémio do escalão 1.179,96-1.449,95 (307,99 €) quando devia sair no 1.449,96-1.999,95 (363,99 €) — 56 € a menos por apólice. Nova função precoParaSeguro() com a ordem de preferência explícita: PVP original da campanha → PVP do stock → preço promocional apenas em último recurso e SINALIZADO, com aviso no interface a pedir confirmação do valor original. O campo passou a chamar-se "Preço original do artigo".' },
   { version: '3.27.0', date: '2026-08-09', time: '23:45', summary: 'Etiquetas: seguros e extensões de garantia vão-se buscar sozinhos pelo EAN. Novo índice que cruza tudo o que a app já conhece — linhas de stock/vendas e produtos de TODAS as campanhas carregadas (EAN, descrição, família Fnac, preço base e de campanha). Lê-se o código de barras (pistola, câmara ou teclado) e ficam preenchidos de uma vez: preço do artigo, família da tabela de Planos de Proteção e grupo de extensão de garantia. Daí saem os seguros aplicáveis com o escalão certo E as extensões de garantia da tabela própria (EG 2+2 PAE, Multigarantia Imagem e Som, Informática Fixa/Portátil e versões Pro), tudo na mesma etiqueta. familiaDaTabela() e grupoEG() nunca adivinham: quando a descrição não é clara devolvem vazio e o interface pede para escolher, em vez de aplicar a tabela de preços errada em silêncio. EAN fora das campanhas e do stock deixa de ser beco sem saída — avisa e deixa escrever o preço à mão. 62 testes só nesta área.' },
@@ -6021,6 +6022,22 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
   // uma password nova via supabase.auth.updateUser({password}).
   const mustChangePassword = !!userProfile?.must_change_password;
 
+  // v3.29.0: último recurso do cruzamento por EAN nas Etiquetas — o histórico
+  // de preços guarda o base_price (PVP original), que é sobre o qual o prémio
+  // do seguro incide. Devolve o registo mais recente com preço original.
+  const etiquetasLookupEan = useCallback(async (eanNorm) => {
+    try {
+      const hist = await cloudFetchPriceHistoryForEan(eanNorm, currentStoreId);
+      if (!hist || !hist.length) return null;
+      const comBase = [...hist].reverse().find(h => Number(h.base_price) > 0) || hist[hist.length - 1];
+      return {
+        name: comBase.name || '',
+        family: '',
+        basePrice: Number(comBase.base_price) || 0,
+      };
+    } catch (e) { return null; }
+  }, [currentStoreId]);
+
   // v3.27.0: artigos das campanhas para o cruzamento EAN → seguros nas Etiquetas.
   // Um registo por EAN, com descrição, família e preço — o suficiente para a
   // tabela de Planos de Proteção escolher família e escalão sozinha.
@@ -6580,6 +6597,7 @@ function MainApp({ onLogout, user, theme, toggleTheme, setTheme }) {
           {view === 'etiquetas' && <EtiquetasSeguros
             rows={[...(stockRowsPO2 || []), ...(stockRowsPO3 || [])]}
             produtos={etiquetasProdutos}
+            onLookupEan={etiquetasLookupEan}
           />}
           {view === 'credentials' && <CredentialsView user={user} isAdmin={isAdmin} />}
           {view === 'novidades' && <NovidadesView user={user} userDepartment={userDepartment} currentStoreId={currentStoreId} />}
@@ -16109,6 +16127,14 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
     });
   }, [products, search, filterStar, filterAssign, filterStock, filterCampaign]);
 
+  // v3.29.0: EAN → produto, para o selector de móveis mostrar a descrição
+  // do que já lá está em vez do código de barras.
+  const productByEan = useMemo(() => {
+    const m = new Map();
+    for (const p of products) if (p.eanKey && !m.has(p.eanKey)) m.set(p.eanKey, p);
+    return m;
+  }, [products]);
+
   const families = useMemo(() => {
     const counts = new Map();
     for (const p of productsExcludingFamilyFilter) {
@@ -16493,6 +16519,7 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
         <AssignDialog
           product={assignFor}
           floors={floors}
+          productByEan={productByEan}
           onPick={(floorId, zoneId) => {
             onAddToZone(floorId, zoneId, assignFor);
             setAssignFor(null);
@@ -16914,7 +16941,7 @@ const ZonePicker = React.memo(function ZonePicker({ product, floors, primaryZone
 
 const ltdStyle = { padding: '7px 8px', fontSize: 12, verticalAlign: 'middle', whiteSpace: 'nowrap' };
 
-function AssignDialog({ product, floors, onPick, onClose }) {
+function AssignDialog({ product, floors, onPick, onClose, productByEan }) {
   return (
     <div onClick={onClose} style={{
       position: 'fixed', inset: 0, background: 'rgba(20,18,16,0.5)',
@@ -16962,8 +16989,13 @@ function AssignDialog({ product, floors, onPick, onClose }) {
                     {(() => {
                       const est = estadoMovel(z.slots.length, z.minRefs);
                       const cor = est.estado === 'ok' ? '#2E9E4F' : est.estado === 'abaixo' ? '#E8A317' : '#D14343';
-                      const nomes = (z.slots || []).slice(0, 3)
-                        .map(s => (s.description || s.ref || '').trim()).filter(Boolean);
+                      // v3.29.0: descrição real do produto, não o EAN. O slot só
+                      // guarda a referência; o nome vem do índice da campanha.
+                      const nomeDoSlot = (s) => {
+                        const p = productByEan?.get?.(normalizeEAN(s.ref));
+                        return (p?.description || s.description || s.ref || '').trim();
+                      };
+                      const nomes = (z.slots || []).slice(0, 3).map(nomeDoSlot).filter(Boolean);
                       return (
                         <>
                           <div className="mono" style={{ fontSize: 10, opacity: 0.75, marginTop: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
