@@ -67,6 +67,7 @@ import {
   _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
   _isWorkedCell, PT_NAME_ALIASES, _matchSchedCollab, apportionLargestRemainder,
   parsePermanenciasText, _planTokens, _zoneFixtureScore,
+  estadoMovel, resumoPreenchimento, MIN_REFS_DEFAULT,
 } from './lib/helpers';
 // v3.23.5: tema partilhado (T singleton mutável) — fundação p/ code-splitting
 import { THEMES, THEME_LABELS, THEME_ORDER, T, applyTheme } from './lib/theme';
@@ -1885,10 +1886,10 @@ function debounce(fn, ms = 600) {
 // App version metadata — bumped manually on each release
 // Shown in sidebar footer so users know which build is live
 // ─────────────────────────────────────────────────────────────────────────
-const APP_VERSION = '3.27.1';
+const APP_VERSION = '3.28.0';
 // v3.21.15: ISO 8601 com offset explícito (+01:00 verão / +00:00 inverno PT) →
 // formatado sempre em Europe/Lisbon independentemente do timezone do browser.
-const APP_BUILD_DATE = '2026-08-10T18:40:00+01:00';
+const APP_BUILD_DATE = '2026-08-10T19:15:00+01:00';
 
 // Families excluded from the entire app by default (Produtos Editoriais + Serviços).
 // Admins can re-enable them in the Config tab.
@@ -1898,6 +1899,7 @@ const DEFAULT_EXCLUDED_FAMILIES = [
 ];
 
 const APP_CHANGELOG = [
+  { version: '3.28.0', date: '2026-08-10', time: '19:15', summary: 'Mínimo de referências por móvel + o que já lá está. (A) Cada móvel passa a ter um mínimo de referências, editável no próprio cabeçalho quando se editam zonas — guardado no período, sem migration; vazio repõe o defeito de 4. O cabeçalho mostra 3/5 com barra a vermelho (vazio), amarelo (abaixo do mínimo) ou verde (cumprido). (B) Nova barra de progresso no topo da Listagem, sempre à vista enquanto se atribuem produtos: quantos móveis estão completos, a meio e vazios, com barra tricolor e total de referências colocadas. (C) O selector de móveis (ao adicionar um produto) deixa de mostrar só a contagem — mostra as três primeiras referências que já lá estão, quantas faltam para o mínimo e o ponto de cor do estado. (D) FIX Etiquetas: o cruzamento por EAN não encontrava nada no stock porque lia r.ean/r.name, mas as linhas de stock são objectos com as chaves do próprio Excel (EAN, Descrição, PVP); passou a detectar as colunas pelo cabeçalho, como o buildStockIndex. Novos helpers testáveis estadoMovel() e resumoPreenchimento().' },
   { version: '3.27.1', date: '2026-08-10', time: '18:40', summary: 'FIX Etiquetas — o prémio do seguro passa a incidir sobre o VALOR ORIGINAL do artigo, não sobre o preço de promoção. O cruzamento por EAN estava a preferir o campaignPrice ao basePrice, exactamente ao contrário da regra: um telemóvel de 1.500 € em promoção a 1.200 € saía com o prémio do escalão 1.179,96-1.449,95 (307,99 €) quando devia sair no 1.449,96-1.999,95 (363,99 €) — 56 € a menos por apólice. Nova função precoParaSeguro() com a ordem de preferência explícita: PVP original da campanha → PVP do stock → preço promocional apenas em último recurso e SINALIZADO, com aviso no interface a pedir confirmação do valor original. O campo passou a chamar-se "Preço original do artigo".' },
   { version: '3.27.0', date: '2026-08-09', time: '23:45', summary: 'Etiquetas: seguros e extensões de garantia vão-se buscar sozinhos pelo EAN. Novo índice que cruza tudo o que a app já conhece — linhas de stock/vendas e produtos de TODAS as campanhas carregadas (EAN, descrição, família Fnac, preço base e de campanha). Lê-se o código de barras (pistola, câmara ou teclado) e ficam preenchidos de uma vez: preço do artigo, família da tabela de Planos de Proteção e grupo de extensão de garantia. Daí saem os seguros aplicáveis com o escalão certo E as extensões de garantia da tabela própria (EG 2+2 PAE, Multigarantia Imagem e Som, Informática Fixa/Portátil e versões Pro), tudo na mesma etiqueta. familiaDaTabela() e grupoEG() nunca adivinham: quando a descrição não é clara devolvem vazio e o interface pede para escolher, em vez de aplicar a tabela de preços errada em silêncio. EAN fora das campanhas e do stock deixa de ser beco sem saída — avisa e deixa escrever o preço à mão. 62 testes só nesta área.' },
   { version: '3.26.0', date: '2026-08-09', time: '23:30', summary: 'Etiquetas: tabela oficial de preços + performance das campanhas. (A) Nova aba "Tabela de preços", agora a primeira: escolhes a família (Telemóveis, Tablets, Smartwatches, Consolas, Equip. Eletrónicos, Bicicletas, Instrumentos, Videojogos, Extensões de Garantia) e escreves o preço do artigo — os escalões são aplicados sozinhos e saem todos os planos aplicáveis com preço, franquia e addon cloud. Os 291 escalões da "Atualização oferta Planos de Proteção" ficaram embebidos em app/lib/planosProtecao.js. NÃO depende de EAN nem dos dados de vendas, que era o motivo de a procura por EAN nunca encontrar nada. (B) PERFORMANCE com vários Excel: o memo `products` dependia de zoneIndex, que deriva de floors — por isso CADA atribuição de móvel reparseava todas as linhas de todos os ficheiros (String/trim/normalizeEAN/parseNum por célula, centenas de milhar de linhas). Separado em productsBase (parsing, só refaz quando as campanhas mudam) e products (só lookups em Map). O mapa EAN→família do topFamilies tinha o mesmo problema via `periods` e passou a memo próprio. Corrigido de caminho um bug latente: otherZoneIndex não estava nas dependências, pelo que as zonas de outros períodos ficavam desactualizadas. 132 testes.' },
@@ -12270,6 +12272,15 @@ function CampaignsView({
   const renameZone = (floorId, zoneId, name) => {
     setFloors(fs => fs.map(f => f.id === floorId ? { ...f, zones: f.zones.map(z => z.id === zoneId ? { ...z, name } : z) } : f));
   };
+  // v3.28.0: mínimo de referências por móvel. Vive no JSON dos pisos do
+  // período, que já é persistido — sem migration. Vazio repõe o defeito.
+  const setZoneMinRefs = (floorId, zoneId, valor) => {
+    const n = parseInt(valor, 10);
+    const minRefs = Number.isFinite(n) && n > 0 ? n : undefined;
+    setFloors(fs => fs.map(f => f.id === floorId
+      ? { ...f, zones: f.zones.map(z => z.id === zoneId ? { ...z, minRefs } : z) }
+      : f));
+  };
   const deleteZone = (floorId, zoneId) => {
     if (!confirm('Eliminar esta zona e todos os seus produtos?')) return;
     setFloors(fs => fs.map(f => f.id === floorId ? { ...f, zones: f.zones.filter(z => z.id !== zoneId) } : f));
@@ -13149,6 +13160,7 @@ function CampaignsView({
               onUpdateSlot={(zid, sid, patch) => updateSlot(floor.id, zid, sid, patch)}
               onDeleteSlot={(zid, sid) => deleteSlot(floor.id, zid, sid)}
               onAutoFillZone={(zid) => openAutoFillWizard('zone', floor.id, zid)}
+              onSetMinRefs={(zid, v) => setZoneMinRefs(floor.id, zid, v)}
             />
           ))}
         </div>
@@ -16178,6 +16190,40 @@ function ProductListing({ campaigns, primaryCampaignId, floors, allPeriods = [],
   return (
     <div>
       <div className="no-print">
+      {/* v3.28.0: progresso do preenchimento dos móveis, sempre à vista
+          enquanto se atribuem produtos na listagem. */}
+      {(() => {
+        const r = resumoPreenchimento(floors);
+        if (!r.total) return null;
+        const seg = (n, cor, label) => n > 0 && (
+          <span style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, color: T.inkSoft }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: cor }} />
+            {n} {label}
+          </span>
+        );
+        return (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
+            padding: '10px 14px', marginBottom: 14,
+            background: T.bgEl, border: `1px solid ${T.line}`, borderRadius: 8,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+              <span className="mono" style={{ fontSize: 18, fontWeight: 600, color: T.ink }}>{r.ok}</span>
+              <span style={{ fontSize: 12, color: T.inkMute }}>de {r.total} móveis completos</span>
+            </div>
+            <div style={{ flex: '1 1 160px', minWidth: 120, height: 8, borderRadius: 4, background: T.lineSoft, overflow: 'hidden', display: 'flex' }}>
+              <span style={{ width: `${r.total ? (r.ok / r.total) * 100 : 0}%`, background: '#2E9E4F', transition: 'width .25s' }} />
+              <span style={{ width: `${r.total ? (r.abaixo / r.total) * 100 : 0}%`, background: '#E8A317', transition: 'width .25s' }} />
+              <span style={{ width: `${r.total ? (r.vazios / r.total) * 100 : 0}%`, background: '#D14343', transition: 'width .25s' }} />
+            </div>
+            {seg(r.ok, '#2E9E4F', 'completos')}
+            {seg(r.abaixo, '#E8A317', 'a meio')}
+            {seg(r.vazios, '#D14343', 'vazios')}
+            <span className="mono" style={{ fontSize: 11, color: T.inkMute }}>{r.refs} refs colocadas</span>
+          </div>
+        );
+      })()}
+
       {/* Column mapping panel — collapsible */}
       <ColumnMappingPanel
         headers={primary.headers}
@@ -16912,7 +16958,32 @@ function AssignDialog({ product, floors, onPick, onClose }) {
                     onMouseEnter={e => { e.currentTarget.style.background = f.color; e.currentTarget.style.color = '#fff'; e.currentTarget.style.borderColor = f.color; }}
                     onMouseLeave={e => { e.currentTarget.style.background = T.bgEl; e.currentTarget.style.color = T.ink; e.currentTarget.style.borderColor = T.line; }}>
                     {z.name}
-                    <div className="mono" style={{ fontSize: 10, opacity: 0.7, marginTop: 2 }}>{z.slots.length} produtos</div>
+                    {/* v3.28.0: mostra o que já está no móvel, não só a contagem */}
+                    {(() => {
+                      const est = estadoMovel(z.slots.length, z.minRefs);
+                      const cor = est.estado === 'ok' ? '#2E9E4F' : est.estado === 'abaixo' ? '#E8A317' : '#D14343';
+                      const nomes = (z.slots || []).slice(0, 3)
+                        .map(s => (s.description || s.ref || '').trim()).filter(Boolean);
+                      return (
+                        <>
+                          <div className="mono" style={{ fontSize: 10, opacity: 0.75, marginTop: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: cor, flex: '0 0 auto' }} />
+                            {z.slots.length}/{est.min} refs
+                            {est.faltam > 0 && <span style={{ opacity: 0.8 }}>· faltam {est.faltam}</span>}
+                          </div>
+                          {nomes.length > 0 && (
+                            <div style={{ fontSize: 10, opacity: 0.65, marginTop: 3, lineHeight: 1.35 }}>
+                              {nomes.map((n, i) => (
+                                <div key={i} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {n.length > 34 ? n.slice(0, 34) + '…' : n}
+                                </div>
+                              ))}
+                              {z.slots.length > 3 && <div style={{ opacity: 0.8 }}>+{z.slots.length - 3} …</div>}
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </button>
                 ))}
               </div>
@@ -17036,7 +17107,7 @@ function ColumnMappingPanel({ headers, autoCols, cols, overrides, onSetOverride,
 // ─────────────────────────────────────────────────────────────────────────
 // Floor Planner
 // ─────────────────────────────────────────────────────────────────────────
-function FloorPlanner({ floor, editZones, activeCampaign, candidates, productByEan, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+function FloorPlanner({ floor, editZones, activeCampaign, candidates, productByEan, stockRowsPO2, stockMapPO2, stockRowsPO3, stockMapPO3, onAddZone, onRenameZone, onDeleteZone, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone, onSetMinRefs }) {
   // Build stock indexes ONCE per FloorPlanner (not per slot row).
   // 7299 PO2 + 36425 PO3 entries — building per-row was killing performance. (v3.12.1)
   const { index: stockIdxPO2 } = useMemo(() => buildStockIndex(stockRowsPO2 || [], stockMapPO2 || {}), [stockRowsPO2, stockMapPO2]);
@@ -17118,6 +17189,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, productByE
             onUpdateSlot={(sid, patch) => onUpdateSlot(zone.id, sid, patch)}
             onDeleteSlot={sid => onDeleteSlot(zone.id, sid)}
             onAutoFillZone={onAutoFillZone}
+            onSetMinRefs={v => onSetMinRefs && onSetMinRefs(zone.id, v)}
           />
         ))}
       </div>
@@ -17128,7 +17200,7 @@ function FloorPlanner({ floor, editZones, activeCampaign, candidates, productByE
 // ─────────────────────────────────────────────────────────────────────────
 // Zone Block
 // ─────────────────────────────────────────────────────────────────────────
-const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, productByEan, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone }) {
+const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, activeCampaign, candidates, productSuggestions, productByEan, stockIdxPO2, stockIdxPO3, onRename, onDelete, onAddSlot, onUpdateSlot, onDeleteSlot, onAutoFillZone, onSetMinRefs }) {
   const [editName, setEditName] = useState(false);
   const [tempName, setTempName] = useState(zone.name);
 
@@ -17151,9 +17223,34 @@ const ZoneBlock = React.memo(function ZoneBlock({ zone, color, editZones, active
         ) : (
           <h3 style={{ margin: 0, fontSize: 13, fontWeight: 600, letterSpacing: '0.05em', flex: 1 }}>{zone.name.toUpperCase()}</h3>
         )}
-        <span className="mono" style={{ fontSize: 10, opacity: 0.8 }}>
-          {zone.slots.length} produtos
-        </span>
+        {/* v3.28.0: progresso face ao mínimo de referências do móvel */}
+        {(() => {
+          const est = estadoMovel(zone.slots.length, zone.minRefs);
+          const cor = est.estado === 'ok' ? '#2E9E4F' : est.estado === 'abaixo' ? '#E8A317' : '#D14343';
+          return (
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+              title={est.estado === 'ok' ? 'Mínimo cumprido' : `Faltam ${est.faltam} referências para o mínimo de ${est.min}`}>
+              <span style={{ width: 46, height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.28)', overflow: 'hidden' }}>
+                <span style={{ display: 'block', width: `${est.pct}%`, height: '100%', background: cor, transition: 'width .2s' }} />
+              </span>
+              <span className="mono" style={{ fontSize: 10, opacity: 0.9, whiteSpace: 'nowrap' }}>
+                {zone.slots.length}/{est.min}
+              </span>
+            </span>
+          );
+        })()}
+        {editZones && (
+          <input
+            type="number" min={1} title="Mínimo de referências deste móvel"
+            value={zone.minRefs ?? ''}
+            placeholder={String(MIN_REFS_DEFAULT)}
+            onChange={e => onSetMinRefs && onSetMinRefs(e.target.value)}
+            style={{
+              width: 46, background: 'rgba(255,255,255,0.2)', border: 'none', color: '#fff',
+              padding: '3px 6px', borderRadius: 3, outline: 'none', fontSize: 11,
+            }}
+          />
+        )}
         {onAutoFillZone && activeCampaign && (
           <button onClick={() => onAutoFillZone(zone.id)} title="Auto-preencher esta zona com base nas regras" style={{
             background: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.3)',

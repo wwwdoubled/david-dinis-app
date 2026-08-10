@@ -226,3 +226,52 @@ export function _zoneFixtureScore(zoneName, fixture) {
   const shared = ft.filter(t => t.length >= 3 && zt.includes(t));
   return shared.length;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Estado de preenchimento de um móvel (v3.28.0)
+//
+// Cada zona pode ter um mínimo de referências (zone.minRefs). O estado
+// resultante pinta o móvel na listagem: vermelho vazio, amarelo a caminho,
+// verde quando o mínimo está cumprido.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Mínimo por defeito quando o móvel ainda não tem um definido. */
+export const MIN_REFS_DEFAULT = 4;
+
+/**
+ * @param {number} nSlots  quantas referências já estão no móvel
+ * @param {number} [minRefs]  mínimo definido para o móvel
+ * @returns {{estado:'vazio'|'abaixo'|'ok', pct:number, faltam:number, min:number}}
+ */
+export function estadoMovel(nSlots, minRefs) {
+  const n = Math.max(0, Number(nSlots) || 0);
+  const minBruto = Number(minRefs);
+  const min = Number.isFinite(minBruto) && minBruto > 0 ? Math.floor(minBruto) : MIN_REFS_DEFAULT;
+
+  const pct = Math.min(100, Math.round((n / min) * 100));
+  const faltam = Math.max(0, min - n);
+
+  if (n === 0) return { estado: 'vazio', pct: 0, faltam: min, min };
+  if (n < min) return { estado: 'abaixo', pct, faltam, min };
+  return { estado: 'ok', pct: 100, faltam: 0, min };
+}
+
+/**
+ * Resumo de preenchimento de todos os móveis de uma lista de pisos.
+ * @returns {{total:number, ok:number, abaixo:number, vazios:number, pct:number, refs:number}}
+ */
+export function resumoPreenchimento(floors) {
+  let total = 0, ok = 0, abaixo = 0, vazios = 0, refs = 0;
+  for (const f of floors || []) {
+    for (const z of f?.zones || []) {
+      total++;
+      const n = (z.slots || []).length;
+      refs += n;
+      const { estado } = estadoMovel(n, z.minRefs);
+      if (estado === 'ok') ok++;
+      else if (estado === 'abaixo') abaixo++;
+      else vazios++;
+    }
+  }
+  return { total, ok, abaixo, vazios, refs, pct: total ? Math.round((ok / total) * 100) : 0 };
+}

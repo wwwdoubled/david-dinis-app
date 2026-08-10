@@ -4,6 +4,7 @@ import {
   _workingDaysInMonth, _daysRemainingInMonth, _hoursFromCarga, _acumulaLines,
   _isWorkedCell, _matchSchedCollab, apportionLargestRemainder,
   parsePermanenciasText, _zoneFixtureScore,
+  estadoMovel, resumoPreenchimento, MIN_REFS_DEFAULT,
 } from '../app/lib/helpers.js';
 import { parseNum } from '../app/lib/format.js';
 
@@ -203,5 +204,49 @@ describe('parsePermanenciasText (horário PDF colado)', () => {
     expect(parsePermanenciasText('lixo qualquer')).toBe(null);
     expect(parsePermanenciasText('')).toBe(null);
     expect(parsePermanenciasText(null)).toBe(null);
+  });
+});
+
+describe('estadoMovel', () => {
+  it('móvel vazio', () => {
+    expect(estadoMovel(0, 5)).toEqual({ estado: 'vazio', pct: 0, faltam: 5, min: 5 });
+  });
+  it('abaixo do mínimo', () => {
+    const r = estadoMovel(3, 5);
+    expect(r.estado).toBe('abaixo');
+    expect(r.faltam).toBe(2);
+    expect(r.pct).toBe(60);
+  });
+  it('mínimo atingido e acima', () => {
+    expect(estadoMovel(5, 5).estado).toBe('ok');
+    expect(estadoMovel(9, 5)).toEqual({ estado: 'ok', pct: 100, faltam: 0, min: 5 });
+  });
+  it('usa o mínimo por defeito quando não há um definido', () => {
+    expect(estadoMovel(0).min).toBe(MIN_REFS_DEFAULT);
+    expect(estadoMovel(0, 0).min).toBe(MIN_REFS_DEFAULT);
+    expect(estadoMovel(0, null).min).toBe(MIN_REFS_DEFAULT);
+  });
+  it('aguenta valores inválidos', () => {
+    expect(estadoMovel(-3, 5).estado).toBe('vazio');
+    expect(estadoMovel(null, 5).estado).toBe('vazio');
+  });
+});
+
+describe('resumoPreenchimento', () => {
+  const floors = [{
+    zones: [
+      { slots: [1, 2, 3, 4, 5], minRefs: 5 },   // ok
+      { slots: [1, 2], minRefs: 5 },             // abaixo
+      { slots: [], minRefs: 5 },                 // vazio
+    ],
+  }];
+  it('conta os móveis por estado', () => {
+    expect(resumoPreenchimento(floors)).toEqual({
+      total: 3, ok: 1, abaixo: 1, vazios: 1, refs: 7, pct: 33,
+    });
+  });
+  it('aguenta entradas vazias', () => {
+    expect(resumoPreenchimento([])).toEqual({ total: 0, ok: 0, abaixo: 0, vazios: 0, refs: 0, pct: 0 });
+    expect(resumoPreenchimento(null).total).toBe(0);
   });
 });

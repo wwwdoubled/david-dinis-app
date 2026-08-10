@@ -782,7 +782,32 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
       if (ja && (ja.origem === "original" || (ja.preco > 0 && origem !== "original"))) return;
       m.set(k, { ean: k, name: String(name).trim(), preco, origem, fam1: fam1 || "" });
     };
-    for (const r of rows || []) juntar(r?.ean, r?.name, { pvp: r?.pvp }, r?.fam1);
+    // As linhas de stock são objectos com as chaves do Excel ("EAN", "Descrição",
+    // "PVP"…), não {ean,name,pvp}. Detecta-se a coluna pelo cabeçalho, como faz
+    // o buildStockIndex — antes lia-se r.ean/r.name e não vinha nada.
+    const cols = (() => {
+      const primeira = (rows || []).find(Boolean);
+      if (!primeira) return null;
+      const hs = Object.keys(primeira);
+      const acha = (...res) => { for (const re of res) { const h = hs.find((x) => re.test(x)); if (h) return h; } return null; };
+      return {
+        ean: acha(/^\s*ean\s*$/i, /ean|barcode|c[oó]d.?barras/i),
+        nome: acha(/descri|designa|artigo|produto/i),
+        preco: acha(/pvp.*iva|^\s*pvp\s*$/i, /pre[çc]o|valor/i),
+        fam: acha(/fam[ií]lia\s*1|^fam1$/i, /fam[ií]lia/i),
+      };
+    })();
+
+    if (cols?.ean) {
+      for (const r of rows || []) {
+        if (!r) continue;
+        juntar(r[cols.ean], cols.nome ? r[cols.nome] : "",
+          { pvp: cols.preco ? parseFloat(String(r[cols.preco]).replace(",", ".")) : 0 },
+          cols.fam ? r[cols.fam] : "");
+      }
+    }
+    // linhas já normalizadas (análise de vendas), se vierem nesse formato
+    for (const r of rows || []) if (r?.ean && r?.name) juntar(r.ean, r.name, { pvp: r.pvp }, r.fam1);
     for (const p of produtos || []) {
       juntar(p?.ean, p?.description || p?.name,
         { basePrice: p?.basePrice, campaignPrice: p?.campaignPrice }, p?.family);
