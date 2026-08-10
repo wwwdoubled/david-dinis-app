@@ -660,3 +660,28 @@ export function extensoesParaArtigo(grupo, preco) {
     return false;
   });
 }
+
+/**
+ * Preço a usar para calcular o prémio do seguro.
+ *
+ * REGRA DE NEGÓCIO: o seguro incide sobre o valor ORIGINAL do artigo, não
+ * sobre o preço de promoção nem sobre uma baixa de preço. Um artigo de 1.500 €
+ * em promoção a 1.200 € continua a segurar-se pelo escalão dos 1.500 €.
+ *
+ * Ordem: PVP original da campanha → PVP do stock → (último recurso) preço
+ * promocional, sinalizado para o interface poder avisar.
+ *
+ * @param {{basePrice?:number, campaignPrice?:number, pvp?:number}} artigo
+ * @returns {{preco:number, origem:'original'|'stock'|'promocao'|''}}
+ */
+export function precoParaSeguro(artigo) {
+  const n = (v) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; };
+  const base = n(artigo?.basePrice);
+  const stock = n(artigo?.pvp);
+  const promo = n(artigo?.campaignPrice);
+
+  if (base) return { preco: base, origem: 'original' };
+  if (stock) return { preco: stock, origem: 'stock' };
+  if (promo) return { preco: promo, origem: 'promocao' };
+  return { preco: 0, origem: '' };
+}

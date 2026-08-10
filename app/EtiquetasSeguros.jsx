@@ -8,7 +8,7 @@ import {
 import { useBarcodeScanner, bip } from "./lib/useBarcodeScanner";
 import {
   FAMILIAS, planosParaArtigo, tectoDaFamilia,
-  familiaDaTabela, grupoEG, extensoesParaArtigo,
+  familiaDaTabela, grupoEG, extensoesParaArtigo, precoParaSeguro,
 } from "./lib/planosProtecao";
 
 /* ------------------------------------------------------------------ */
@@ -771,17 +771,22 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
      a tabela de preços decidir sozinha. */
   const indicePorEan = React.useMemo(() => {
     const m = new Map();
-    const juntar = (ean, name, pvp, fam1) => {
+    // O prémio incide sobre o VALOR ORIGINAL — nunca sobre o preço de campanha
+    // ou baixa de preço. precoParaSeguro() aplica essa ordem de preferência.
+    const juntar = (ean, name, precos, fam1) => {
       const k = String(ean || "").replace(/[^\d]/g, "").replace(/^0+/, "");
       if (!k || !name) return;
-      const p = Number(pvp);
+      const { preco, origem } = precoParaSeguro(precos);
       const ja = m.get(k);
-      // fica o registo com preço; entre dois com preço, o primeiro encontrado
-      if (ja && ja.pvp > 0) return;
-      m.set(k, { ean: k, name: String(name).trim(), pvp: Number.isFinite(p) && p > 0 ? p : 0, fam1: fam1 || "" });
+      // um registo com preço original ganha sempre a um que só tenha promoção
+      if (ja && (ja.origem === "original" || (ja.preco > 0 && origem !== "original"))) return;
+      m.set(k, { ean: k, name: String(name).trim(), preco, origem, fam1: fam1 || "" });
     };
-    for (const r of rows || []) juntar(r?.ean, r?.name, r?.pvp, r?.fam1);
-    for (const p of produtos || []) juntar(p?.ean, p?.description || p?.name, p?.campaignPrice || p?.basePrice, p?.family);
+    for (const r of rows || []) juntar(r?.ean, r?.name, { pvp: r?.pvp }, r?.fam1);
+    for (const p of produtos || []) {
+      juntar(p?.ean, p?.description || p?.name,
+        { basePrice: p?.basePrice, campaignPrice: p?.campaignPrice }, p?.family);
+    }
     return m;
   }, [rows, produtos]);
 
@@ -819,12 +824,14 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
     }
     const fam = familiaDaTabela(art.name, art.fam1);
     setNomeArtigo(art.name);
-    if (art.pvp > 0) setPrecoArtigo(String(art.pvp).replace(".", ","));
+    if (art.preco > 0) setPrecoArtigo(String(art.preco).replace(".", ","));
     if (fam) setFamilia(fam);
     setGrupoExt(grupoEG(art.name, art.fam1));
     setEanTabela("");
     setAvisoEan(
-      !art.pvp ? `${art.name} — encontrado, mas sem preço nos dados. Escreve-o à mão.`
+      !art.preco ? `${art.name} — encontrado, mas sem preço nos dados. Escreve-o à mão.`
+        : art.origem === "promocao"
+          ? `${art.name} — só encontrei o preço de campanha. O seguro calcula-se sobre o valor ORIGINAL: confirma-o e corrige se preciso.`
         : !fam ? `${art.name} — família não reconhecida. Escolhe-a em baixo.`
         : ""
     );
@@ -1065,10 +1072,14 @@ export default function EtiquetasSeguros({ rows = [], produtos = [] }) {
                 ))}
               </div>
 
-              <label className="f" style={{ marginTop: 14 }}>Preço do artigo</label>
+              <label className="f" style={{ marginTop: 14 }}>Preço original do artigo</label>
               <input type="text" inputMode="decimal" value={precoArtigo} placeholder="Ex.: 1499,99"
                 onChange={(e) => setPrecoArtigo(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && planos.length) etiquetaDaTabela(); }} />
+              <p className="hint">
+                Valor <b>antes</b> de promoção ou baixa de preço — é sobre esse que o prémio
+                é calculado.
+              </p>
 
               <label className="f" style={{ marginTop: 10 }}>Equipamento (opcional)</label>
               <input type="text" value={nomeArtigo} placeholder="Ex.: APPLE IPHONE 16 128GB"

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   PLANOS, FAMILIAS, planosParaArtigo, tectoDaFamilia,
-  familiaDaTabela, grupoEG, extensoesParaArtigo,
+  familiaDaTabela, grupoEG, extensoesParaArtigo, precoParaSeguro,
 } from '../app/lib/planosProtecao.js';
 
 describe('tabela de planos', () => {
@@ -140,5 +140,35 @@ describe('grupoEG e extensoesParaArtigo', () => {
 
   it('sem grupo não devolve nada', () => {
     expect(extensoesParaArtigo('', 500)).toEqual([]);
+  });
+});
+
+describe('precoParaSeguro — o prémio incide sobre o valor original', () => {
+  it('prefere o PVP original ao preço de campanha', () => {
+    expect(precoParaSeguro({ basePrice: 1500, campaignPrice: 1200 }))
+      .toEqual({ preco: 1500, origem: 'original' });
+  });
+
+  it('um artigo em promoção mantém o escalão do valor original', () => {
+    const { preco } = precoParaSeguro({ basePrice: 1500, campaignPrice: 1200 });
+    expect(planosParaArtigo('Telemóveis', preco).find((p) => p.premio === '2 Anos').preco)
+      .toBe('363,99 €');
+    // pelo preço promocional daria um escalão abaixo — o que estaria errado
+    expect(planosParaArtigo('Telemóveis', 1200).find((p) => p.premio === '2 Anos').preco)
+      .toBe('307,99 €');
+  });
+
+  it('cai para o stock quando não há PVP de campanha', () => {
+    expect(precoParaSeguro({ pvp: 899 })).toEqual({ preco: 899, origem: 'stock' });
+  });
+
+  it('usa o promocional só em último recurso, e sinaliza-o', () => {
+    expect(precoParaSeguro({ campaignPrice: 999 })).toEqual({ preco: 999, origem: 'promocao' });
+  });
+
+  it('ignora zeros e valores inválidos', () => {
+    expect(precoParaSeguro({ basePrice: 0, pvp: 500 })).toEqual({ preco: 500, origem: 'stock' });
+    expect(precoParaSeguro({})).toEqual({ preco: 0, origem: '' });
+    expect(precoParaSeguro(null)).toEqual({ preco: 0, origem: '' });
   });
 });
